@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	Free Apple IDs cannot carry extra entitlements, so this file is deliberately empty.
+	The ad-hoc signature still tells AltStore/SideStore "request nothing special".
+	-->
+</dict>
+</plist>

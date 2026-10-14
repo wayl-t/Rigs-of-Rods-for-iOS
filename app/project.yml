@@ -1,0 +1,70 @@
+name: RoRNative
+
+options:
+  deploymentTarget:
+    iOS: "16.0"
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: ""
+    SWIFT_VERSION: "5.0"
+    CODE_SIGN_STYLE: Automatic
+    GCC_C_LANGUAGE_STANDARD: c11
+    CLANG_CXX_LANGUAGE_STANDARD: c++20
+    CLANG_ENABLE_OBJC_ARC: YES
+    GCC_OPTIMIZATION_LEVEL: "2"
+    HEADER_SEARCH_PATHS:
+      - $(SRCROOT)/Source
+    SWIFT_OBJC_BRIDGING_HEADER: $(SRCROOT)/Source/RoRiOS-Bridging-Header.h
+
+targets:
+  RoRNative:
+    type: application
+    platform: iOS
+    sources:
+      - App
+      - Source
+    dependencies:
+      - sdk: UIKit.framework
+      - sdk: Metal.framework
+      - sdk: MetalKit.framework
+      - sdk: QuartzCore.framework
+      - sdk: GameController.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.ror.ios
+        PRODUCT_NAME: RoRNative
+        TARGETED_DEVICE_FAMILY: "1,2"
+        # The default. Switch to App/Full.entitlements if you have a paid account.
+        CODE_SIGN_ENTITLEMENTS: App/Free.entitlements
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Rigs of Rods
+        CFBundleDevelopmentRegion: en
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        # Rotate to landscape only: it is a driving game.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIRequiresFullScreen: true
+        UILaunchScreen: {}
+        # Lets the game run above 60 FPS on ProMotion iPhones.
+        CADisableMinimumFrameDurationOnPhone: true
+        # Makes the app's Documents folder visible in the Files app. This is how
+        # RoR's content/ (vehicles, terrains) gets in without bundling ~GB in the IPA.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        LSApplicationCategoryType: public.app-category.action-games
+        # iOS turns on Game Mode while playing: more CPU/GPU priority, lower input latency.
+        GCSupportsGameMode: true
+        GCSupportsControllerUserInteraction: true
+        GCSupportedGameControllers:
+          - ProfileName: ExtendedGamepad
+
+schemes:
+  RoRNative:
+    build:
+      targets:
+        RoRNative: all

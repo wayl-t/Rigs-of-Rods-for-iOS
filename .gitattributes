@@ -1,0 +1,13 @@
+# The CI runs on macOS. Windows checkouts must not inject CRLF into shell
+# scripts or the build breaks with "\r: command not found".
+* text=auto eol=lf
+
+*.sh          text eol=lf
+*.yml         text eol=lf
+*.yaml        text eol=lf
+*.plist       text eol=lf
+*.entitlements text eol=lf
+*.swift       text eol=lf
+
+*.png         binary
+*.ipa         binary

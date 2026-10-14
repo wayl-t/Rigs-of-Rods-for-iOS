@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	Only a paid Apple Developer account can get these. They roughly raise what
+	iOS lets the app use (about 3 GB -> about 4 GB on a 6 GB iPhone), which
+	matters for a soft-body simulator.
+	With a free account, the equivalent can be obtained through SideStore +
+	GetMoreRam (see README).
+	-->
+	<key>com.apple.developer.kernel.increased-memory-limit</key>
+	<true/>
+	<key>com.apple.developer.kernel.extended-virtual-addressing</key>
+	<true/>
+</dict>
+</plist>

@@ -1,0 +1,48 @@
+name: Build my IPA
+
+# Builds an unsigned .ipa on a free macOS runner. Public repositories get free
+# macOS Actions minutes, which is why this repository is meant to stay public
+# (Rigs of Rods is GPLv3 anyway, so there is nothing to hide).
+
+on:
+  workflow_dispatch:
+    inputs:
+      paid_account:
+        description: "I have a paid Apple developer account (ask for the extra-memory entitlements)"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: brew install xcodegen
+
+      - name: Build the IPA
+        run: ./build_ipa.sh ${{ inputs.paid_account && '--paid' || '' }}
+
+      - name: Upload the IPA as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RoRNative-ipa
+          path: RoRNative.ipa
+          retention-days: 7
+
+      - name: Publish the IPA as a release (easiest to download on a phone)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest-ipa --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
+          gh release create latest-ipa RoRNative.ipa \
+            --repo "${{ github.repository }}" \
+            --title "RoR iOS (built $(date -u +%Y-%m-%d))" \
+            --notes "Tap RoRNative.ipa on your phone and choose SideStore / AltStore."
