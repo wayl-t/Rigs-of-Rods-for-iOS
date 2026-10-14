@@ -1,0 +1,142 @@
+name: Probe iOS (the real wall)
+
+# Milestone 2. Milestone 1 showed that the all-green job was meaningless (every
+# step is continue-on-error) and that the iOS probe was broken by MY profile,
+# not by RoR: Conan resolved all 33 packages and then demanded `os.sdk`.
+#
+# So this run asks the two questions that actually decide the port:
+#
+#   ios-deps : with a correct iOS profile, which of RoR's dependencies can be
+#              built for iPhone and which refuse?
+#   ios-ogre : can OGRE 1.11.6.1 be built for iPhone at all? Everything else is
+#              replaceable; the renderer is not.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe]
+
+permissions:
+  contents: read
+
+env:
+  CONAN_REMOTE: https://nexus.anotherfoxguy.com/repository/rigs-of-rods/
+
+jobs:
+  ios-deps:
+    name: iOS dependencies with a CORRECT profile
+    runs-on: macos-15
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          brew install cmake ninja || true
+          (brew install conan || pipx install conan || python3 -m pip install --user --break-system-packages conan) || true
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          export PATH="$HOME/.local/bin:$PATH"
+          conan --version || echo "conan NOT installed"
+
+      - name: Get RoR source
+        run: git clone --depth 1 https://github.com/RigsOfRods/rigs-of-rods.git ror
+
+      - name: Show Conan's iOS settings (so we stop guessing)
+        run: |
+          mkdir -p logs
+          CONF=$(conan config home 2>/dev/null || echo "$HOME/.conan2")
+          echo "conan home: $CONF"
+          grep -n -A 25 '^    iOS:' "$CONF/settings.yml" | tee logs/0-ios-settings.log || true
+
+      - name: Configure Conan
+        working-directory: ror
+        run: |
+          conan profile detect --force
+          conan remote add rigs-of-rods-deps "$CONAN_REMOTE" -f || true
+          echo "iphoneos SDK: $(xcrun --sdk iphoneos --show-sdk-path)"
+
+      - name: Graph for iOS (no build - fast, proves the graph resolves)
+        working-directory: ror
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          conan graph info . \
+            -s:h os=iOS -s:h os.version=16.0 -s:h os.sdk=iphoneos -s:h arch=armv8 \
+            -c:h tools.apple:sdk_path="$SDK" \
+            2>&1 | tee ../logs/1-ios-graph.log
+        continue-on-error: true
+
+      - name: Build every dependency for iOS
+        working-directory: ror
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          conan install . \
+            -s:h os=iOS -s:h os.version=16.0 -s:h os.sdk=iphoneos -s:h arch=armv8 \
+            -c:h tools.apple:sdk_path="$SDK" \
+            --build=missing 2>&1 | tee ../logs/2-ios-install.log
+        continue-on-error: true
+
+      - name: Summary
+        if: always()
+        working-directory: ror
+        run: |
+          {
+            echo "## iOS dependencies"
+            echo
+            echo "### Built successfully"
+            echo '```'
+            grep -oE '^[a-z0-9_.-]+/[0-9][^:]*: (Package \x27[^\x27]+\x27 created|Build succeeded)' ../logs/2-ios-install.log | sort -u | head -60 || echo "(none)"
+            echo '```'
+            echo "### Errors / refusals"
+            echo '```'
+            grep -iE 'ERROR|error:|not supported|Unsupported|does not support|Invalid setting|Invalid: ' ../logs/2-ios-install.log | sort -u | head -60 || echo "(none)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-deps-logs
+          path: logs/
+          retention-days: 30
+          if-no-files-found: warn
+
+  ios-ogre:
+    name: Can OGRE 1.11 be built for iPhone?
+    runs-on: macos-15
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          brew install cmake ninja || true
+          (brew install conan || pipx install conan || python3 -m pip install --user --break-system-packages conan) || true
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          export PATH="$HOME/.local/bin:$PATH"
+          conan --version || echo "conan NOT installed"
+
+      - name: Configure Conan
+        run: |
+          mkdir -p logs
+          conan profile detect --force
+          conan remote add rigs-of-rods-deps "$CONAN_REMOTE" -f || true
+
+      - name: Build OGRE — and only OGRE — for iOS
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          conan install \
+            --requires=ogre3d/1.11.6.1@anotherfoxguy/stable \
+            -s:h os=iOS -s:h os.version=16.0 -s:h os.sdk=iphoneos -s:h arch=armv8 \
+            -c:h tools.apple:sdk_path="$SDK" \
+            --build=missing 2>&1 | tee logs/3-ios-ogre.log
+        continue-on-error: true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ogre-logs
+          path: logs/
+          retention-days: 30
+          if-no-files-found: warn
