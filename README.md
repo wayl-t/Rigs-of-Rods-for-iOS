@@ -64,8 +64,21 @@ gh repo create ror-ios --public --source=. --push
 
 ### 2. Собрать
 
-Actions → **Build my IPA** → *Run workflow*. Через ~10 минут в **Releases** появится
-`RoRNative.ipa`.
+Actions → **Build my IPA** → *Run workflow*. Сборка занимает ~30 секунд, IPA оказывается
+в **Releases** (`latest-ipa`) и в artifacts запуска.
+
+### 2a. Если Releases не скачивается
+
+Проверено: домен `release-assets.githubusercontent.com` может быть **недоступен**
+(виснет на TLS handshake), тогда как artifacts качаются нормально. Если так — качай
+IPA не из Releases, а с ПК:
+
+```sh
+gh run download --repo wayl-t/ror-ios --dir art
+```
+
+и переноси файл на iPhone кабелем или через Файлы. Телефон, скорее всего, упрётся в
+ту же сетевую проблему, что и ПК.
 
 ### 3. Установить
 
@@ -96,7 +109,7 @@ iOS выдаёт приложению примерно половину RAM. Д�
 
 ## Дорожная карта
 
-- [x] **Веха 0** — конвейер: Actions → IPA → sideload
+- [x] **Веха 0** — конвейер: Actions → IPA → sideload *(проверено: arm64-бинарник с нативным ядром, ~30 с на сборку)*
 - [ ] **Веха 1** — RoR собирается под macOS-десктоп (проверка, что код жив на Apple)
 - [ ] **Веха 2** — `physics/` + парсеры `.truck`/`.terrain` вынесены в `rorcore` без OGRE
 - [ ] **Веха 3** — запуск и картинка на iPhone (главный нерешённый вопрос: OGRE)
