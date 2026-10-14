@@ -49,9 +49,9 @@ jobs:
         run: |
           # Force C++14 for deps (unblocks OIS), keep RoR's own flags
           conan profile show -pr:h default
-          cmake . -GNinja -DCMAKE_BUILD_TYPE=Release -Bbuild \
+          conan profile update settings.compiler.cppstd=gnu14 default 2>/dev/null || true; cmake . -GNinja -DCMAKE_BUILD_TYPE=Release -Bbuild \
             -DCMAKE_PROJECT_TOP_LEVEL_INCLUDES=cmake/conan_provider.cmake \
-            -DCREATE_CONTENT_FOLDER=OFF 2>&1 | tee ../logs/1-configure.log
+            -DCREATE_CONTENT_FOLDER=OFF -DCONAN_DISABLE_STRICT_MODE=1 2>&1 | tee ../logs/1-configure.log
         continue-on-error: true
 
       - name: Build with ninja -k 0 (collect ALL errors)
@@ -90,4 +90,5 @@ jobs:
           path: logs/
           retention-days: 30
           if-no-files-found: warn
+
 
