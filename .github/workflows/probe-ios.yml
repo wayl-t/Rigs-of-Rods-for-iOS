@@ -72,6 +72,8 @@ jobs:
           conan install . \
             -s:h os=iOS -s:h os.version=16.0 -s:h os.sdk=iphoneos -s:h arch=armv8 \
             -c:h tools.apple:sdk_path="$SDK" \
+            -c:h zlib/*:tools.build:cflags+=["-Wno-macro-redefined","-Dfdopen=fdopen"] \
+            -c:h zlib/*:tools.build:cxxflags+=["-Wno-macro-redefined","-Dfdopen=fdopen"] \
             --build=missing 2>&1 | tee ../logs/2-ios-install.log
         continue-on-error: true
 
@@ -129,6 +131,8 @@ jobs:
             --requires=ogre3d/1.11.6.1@anotherfoxguy/stable \
             -s:h os=iOS -s:h os.version=16.0 -s:h os.sdk=iphoneos -s:h arch=armv8 \
             -c:h tools.apple:sdk_path="$SDK" \
+            -c:h zlib/*:tools.build:cflags+=["-Wno-macro-redefined","-Dfdopen=fdopen"] \
+            -c:h zlib/*:tools.build:cxxflags+=["-Wno-macro-redefined","-Dfdopen=fdopen"] \
             --build=missing 2>&1 | tee logs/3-ios-ogre.log
         continue-on-error: true
 
