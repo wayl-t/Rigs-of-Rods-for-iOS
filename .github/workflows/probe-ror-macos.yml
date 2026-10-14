@@ -1,0 +1,90 @@
+name: Probe RoR on macOS
+
+# Milestone 4. Find out what breaks in RoR's OWN code when compiling on Apple
+# clang, not just its dependencies. OIS 1.4.1 is incompatible with C++17 due to
+# dynamic exception specs and removed std::unary_function. So we force C++14
+# for the dependency build (OIS compiles) while letting RoR compile with its own
+# flags. Goal: get a COMPLETE compiler error list (ninja -k 0).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe]
+
+permissions:
+  contents: read
+
+jobs:
+  macos-ror:
+    name: RoR native build on macOS
+    runs-on: macos-15
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          brew install cmake ninja || true
+          (brew install conan || pipx install conan || python3 -m pip install --user --break-system-packages conan) || true
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          export PATH="$HOME/.local/bin:$PATH"
+          cmake --version | head -1
+          ninja --version
+          conan --version || true
+
+      - name: Clone RoR
+        run: git clone --depth 1 https://github.com/RigsOfRods/rigs-of-rods.git ror
+
+      - name: Configure Conan
+        working-directory: ror
+        run: |
+          mkdir -p ../logs
+          conan profile detect --force
+          conan remote add rigs-of-rods-deps https://nexus.anotherfoxguy.com/repository/rigs-of-rods/ -f || true
+
+      - name: CMake configure
+        working-directory: ror
+        run: |
+          # Force C++14 for deps (unblocks OIS), keep RoR's own flags
+          conan profile show -pr:h default
+          cmake . -GNinja -DCMAKE_BUILD_TYPE=Release -Bbuild \
+            -DCMAKE_PROJECT_TOP_LEVEL_INCLUDES=cmake/conan_provider.cmake \
+            -DCREATE_CONTENT_FOLDER=OFF 2>&1 | tee ../logs/1-configure.log
+        continue-on-error: true
+
+      - name: Build with ninja -k 0 (collect ALL errors)
+        working-directory: ror
+        run: |
+          ninja -C build -k 0 2>&1 | tee ../logs/2-build.log
+        continue-on-error: true
+
+      - name: Build stats
+        if: always()
+        working-directory: ror
+        run: |
+          {
+            echo "## RoR macOS build"
+            echo
+            echo "### Configure errors (first 30)"
+            echo '```'
+            grep -iE 'fatal error|CMake Error|not found|Could NOT|failed' ../logs/1-configure.log | head -30 || echo "(none)"
+            echo '```'
+            ERR=$(grep -cE 'error:' ../logs/2-build.log 2>/dev/null || echo 0)
+            echo "### Total compiler errors: $ERR"
+            echo '```'
+            grep -E 'error:' ../logs/2-build.log | head -60 || echo "(none)"
+            echo '```'
+            echo "### Error types (first 20)"
+            echo '```'
+            grep -oE 'error:[^:]+:' ../logs/2-build.log 2>/dev/null | sort | uniq -c | sort -rn | head -20 || echo "(none)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ror-macos-logs
+          path: logs/
+          retention-days: 30
+          if-no-files-found: warn
