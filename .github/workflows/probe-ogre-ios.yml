@@ -1,2 +1,94 @@
-name: Probe OGRE iOS build
+﻿name: Probe OGRE iOS build
 
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe]
+
+permissions:
+  contents: read
+
+jobs:
+  ogre-ios:
+    name: Build OGRE 1.11.6 for iPhone
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain info
+        run: |
+          sw_vers
+          xcodebuild -version
+          cmake --version | head -1
+          echo "iphoneos SDK: $(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun --sdk iphoneos --show-sdk-version
+      - name: Get OGRE 1.11.6
+        run: git clone --depth 1 --branch v1.11.6 https://github.com/OGRECave/ogre.git ogre
+      - name: Route 1 - OGRE's own iOS toolchain
+        working-directory: ogre
+        run: |
+          mkdir -p ../logs
+          cmake -S . -B build-tc -G Xcode -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/CMake/toolchain/ios.toolchain.xcode.cmake" \
+            -DIOS_PLATFORM=OS -DOGRE_BUILD_PLATFORM_APPLE_IOS=TRUE \
+            -DOGRE_BUILD_DEPENDENCIES=TRUE -DOGRE_BUILD_SAMPLES=FALSE \
+            -DOGRE_BUILD_TESTS=FALSE -DOGRE_BUILD_TOOLS=FALSE \
+            -DOGRE_BUILD_COMPONENT_PYTHON=FALSE -DOGRE_BUILD_COMPONENT_JAVA=FALSE \
+            -DOGRE_BUILD_COMPONENT_CSHARP=FALSE -DOGRE_BUILD_COMPONENT_VOLUME=FALSE \
+            -DOGRE_BUILD_PLUGIN_BSP=FALSE -DOGRE_BUILD_PLUGIN_CG=FALSE \
+            -DOGRE_BUILD_PLUGIN_PCZ=FALSE -DOGRE_BUILD_PLUGIN_OCTREE=FALSE \
+            -DOGRE_BUILD_PLUGIN_DOT_SCENE=FALSE -DOGRE_BUILD_RENDERSYSTEM_GL=FALSE \
+            -DOGRE_BUILD_RENDERSYSTEM_GL3PLUS=FALSE -DOGRE_BUILD_RENDERSYSTEM_GLES2=TRUE \
+            -DOGRE_STATIC=TRUE 2>&1 | tee ../logs/r1-configure.log
+        continue-on-error: true
+      - name: Route 1 - build targets
+        working-directory: ogre
+        run: |
+          if [ -d build-tc/OGRE.xcodeproj ]; then
+            for T in OgreMain RenderSystem_GLES2 OgreOverlay; do
+              echo "########## $T ##########"
+              xcodebuild -project build-tc/OGRE.xcodeproj -target $T -configuration Release \
+                -sdk iphoneos CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" 2>&1 | tee ../logs/r1-build-$T.log | grep -E "error:|BUILD (SUCCEEDED|FAILED)" | tail -15 || true
+            done
+          fi
+        continue-on-error: true
+      - name: Route 2 - modern CMake iOS support
+        working-directory: ogre
+        run: |
+          cmake -S . -B build-modern -G Xcode -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
+            -DAPPLE_IOS=TRUE -DOGRE_BUILD_PLATFORM_APPLE_IOS=TRUE \
+            -DOGRE_BUILD_DEPENDENCIES=TRUE -DOGRE_BUILD_SAMPLES=FALSE \
+            -DOGRE_BUILD_TESTS=FALSE -DOGRE_BUILD_TOOLS=FALSE \
+            -DOGRE_BUILD_COMPONENT_PYTHON=FALSE -DOGRE_BUILD_COMPONENT_JAVA=FALSE \
+            -DOGRE_BUILD_COMPONENT_CSHARP=FALSE -DOGRE_BUILD_COMPONENT_VOLUME=FALSE \
+            -DOGRE_BUILD_PLUGIN_BSP=FALSE -DOGRE_BUILD_PLUGIN_CG=FALSE \
+            -DOGRE_BUILD_PLUGIN_PCZ=FALSE -DOGRE_BUILD_PLUGIN_OCTREE=FALSE \
+            -DOGRE_BUILD_PLUGIN_DOT_SCENE=FALSE -DOGRE_BUILD_RENDERSYSTEM_GL=FALSE \
+            -DOGRE_BUILD_RENDERSYSTEM_GL3PLUS=FALSE -DOGRE_BUILD_RENDERSYSTEM_GLES2=TRUE \
+            -DOGRE_STATIC=TRUE 2>&1 | tee ../logs/r2-configure.log
+        continue-on-error: true
+      - name: Route 2 - build targets
+        working-directory: ogre
+        run: |
+          if [ -d build-modern/OGRE.xcodeproj ]; then
+            for T in OgreMain RenderSystem_GLES2 OgreOverlay; do
+              echo "########## $T ##########"
+              xcodebuild -project build-modern/OGRE.xcodeproj -target $T -configuration Release \
+                -sdk iphoneos CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" 2>&1 | tee ../logs/r2-build-$T.log | grep -E "error:|BUILD (SUCCEEDED|FAILED)" | tail -15 || true
+            done
+          fi
+        continue-on-error: true
+      - name: Summary
+        if: always()
+        run: |
+          echo "## OGRE iOS" >> $GITHUB_STEP_SUMMARY
+          echo "See artifacts for logs" >> $GITHUB_STEP_SUMMARY
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ogre-ios-logs
+          path: logs/
+          retention-days: 14
+          if-no-files-found: warn
