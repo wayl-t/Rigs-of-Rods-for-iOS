@@ -1,0 +1,165 @@
+name: Probe build (how far does RoR get on Apple?)
+
+# Milestone 1. Nothing is shipped here: every step is allowed to fail and the
+# LOGS are the product. We are asking two separate questions on two separate
+# runners, so that neither can hide the other's answer:
+#
+#   macos-native : does RoR build on macOS at all? If Apple clang accepts the
+#                  code, the port stops being a rewrite and becomes a backend
+#                  swap plus platform glue.
+#   ios-deps     : can RoR's 13 Conan dependencies be built for iOS? This is
+#                  the real wall, and it has to be measured, not guessed.
+#
+# The build uses `ninja -k 0` on purpose: it does NOT stop at the first error,
+# so a single run yields the complete list of failures instead of the first one.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe]
+
+permissions:
+  contents: read
+
+jobs:
+  macos-native:
+    name: macOS native (does it compile at all?)
+    runs-on: macos-15
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          brew install cmake ninja || true
+          (brew install conan || pipx install conan || python3 -m pip install --user --break-system-packages conan) || true
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          export PATH="$HOME/.local/bin:$PATH"
+          cmake --version | head -1
+          ninja --version
+          conan --version || echo "conan NOT installed"
+
+      - name: Get RoR source
+        run: git clone --depth 1 https://github.com/RigsOfRods/rigs-of-rods.git ror
+
+      - name: Configure Conan
+        working-directory: ror
+        run: |
+          mkdir -p ../logs
+          conan profile detect --force
+          conan remote add rigs-of-rods-deps https://nexus.anotherfoxguy.com/repository/rigs-of-rods/ -f || true
+          conan profile show -pr:h default
+
+      - name: CMake configure (pulls and builds every Conan dependency)
+        working-directory: ror
+        run: |
+          cmake . -GNinja -DCMAKE_BUILD_TYPE=Release -Bbuild \
+            -DCMAKE_PROJECT_TOP_LEVEL_INCLUDES=cmake/conan_provider.cmake \
+            -DCREATE_CONTENT_FOLDER=OFF 2>&1 | tee ../logs/1-configure.log
+        continue-on-error: true
+
+      - name: Build with "ninja -k 0" (collects EVERY compiler error)
+        working-directory: ror
+        run: |
+          ninja -C build -k 0 2>&1 | tee ../logs/2-build.log
+        continue-on-error: true
+
+      - name: Summary
+        if: always()
+        working-directory: ror
+        run: |
+          {
+            echo "## macOS native probe"
+            echo
+            echo "### CMake configure"
+            echo '```'
+            grep -iE 'fatal error|CMake Error|not found|Could NOT|failed' ../logs/1-configure.log | head -50 || echo "(nothing matched)"
+            echo '```'
+            echo "### Compiler errors"
+            echo '```'
+            grep -cE 'error:' ../logs/2-build.log 2>/dev/null || echo 0
+            echo "total error: lines"
+            grep -E 'error:' ../logs/2-build.log | head -40 || echo "(nothing matched)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-native-logs
+          path: logs/
+          retention-days: 30
+          if-no-files-found: warn
+
+  ios-deps:
+    name: iOS dependencies (the Conan wall)
+    runs-on: macos-15
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          brew install cmake ninja || true
+          (brew install conan || pipx install conan || python3 -m pip install --user --break-system-packages conan) || true
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          export PATH="$HOME/.local/bin:$PATH"
+          conan --version || echo "conan NOT installed"
+
+      - name: Get RoR source
+        run: git clone --depth 1 https://github.com/RigsOfRods/rigs-of-rods.git ror
+
+      - name: Configure Conan
+        working-directory: ror
+        run: |
+          mkdir -p ../logs
+          conan profile detect --force
+          conan remote add rigs-of-rods-deps https://nexus.anotherfoxguy.com/repository/rigs-of-rods/ -f || true
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "iphoneos SDK: $SDK"
+
+      - name: Can the dependency graph even resolve for iOS?
+        working-directory: ror
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          conan graph info . \
+            -s:h os=iOS -s:h os.version=16.0 -s:h arch=armv8 \
+            -c:h tools.apple:sdk_path="$SDK" 2>&1 | tee ../logs/3-ios-graph.log
+        continue-on-error: true
+
+      - name: Try to build every dependency for iOS
+        working-directory: ror
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          conan install . \
+            -s:h os=iOS -s:h os.version=16.0 -s:h arch=armv8 \
+            -c:h tools.apple:sdk_path="$SDK" \
+            --build=missing 2>&1 | tee ../logs/4-ios-install.log
+        continue-on-error: true
+
+      - name: Summary
+        if: always()
+        working-directory: ror
+        run: |
+          {
+            echo "## iOS dependency probe"
+            echo
+            echo "### Which packages refused to build for iOS"
+            echo '```'
+            grep -iE 'ERROR|error:|not supported|Unsupported|does not support|Invalid setting|unknown' ../logs/4-ios-install.log | head -50 || echo "(nothing matched)"
+            echo '```'
+            echo "### Which packages built fine"
+            echo '```'
+            grep -oE 'Building package \([^)]+\)' ../logs/4-ios-install.log | sort -u | head -60 || echo "(none)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-deps-logs
+          path: logs/
+          retention-days: 30
+          if-no-files-found: warn
