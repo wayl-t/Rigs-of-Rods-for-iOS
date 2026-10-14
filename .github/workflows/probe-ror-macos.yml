@@ -1,4 +1,4 @@
-name: Probe RoR on macOS
+﻿name: Probe RoR on macOS
 
 # Milestone 4. Find out what breaks in RoR's OWN code when compiling on Apple
 # clang, not just its dependencies. OIS 1.4.1 is incompatible with C++17 due to
@@ -40,6 +40,8 @@ jobs:
         run: |
           mkdir -p ../logs
           conan profile detect --force
+          conan profile update settings.compiler.cppstd=gnu14 default 2>/dev/null || true
+          conan profile show -pr:h default
           conan remote add rigs-of-rods-deps https://nexus.anotherfoxguy.com/repository/rigs-of-rods/ -f || true
 
       - name: CMake configure
@@ -88,3 +90,4 @@ jobs:
           path: logs/
           retention-days: 30
           if-no-files-found: warn
+
