@@ -1,0 +1,185 @@
+name: Build iOS dependency SDK
+
+# Milestone 7.
+#
+# probe-ogre-ios.yml proved OGRE 1.11.6 configures and builds OgreMain +
+# RenderSystem_GLES2 for iphoneos/arm64 via plain modern CMake
+# (-DCMAKE_SYSTEM_NAME=iOS ...). It also proved what is MISSING: with no
+# FreeType, OGRE silently drops the Overlay and Bites components, and RoR
+# cannot compile without them:
+#
+#   source/main/pch.h:34  #include <Bites/OgreWindowEventUtilities.h>
+#   source/main/pch.h:35  #include <Overlay/OgreFontManager.h>
+#
+# OGRE's own -DOGRE_BUILD_DEPENDENCIES=TRUE cannot help: its ExternalProject
+# build of freetype dies on `cmake_minimum_required` (< 3.5) because the
+# nested configure does not inherit our -DCMAKE_POLICY_VERSION_MINIMUM=3.5,
+# and zziplib fails outright ("** BUILD FAILED **" in zzipfseeko.pc).
+#
+# So this workflow cross-compiles the base of the iOS dependency SDK:
+#
+#   FreeType  (enables OGRE Overlay + Bites, and MyGUI's font loading)
+#   OGRE      (OgreMain + Bites + Overlay + Paging + RTShaderSystem
+#              + MeshLodGenerator + Terrain + Octree/PFX plugins
+#              + GLES2 render system, static)
+#
+# Both are installed into one prefix which is uploaded as an artifact so the
+# next milestone (MyGUI, OIS, then RoR itself) can consume it unchanged.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe]
+
+permissions:
+  contents: read
+
+env:
+  IOS_DEPLOYMENT_TARGET: "16.0"
+
+jobs:
+  ogre-ios-sdk:
+    name: FreeType + OGRE for iphoneos/arm64
+    runs-on: macos-15
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Shared cmake flags
+        run: |
+          mkdir -p logs
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          echo "IOS_SYSROOT=$SDK"                    >> $GITHUB_ENV
+          echo "IOS_PREFIX=$GITHUB_WORKSPACE/ios-sdk" >> $GITHUB_ENV
+          echo "sdk=$SDK"
+
+      # ---------------------------------------------------------------- #
+      # FreeType                                                          #
+      # ---------------------------------------------------------------- #
+      - name: Get FreeType
+        run: |
+          # GitHub mirror of freetype; tag VER-2-13-3 is the current stable.
+          git clone --depth 1 --branch VER-2-13-3 \
+            https://github.com/freetype/freetype.git freetype
+
+      - name: Configure FreeType (iOS, static)
+        run: |
+          cmake -S freetype -B freetype/build -G Xcode \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET \
+            -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT" \
+            -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX" \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY="" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DFT_DISABLE_HARFBUZZ=TRUE \
+            -DFT_DISABLE_BZIP2=TRUE \
+            -DFT_DISABLE_PNG=TRUE \
+            -DFT_DISABLE_BROTLI=TRUE \
+            -DFT_DISABLE_ZLIB=TRUE \
+            2>&1 | tee logs/ft-configure.log
+
+      - name: Build + install FreeType
+        run: |
+          cmake --build freetype/build --config Release --target install \
+            2>&1 | tee logs/ft-build.log
+          echo "----- installed -----"
+          find "$IOS_PREFIX" -type f | sort
+
+      # ---------------------------------------------------------------- #
+      # OGRE 1.11.6                                                       #
+      # ---------------------------------------------------------------- #
+      - name: Get OGRE 1.11.6
+        run: git clone --depth 1 --branch v1.11.6 https://github.com/OGRECave/ogre.git ogre
+
+      - name: Configure OGRE (iOS, static, full component set)
+        run: |
+          cmake -S ogre -B ogre/build -G Xcode \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET \
+            -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT" \
+            -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX" \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO \
+            -DAPPLE_IOS=TRUE -DOGRE_BUILD_PLATFORM_APPLE_IOS=TRUE \
+            -DOGRE_STATIC=TRUE \
+            -DOGRE_BUILD_DEPENDENCIES=FALSE \
+            -DFREETYPE_LIBRARY="$IOS_PREFIX/lib/libfreetype.a" \
+            -DFREETYPE_INCLUDE_DIRS="$IOS_PREFIX/include/freetype2" \
+            -DOGRE_BUILD_SAMPLES=FALSE \
+            -DOGRE_BUILD_TESTS=FALSE \
+            -DOGRE_BUILD_TOOLS=FALSE \
+            -DOGRE_BUILD_COMPONENT_PYTHON=FALSE \
+            -DOGRE_BUILD_COMPONENT_JAVA=FALSE \
+            -DOGRE_BUILD_COMPONENT_CSHARP=FALSE \
+            -DOGRE_BUILD_COMPONENT_VOLUME=FALSE \
+            -DOGRE_BUILD_COMPONENT_OVERLAY=TRUE \
+            -DOGRE_BUILD_COMPONENT_BITES=TRUE \
+            -DOGRE_BUILD_COMPONENT_PAGING=TRUE \
+            -DOGRE_BUILD_COMPONENT_PROPERTY=FALSE \
+            -DOGRE_BUILD_COMPONENT_TERRAIN=TRUE \
+            -DOGRE_BUILD_COMPONENT_RTSHADERSYSTEM=TRUE \
+            -DOGRE_BUILD_COMPONENT_MESHLODGENERATOR=TRUE \
+            -DOGRE_BUILD_PLUGIN_BSP=FALSE \
+            -DOGRE_BUILD_PLUGIN_CG=FALSE \
+            -DOGRE_BUILD_PLUGIN_PCZ=FALSE \
+            -DOGRE_BUILD_PLUGIN_OCTREE=TRUE \
+            -DOGRE_BUILD_PLUGIN_PFX=TRUE \
+            -DOGRE_BUILD_PLUGIN_DOT_SCENE=FALSE \
+            -DOGRE_BUILD_RENDERSYSTEM_GL=FALSE \
+            -DOGRE_BUILD_RENDERSYSTEM_GL3PLUS=FALSE \
+            -DOGRE_BUILD_RENDERSYSTEM_GLES2=TRUE \
+            2>&1 | tee logs/ogre-configure.log
+
+      - name: Feature summary
+        if: always()
+        run: |
+          echo "## OGRE iOS feature summary" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          sed -n '/FEATURE SUMMARY/,/^----/p' logs/ogre-configure.log | head -40 >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Build + install OGRE
+        run: |
+          cmake --build ogre/build --config Release --target install \
+            2>&1 | tee logs/ogre-build.log
+        continue-on-error: true
+
+      - name: Post-build report
+        if: always()
+        run: |
+          echo "----- installed tree -----"
+          find "$IOS_PREFIX" -type f \( -name '*.a' -o -name '*.h' -o -name '*.cmake' \) | sort | head -200
+          echo "----- static libs -----"
+          find "$IOS_PREFIX" -name '*.a' -exec ls -la {} \; 2>/dev/null || true
+          echo "----- error lines in OGRE build -----"
+          grep -E "error:" logs/ogre-build.log | sort -u | head -60 || true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ogre-ios-sdk-logs
+          path: logs/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload iOS SDK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-sdk
+          path: ios-sdk/
+          retention-days: 14
+          if-no-files-found: warn

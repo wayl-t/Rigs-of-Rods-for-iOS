@@ -367,16 +367,135 @@ OgreMain/src/OgreOptimisedUtilSSE.cpp:28
   `__arm64__` в Apple-ветке). Когда будем собирать OGRE сами — под iOS —
   пропатчим заодно: страховка дешёвая.
 
-### Разделение зависимостей
+### 6. «Необязательные» зависимости: что защищено, а что нет
 
-`cmake/DependenciesConfig.cmake` делит зависимости на две группы:
+`cmake/DependenciesConfig.cmake` формально делит зависимости надвое:
 
 | Обязательные (`find_package(... REQUIRED)`) | Необязательные (`cmake_dependent_option`, фичи за `USE_*`) |
 |---|---|
 | OGRE, OIS, MyGUI, fmt, RapidJSON | OpenAL, discord-rpc, SocketW, AngelScript, cURL, Caelum, PagedGeometry |
 
-Поэтому для первой сквозной сборки conanfile режется до обязательных
-(`apply_ios_patches.py --minimal-deps`), а остальные отключаются сами.
+Чтобы понять, какие «необязательные» на деле обязательны, я прошёл по всем
+`#include` этих заголовков, отслеживая **стек препроцессорных условий**.
+Первая, наивная попытка («есть ли `#ifdef` в пределах 8 строк выше») дала
+неверный ответ — и это важно: `SkyManager.cpp:34 #include <Caelum.h>` выглядит
+незащищённым, а на самом деле строка 22 того же файла — это `#ifdef USE_CAELUM`.
+
+Итог по каждой библиотеке:
+
+| Библиотека | Включений | Вне guard | Вывод |
+|---|---|---|---|
+| **OpenAL** | 3 | `source/main/pch.h:41-42` — `<AL/al.h>`, `<AL/alc.h>` | **обязательна** |
+| **AngelScript** | 64 | 59 файлов, напр. `utils/memory/RefCountingObjectPtr.h:11`, `scripting/GameScript.h:30` | **обязательна** |
+| SocketW | 6 | `source/main/network/Network.cpp:40` | **обязательна** |
+| PagedGeometry | 4 | `gameplay/RandomTreeLoader.h:25-27` — `PagedGeometry.h`, `PropertyMaps.h`, `TreeLoader2D.h` | нужна, если этот заголовок компилируется |
+| Caelum | 6 | — | защищена (`SkyManager.cpp:22`) |
+| discord-rpc | 3 | — | защищена |
+| cURL | 2 | — | защищена |
+
+Второй `"SocketW.h"` (`scripting/server/ServerScriptEngine.cpp:38`) лежит внутри
+`#ifdef USE_ANGELSCRIPT` (строка 28), то есть SocketW нужен ровно тогда, когда
+включён AngelScript, — а он включён всегда.
+
+`RefCountingObjectPtr.h` особенно неприятен: он попадает в PCH через
+`Application.h -> ForwardDeclarations.h`, поэтому без AngelScript не собирается
+вообще ничего:
+
+```
+fatal error: 'angelscript.h' file not found
+    source/main/utils/memory/RefCountingObjectPtr.h:11:10
+In file included from .../pch.h:38 -> gui/imgui/imgui.h -> imconfig.h ->
+    Application.h -> ForwardDeclarations.h -> RefCountingObjectPtr.h
+```
+
+Вывод: без правки десятков файлов список зависимостей не урезать. Практически
+обязательны OGRE, OIS, MyGUI, fmt, RapidJSON, **AngelScript, OpenAL, SocketW**
+(и PagedGeometry). Caelum, cURL и discord-rpc выкинуть *можно* — их `#include`
+честно за `#ifdef`, — но это временно убирает небо, докачку модов и Discord;
+для настоящего порта их надо вернуть.
+
+### 6.1. Почему macOS оказался плохой площадкой для пробы
+
+RoR официально поддерживает Windows и Linux; macOS — нет, и это видно по
+рецептам зависимостей из `rigs-of-rods-deps`. Три независимых падения подряд,
+все — платформенные баги зависимостей, а не ошибки RoR:
+
+| Зависимость | Ошибка на macOS |
+|---|---|
+| `ogre3d` | `OgrePlatformInformation.h` считает Apple Silicon за x86 → `<xmmintrin.h>` |
+| `ogre3d` (плагин Cg) | `cg-toolkit` кладёт в macOS-пакет **Linux ELF** `libCg.so`/`libCgGL.so` → `ld: unknown file type` |
+| `angelscript/2.38.0` | `as_callfunc_x64_gcc.cpp` — x86-asm с `.cfi_def_cfa_register rsp`, ассемблер macOS его отвергает: `error: invalid CFI advance_loc expression` |
+
+Последнее и стало остановкой: `angelscript` обязателен (см. раздел 6), но его
+рецепт на macOS не собирается. Поэтому вместо дальнейшей борьбы с настольными
+рецептами переходим к сборке зависимостей **сразу под iOS** — то, что всё равно
+нужно делать.
+
+---
+
+### 7. Что именно даёт OGRE под iOS (и чего не хватает)
+
+Проба `probe-ogre-ios.yml` описана двумя маршрутами:
+
+* **маршрут 1** — собственный iOS-toolchain самого OGRE
+  (`CMake/toolchain/ios.toolchain.xcode.cmake`). Падает уже на конфигурации:
+  в артефактах есть только `r1-configure.log`, ни одного `r1-build-*.log`.
+* **маршрут 2** — современный CMake: `-DCMAKE_SYSTEM_NAME=iOS
+  -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0`.
+  Работает: `OgreMain` и `RenderSystem_GLES2` заканчиваются `** BUILD SUCCEEDED **`.
+
+Сводка OGRE под iOS (маршрут 2):
+
+```
+Building components:
+  + HLMS [BETA]
+  + MeshLodGenerator
+  + Paging
+  + Property
+  + RTShader System (+ Core Shaders, Extensions Shaders)
+  + Terrain
+Building plugins:
+  + STBI codec (generic)
+  + Particle FX
+Building rendersystems:
+  + OpenGL ES2/ ES3
+Build type: static
+```
+
+То есть четыре из шести компонентов, которые RoR требует
+(`find_package(OGRE 1.11 REQUIRED COMPONENTS Bites Overlay Paging RTShaderSystem MeshLodGenerator Terrain)`,
+`cmake/DependenciesConfig.cmake:6`), уже собираются: MeshLodGenerator, Paging,
+RTShaderSystem, Terrain. **Нет `Overlay` и `Bites`.**
+
+Причина — FreeType. В логе конфигурации дважды:
+
+```
+-- Could NOT find Freetype (missing: FREETYPE_LIBRARY FREETYPE_INCLUDE_DIRS)
+```
+
+и в списке ненайденных также `zziplib`, `freeimage`, `OpenGL`, `OpenEXR`;
+из системного нашлись только `zlib` и `OpenGL ES 2.x`.
+
+А без них RoR не соберётся — `source/main/pch.h`:
+
+```
+34: #include <Bites/OgreWindowEventUtilities.h>
+35: #include <Overlay/OgreFontManager.h>
+```
+
+`-DOGRE_BUILD_DEPENDENCIES=TRUE` (OGRE собирает зависимости сам) не спасает:
+
+* `zziplib` — `PhaseScriptExecution ... zzipfseeko.pc` и `compat/zzip-io.h`,
+  `** BUILD FAILED **`;
+* `freetype` — `CMake Error at CMakeLists.txt:78 (cmake_minimum_required):
+  Compatibility with CMake < 3.5 has been removed from CMake`; его
+  `ExternalProject` не получает наш `-DCMAKE_POLICY_VERSION_MINIMUM=3.5`.
+
+Вывод: для iOS нужна отдельная кросс-сборка зависимостей. Первый по важности —
+**FreeType** (он открывает `Overlay`, `Bites` и шрифты MyGUI), дальше OGRE,
+MyGUI, OIS. `freeimage` можно не тащить: в OGRE уже собирается `STBI codec`
+(jpg/png/bmp/tga — этого хватает контенту RoR); `zziplib` нужен только если
+RoR действительно грузит `.zip`.
 
 ---
 
