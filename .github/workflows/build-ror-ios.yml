@@ -240,6 +240,94 @@ jobs:
         run: |
           make -C ror/build -k -j 4 2>&1 | tee logs/ror-build.log
 
+      - name: Package RoR.app and IPA
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          APP_DIR=ror/build/bin/RoR.app
+          if [ ! -f "$APP_DIR/RoR" ]; then
+            echo "no linked binary at $APP_DIR/RoR - nothing to package"
+            exit 0
+          fi
+
+          echo "----- linked binary -----"
+          file "$APP_DIR/RoR"
+          ls -la "$APP_DIR"
+
+          # RoR resolves its data relative to the executable's parent directory
+          # (AppContext::SetUpResourcesDir -> sys_process_dir), i.e. inside the
+          # bundle, and SetUpConfigSkeleton() hard-requires
+          # resources/skeleton.zip.  CMake's zip_folder_resources target writes
+          # the zips to bin/resources, one level above the bundle.
+          if [ -d ror/build/bin/resources ]; then
+            rm -rf "$APP_DIR/resources"
+            cp -R ror/build/bin/resources "$APP_DIR/resources"
+            echo "----- bundled resources -----"
+            ls -la "$APP_DIR/resources" | head -30
+          else
+            echo "WARNING: ror/build/bin/resources is missing - RoR will refuse to start"
+          fi
+          if [ -d ror/build/bin/content ]; then
+            cp -R ror/build/bin/content "$APP_DIR/content"
+          fi
+          # Not used on iOS (the OGRE plugins are static) but RoR still logs it.
+          cp -f ror/build/bin/plugins.cfg "$APP_DIR/" 2>/dev/null || true
+
+          # CMake generated a macOS-style bundle plist from the default
+          # template; an iOS bundle needs an iOS one.  printf rather than a
+          # heredoc so nothing depends on indentation.
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+            '<plist version="1.0">' \
+            '<dict>' \
+            '    <key>CFBundleDevelopmentRegion</key><string>en</string>' \
+            '    <key>CFBundleExecutable</key><string>RoR</string>' \
+            '    <key>CFBundleIdentifier</key><string>org.rigsofrods.ror-ios</string>' \
+            '    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>' \
+            '    <key>CFBundleName</key><string>Rigs of Rods</string>' \
+            '    <key>CFBundleDisplayName</key><string>Rigs of Rods</string>' \
+            '    <key>CFBundlePackageType</key><string>APPL</string>' \
+            '    <key>CFBundleShortVersionString</key><string>1.0</string>' \
+            '    <key>CFBundleVersion</key><string>1</string>' \
+            '    <key>LSRequiresIPhoneOS</key><true/>' \
+            '    <key>MinimumOSVersion</key><string>16.0</string>' \
+            '    <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>' \
+            '    <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>' \
+            '    <key>UIRequiresFullScreen</key><true/>' \
+            '    <key>UIStatusBarHidden</key><true/>' \
+            '    <key>UIViewControllerBasedStatusBarAppearance</key><false/>' \
+            '    <key>UISupportedInterfaceOrientations</key><array>' \
+            '        <string>UIInterfaceOrientationLandscapeLeft</string>' \
+            '        <string>UIInterfaceOrientationLandscapeRight</string>' \
+            '    </array>' \
+            '    <key>UISupportedInterfaceOrientations~ipad</key><array>' \
+            '        <string>UIInterfaceOrientationLandscapeLeft</string>' \
+            '        <string>UIInterfaceOrientationLandscapeRight</string>' \
+            '    </array>' \
+            '    <key>UIFileSharingEnabled</key><true/>' \
+            '    <key>LSSupportsOpeningDocumentsInPlace</key><true/>' \
+            '</dict>' \
+            '</plist>' > "$APP_DIR/Info.plist"
+          plutil -lint "$APP_DIR/Info.plist" || echo "plutil lint failed (continuing)"
+
+          # Ad-hoc signature: needs no certificate at all, and whatever
+          # sideloads the IPA (AltStore, Sideloadly, ...) re-signs it with the
+          # user's own free Apple ID anyway.
+          codesign --force --sign - "$APP_DIR" 2>&1 | tail -3 \
+            || echo "ad-hoc codesign failed (continuing)"
+
+          # An .ipa is just a zip with the bundle at Payload/<name>.app.
+          rm -rf Payload RoR-ios.ipa
+          mkdir -p Payload
+          cp -R "$APP_DIR" Payload/
+          zip -qry RoR-ios.ipa Payload
+          echo "----- IPA -----"
+          ls -la RoR-ios.ipa
+          unzip -l RoR-ios.ipa | head -20
+          echo "IPA size: $(du -h RoR-ios.ipa | cut -f1)"
+
       - name: Summary
         if: always()
         run: |
@@ -258,6 +346,10 @@ jobs:
             echo '```'
             echo "### compiler errors: $(grep -cE 'error:' logs/ror-build.log || echo 0)"
             echo
+            echo "### link"
+            echo '```'
+            grep -E 'Linking CXX executable|Built target RoR|Undefined symbols|symbol\(s\) not found|make.*Error' logs/ror-build.log | head -20 || echo "(no link phase reached)"
+            echo '```'
             echo "### first 120 errors"
             echo '```'
             grep -E 'error:' logs/ror-build.log | head -120 || echo "(none)"
@@ -279,5 +371,17 @@ jobs:
         with:
           name: ror-ios-build-logs
           path: logs/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload IPA
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RoR-ios-ipa
+          path: |
+            RoR-ios.ipa
+            ror/build/bin/RoR.app/RoR
+            ror/build/bin/RoR.app/Info.plist
           retention-days: 30
           if-no-files-found: warn

@@ -150,8 +150,22 @@ def patch_main_cmake(ror):
         "endif ()\n"
         "if (ROR_OIS_LIBRARY)\n"
         "    target_link_libraries(${BINNAME} PRIVATE ${ROR_OIS_LIBRARY})\n"
+        "endif ()\n"
+        "\n"
+        "# Apple/iOS port: the platform layer written by patch_ios_platform().\n"
+        "# ios_main.mm owns the process entry point (UIApplicationMain never\n"
+        "# returns, so RoR's main cannot be it) and calls RoRMain() from the app\n"
+        "# delegate; ios_platform.mm services the UIKit run loop once per frame.\n"
+        "# ROR_PLATFORM_IOS is the switch the patched sources use, because\n"
+        "# OGRE_PLATFORM_APPLE_IOS is not reliably defined before OgrePlatform.h\n"
+        "# has been included (an undefined OGRE_PLATFORM makes the comparison\n"
+        "# accidentally true).\n"
+        "if (APPLE AND CMAKE_SYSTEM_NAME STREQUAL \"iOS\")\n"
+        "    target_compile_definitions(${BINNAME} PRIVATE ROR_PLATFORM_IOS)\n"
+        "    target_include_directories(${BINNAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ios)\n"
+        "    target_sources(${BINNAME} PRIVATE ios/ios_main.mm ios/ios_platform.mm)\n"
         "endif ()\n",
-        "main/CMakeLists.txt OIS include/link",
+        "main/CMakeLists.txt OIS include/link + iOS platform layer",
     )
     write(path, text)
 
@@ -328,6 +342,105 @@ def patch_appcontext(ror):
         "        ror_homedir << user_home << PATH_SLASH << \"Documents\" << PATH_SLASH << \"RigsOfRods\";\n"
         "#elif OGRE_PLATFORM == OGRE_PLATFORM_WIN32\n",
         "AppContext.cpp user dir for iOS",
+    )
+
+    # ---------------------------------------------------------------------
+    # Rendering on iOS
+    # ---------------------------------------------------------------------
+    text = must_replace(
+        text,
+        '#include "InputEngine.h"\n'
+        '#include "Language.h"\n',
+        '#include "InputEngine.h"\n'
+        '#include "Language.h"\n'
+        "#ifdef ROR_PLATFORM_IOS\n"
+        '#   include "ios_platform.h"\n'
+        "#   include <Bites/OgreStaticPluginLoader.h>\n"
+        "#endif\n",
+        "AppContext.cpp iOS includes",
+    )
+
+    # The OGRE we build for iOS is static, so there are no plugin .dylib files
+    # for loadPlugin() to dlopen: the whole plugin set is linked into the binary
+    # and has to be registered through OgreBites::StaticPluginLoader, whose
+    # plugin list was compiled in from OgreBuildSettings.h.  plugins.cfg is not
+    # generated into the app bundle either (CMake writes it next to bin/RoR,
+    # whereas sys_process_dir is bin/RoR.app), so reading it could only fail.
+    text = must_replace(
+        text,
+        "    try\n"
+        "    {\n"
+        "        Ogre::ConfigFile cfg;\n"
+        "        cfg.load(plugins_path);\n",
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Apple/iOS port: register the statically linked OGRE plugins.\n"
+        "    {\n"
+        '        LOG("[RoR|Startup|Rendering] iOS: registering statically linked OGRE plugins");\n'
+        "        static OgreBites::StaticPluginLoader s_static_plugins;\n"
+        "        s_static_plugins.load();\n"
+        "    }\n"
+        "#else\n"
+        "    try\n"
+        "    {\n"
+        "        Ogre::ConfigFile cfg;\n"
+        "        cfg.load(plugins_path);\n",
+        "AppContext.cpp static OGRE plugins for iOS",
+    )
+    text = must_replace(
+        text,
+        "        return false;\n"
+        "    }\n"
+        "\n"
+        "    // Load renderer configuration\n",
+        "        return false;\n"
+        "    }\n"
+        "#endif // ROR_PLATFORM_IOS\n"
+        "\n"
+        "    // Load renderer configuration\n",
+        "AppContext.cpp static OGRE plugins #endif",
+    )
+
+    # On iOS the GLES2 render system has no usable "Video Mode" config option,
+    # so the parse above yields 0x0, the 800x600 clamp below rewrites it, and
+    # the "auto-detected" loop that follows tries setConfigOption("Video Mode")
+    # outside any try/catch.  Skip the loop and take the real screen size in
+    # points instead: OGRE's EAGL2Window builds its UIWindow at exactly the size
+    # passed to createRenderWindow().
+    text = must_replace(
+        text,
+        "    if (autodetect_resolution)\n"
+        "    {\n",
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Apple/iOS port: the mode list is empty or unrelated to the device\n"
+        "    // on iOS, and setConfigOption() is not wrapped in a try/catch here.\n"
+        "    if (false)\n"
+        "#else\n"
+        "    if (autodetect_resolution)\n"
+        "#endif\n"
+        "    {\n",
+        "AppContext.cpp skip the iOS video mode autodetect",
+    )
+    text = must_replace(
+        text,
+        '        LOG(fmt::format("[RoR|Startup|Rendering] WARNING - invalid \'ogre.cfg\', auto-detected resolution {}x{}", width, height));\n'
+        "        m_ogre_root->saveConfig();\n"
+        "    }\n"
+        "\n"
+        "    // Review render window settings\n",
+        '        LOG(fmt::format("[RoR|Startup|Rendering] WARNING - invalid \'ogre.cfg\', auto-detected resolution {}x{}", width, height));\n'
+        "        m_ogre_root->saveConfig();\n"
+        "    }\n"
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Apple/iOS port: use the real screen size in points.  UIScreen\n"
+        "    // reports it in the portrait frame, and RoR is landscape-only, so the\n"
+        "    // long side is the width (see RoR_IosGetScreenSize()).\n"
+        "    RoR_IosGetScreenSize((int*)&width, (int*)&height);\n"
+        '    LOG(fmt::format("[RoR|Startup|Rendering] iOS: using screen size {}x{}", width, height));\n'
+        "#endif\n"
+        "\n"
+        "    // Review render window settings\n",
+        "AppContext.cpp iOS screen size instead of video modes",
     )
     write(path, text)
 
@@ -614,6 +727,227 @@ def patch_game_settings_alc(ror):
     write(path, text)
 
 
+IOS_PLATFORM_H = r'''// Rigs of Rods - Apple/iOS platform layer.
+//
+// Why this exists
+// ---------------
+// Two things cannot be expressed in plain C++ on iOS:
+//
+//  * The process entry point.  UIKit needs UIApplicationMain() to build the
+//    UIApplication singleton and start the application run loop, and
+//    UIApplicationMain() never returns - so RoR's own blocking main() can no
+//    longer be the entry point.  On iOS it is renamed to RoRMain() and called
+//    from the app delegate instead (see ios_main.mm).
+//
+//  * Servicing the run loop.  RoR's frame loop calls
+//    OgreBites::WindowEventUtilities::messagePump(), which is a no-op on iOS
+//    (OgreWindowEventUtilities.cpp), so unless somebody pumps the run loop
+//    UIKit never gets to deliver touch events and iOS eventually kills the app
+//    for not responding.
+//
+// ROR_PLATFORM_IOS (defined by source/main/CMakeLists.txt on iOS) is the
+// switch the patched sources use, not OGRE_PLATFORM_APPLE_IOS: before
+// OgrePlatform.h has been included OGRE_PLATFORM is undefined and evaluates to
+// 0, which makes that comparison accidentally true.
+#ifndef ROR_IOS_PLATFORM_H
+#define ROR_IOS_PLATFORM_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// RoR's own main(), renamed on iOS.  Called by the app delegate; never returns.
+int RoRMain(int argc, char* argv[]);
+
+// Runs the UIKit side of the main run loop exactly once and returns
+// immediately.  Call once per frame.
+void RoR_IosPumpRunLoop(void);
+
+// Size of the main screen in points, which is what OGRE's EAGL2Window builds
+// its UIWindow from.  RoR is landscape-only, so width is the long side.
+void RoR_IosGetScreenSize(int* width, int* height);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // ROR_IOS_PLATFORM_H
+'''
+
+IOS_PLATFORM_MM = r'''// Rigs of Rods - Apple/iOS platform layer implementation.  See ios_platform.h.
+#include "ios_platform.h"
+
+#import <UIKit/UIKit.h>
+#import <CoreFoundation/CFRunLoop.h>
+
+void RoR_IosPumpRunLoop(void)
+{
+    // Run the main run loop once and return immediately: we are called from
+    // inside RoR's own frame loop, so blocking here would stall rendering.
+    // This still drains everything UIKit has queued for the app, because the
+    // touch/event machinery (_UIApplicationHandleEventQueue) is a run loop
+    // source, which is what makes the touch layer work at all.
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, /*returnAfterSourceHandled=*/false);
+}
+
+void RoR_IosGetScreenSize(int* width, int* height)
+{
+    // UIScreen.mainScreen.bounds is always reported in the portrait frame,
+    // whatever the current orientation happens to be, and RoR is
+    // landscape-only - so the long side is the width.
+    const CGRect bounds = [[UIScreen mainScreen] bounds];
+    const int a = (int)(bounds.size.width + 0.5);
+    const int b = (int)(bounds.size.height + 0.5);
+    const int long_side  = a > b ? a : b;
+    const int short_side = a > b ? b : a;
+    if (width)  *width  = long_side;
+    if (height) *height = short_side;
+}
+'''
+
+IOS_MAIN_MM = r'''// Rigs of Rods - Apple/iOS process entry point.  See ios_platform.h.
+//
+// UIApplicationMain() never returns, so it has to be the outermost call, and
+// RoR's main() (renamed to RoRMain) is invoked from the app delegate instead.
+//
+// There is deliberately no UIWindow/UIViewController setup here: OGRE's
+// EAGL2Window builds its own UIWindow, EAGL2View and EAGL2ViewController and
+// makes them visible when no externalWindowHandle misc parameter is supplied
+// (RenderSystems/GLES2/src/EAGL/OgreEAGL2Window.mm), which is exactly RoR's
+// case - it calls createRenderWindow() with an empty params list on iOS.
+#include "ios_platform.h"
+
+#import <UIKit/UIKit.h>
+
+static int    g_argc = 0;
+static char** g_argv = nullptr;
+
+@interface RoRAppDelegate : UIResponder <UIApplicationDelegate>
+@end
+
+@implementation RoRAppDelegate
+
+- (BOOL)application:(UIApplication*)application
+        didFinishLaunchingWithOptions:(NSDictionary*)launchOptions
+{
+    (void)application;
+    (void)launchOptions;
+
+    // Blocks for the whole lifetime of the process: RoR owns its frame loop and
+    // services UIKit from inside it via RoR_IosPumpRunLoop().
+    RoRMain(g_argc, g_argv);
+    return YES;
+}
+
+@end
+
+int main(int argc, char* argv[])
+{
+    @autoreleasepool
+    {
+        g_argc = argc;
+        g_argv = argv;
+        return UIApplicationMain(argc, argv, nil, NSStringFromClass([RoRAppDelegate class]));
+    }
+}
+'''
+
+
+def patch_ios_platform(ror):
+    """Create the iOS platform layer at source/main/ios/.
+
+    These three files do not exist upstream, so this patch writes them rather
+    than editing anything.  They are added to the RoR target by
+    patch_main_cmake().
+    """
+    directory = os.path.join(ror, "source", "main", "ios")
+    os.makedirs(directory, exist_ok=True)
+    write(os.path.join(directory, "ios_platform.h"), IOS_PLATFORM_H)
+    write(os.path.join(directory, "ios_platform.mm"), IOS_PLATFORM_MM)
+    write(os.path.join(directory, "ios_main.mm"), IOS_MAIN_MM)
+
+
+def patch_root_cmake(ror):
+    """Root CMakeLists.txt: enable Objective-C++ for the iOS platform layer.
+
+    project() at line 22 has no LANGUAGES clause, so only C and CXX are enabled
+    - and source/main/ios/*.mm cannot be compiled until OBJCXX is on.  Enabled
+    from the top-level scope and before add_subdirectory(source/main), because
+    CMake has to know the language before it resolves a target's sources.
+    """
+    path = os.path.join(ror, "CMakeLists.txt")
+    text = read(path)
+    text = must_replace(
+        text,
+        "project(${PROJECT_NAME_UNDERSCORE} VERSION 2026.01)\n",
+        "project(${PROJECT_NAME_UNDERSCORE} VERSION 2026.01)\n"
+        "\n"
+        "# Apple/iOS port: RoR's project() above enables only C and CXX, but the\n"
+        "# iOS platform layer (source/main/ios/*.mm) needs Objective-C++.\n"
+        "if (APPLE AND CMAKE_SYSTEM_NAME STREQUAL \"iOS\")\n"
+        "    enable_language(OBJCXX)\n"
+        "endif ()\n",
+        "CMakeLists.txt enable_language(OBJCXX)",
+    )
+    write(path, text)
+
+
+def patch_main_cpp(ror):
+    """main.cpp: hand the entry point over to UIKit on iOS.
+
+    UIApplicationMain() never returns, so RoR's main() cannot be the process
+    entry point any more - it becomes RoRMain() and ios_main.mm calls it from
+    the app delegate.  The frame loop additionally has to service the run loop,
+    because OgreBites::WindowEventUtilities::messagePump() is a no-op on iOS
+    (OgreWindowEventUtilities.cpp:174-212): without it UIKit never delivers
+    touch events and iOS eventually kills the app for not responding.
+    """
+    path = os.path.join(ror, "source", "main", "main.cpp")
+    text = read(path)
+    text = must_replace(
+        text,
+        '#include "Utils.h"\n'
+        "#include <Overlay/OgreOverlaySystem.h>\n",
+        '#include "Utils.h"\n'
+        "#ifdef ROR_PLATFORM_IOS\n"
+        '#   include "ios_platform.h"\n'
+        "#endif\n"
+        "#include <Overlay/OgreOverlaySystem.h>\n",
+        "main.cpp ios_platform.h include",
+    )
+    # `main` already sits inside an `extern "C" {` block here, so RoRMain keeps
+    # C linkage and is directly callable from ios_main.mm.
+    text = must_replace(
+        text,
+        "int main(int argc, char *argv[])\n"
+        "{\n"
+        "    using namespace RoR;\n",
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "// Apple/iOS port: not the process entry point on iOS - see ios_main.mm.\n"
+        "int RoRMain(int argc, char *argv[])\n"
+        "#else\n"
+        "int main(int argc, char *argv[])\n"
+        "#endif\n"
+        "{\n"
+        "    using namespace RoR;\n",
+        "main.cpp rename main to RoRMain on iOS",
+    )
+    text = must_replace(
+        text,
+        "            App::GetAppContext()->PrepareProfiler();\n"
+        "            OgreBites::WindowEventUtilities::messagePump();\n",
+        "            App::GetAppContext()->PrepareProfiler();\n"
+        "            OgreBites::WindowEventUtilities::messagePump();\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "            // Apple/iOS port: messagePump() does nothing on iOS, so\n"
+        "            // service UIKit here or there are no touches at all.\n"
+        "            RoR_IosPumpRunLoop();\n"
+        "#endif\n",
+        "main.cpp pump the iOS run loop each frame",
+    )
+    write(path, text)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("ror_dir")
@@ -628,6 +962,7 @@ def main():
 
     patch_conanfile(args.ror_dir, minimal_deps=args.minimal_deps)
     patch_dependencies(args.ror_dir)
+    patch_root_cmake(args.ror_dir)
     patch_main_cmake(args.ror_dir)
     # Platform layer: these fix things that are broken on iOS specifically,
     # independent of how the build is driven.
@@ -644,6 +979,11 @@ def main():
     patch_repo_selector(args.ror_dir)
     patch_multiplayer_selector(args.ror_dir)
     patch_game_settings_alc(args.ror_dir)
+    # The runtime platform layer: the new iOS files themselves plus the two
+    # entry-point/frame-loop changes in main.cpp that hand the process over to
+    # UIKit.
+    patch_ios_platform(args.ror_dir)
+    patch_main_cpp(args.ror_dir)
 
     print("applied Apple/iOS patches to %s" % args.ror_dir)
     if args.ois_include:
