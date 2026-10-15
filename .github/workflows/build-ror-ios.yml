@@ -271,8 +271,10 @@ jobs:
           if [ -d ror/build/bin/content ]; then
             cp -R ror/build/bin/content "$APP_DIR/content"
           fi
-          # Not used on iOS (the OGRE plugins are static) but RoR still logs it.
-          cp -f ror/build/bin/plugins.cfg "$APP_DIR/" 2>/dev/null || true
+          # plugins.cfg is deliberately NOT copied: on iOS the OGRE plugins are
+          # static and registered through OgreBites::StaticPluginLoader, so RoR
+          # never reads the file (SetUpRendering's iOS branch skips it).  It also
+          # upset codesign, which reported it as an unsigned subcomponent.
 
           # CMake generated a macOS-style bundle plist from the default
           # template; an iOS bundle needs an iOS one.  printf rather than a
@@ -312,11 +314,23 @@ jobs:
             '</plist>' > "$APP_DIR/Info.plist"
           plutil -lint "$APP_DIR/Info.plist" || echo "plutil lint failed (continuing)"
 
-          # Ad-hoc signature: needs no certificate at all, and whatever
+          # Ad-hoc signature.  Needs no certificate at all, and whatever
           # sideloads the IPA (AltStore, Sideloadly, ...) re-signs it with the
-          # user's own free Apple ID anyway.
-          codesign --force --sign - "$APP_DIR" 2>&1 | tail -3 \
-            || echo "ad-hoc codesign failed (continuing)"
+          # user's own free Apple ID anyway, so a failure here must not stop the
+          # packaging - but it has to be visible.  Piping codesign into tail
+          # would report tail's status, which is why this is done explicitly.
+          if codesign --force --sign - "$APP_DIR" > codesign.log 2>&1; then
+            echo "ad-hoc codesign: OK"
+          else
+            echo "ad-hoc codesign: FAILED (not fatal, the sideloader re-signs)"
+            cat codesign.log
+          fi
+          rm -f codesign.log
+          if [ -d "$APP_DIR/_CodeSignature" ]; then
+            echo "bundle carries a _CodeSignature"
+          else
+            echo "bundle is unsigned (expected; the sideloader adds the signature)"
+          fi
 
           # An .ipa is just a zip with the bundle at Payload/<name>.app.
           rm -rf Payload RoR-ios.ipa
