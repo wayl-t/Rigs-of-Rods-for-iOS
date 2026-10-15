@@ -103,6 +103,16 @@ jobs:
 
       - name: Configure OGRE (iOS, static, full component set)
         run: |
+          # OGRE's CMake puts the *literal* string "$(PLATFORM_NAME)" into the
+          # library output directory on iOS (CMake/Utils/OgreConfigTargets.cmake:16-20).
+          # Xcode expands it at build time -> the libs really land in
+          #   ogre/build/lib/iphoneos/Release/
+          # but CMake's own install() script does not expand it, so `install`
+          # looks in "ogre/build/lib/$(PLATFORM_NAME)/Release/" and dies with
+          #   file INSTALL cannot find ".../lib/$(PLATFORM_NAME)/Release/libOgreMainStatic.a"
+          # OgreConfigTargets.cmake:24 is `if (NOT OGRE_ARCHIVE_OUTPUT)`, so
+          # passing the real path explicitly takes that branch out of play and
+          # the build and the installer finally agree on the directory.
           cmake -S ogre -B ogre/build -G Xcode \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_SYSTEM_NAME=iOS \
@@ -112,6 +122,9 @@ jobs:
             -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX" \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO \
+            -DOGRE_ARCHIVE_OUTPUT="$PWD/ogre/build/lib/iphoneos" \
+            -DOGRE_LIBRARY_OUTPUT="$PWD/ogre/build/lib/iphoneos" \
+            -DOGRE_RUNTIME_OUTPUT="$PWD/ogre/build/bin" \
             -DAPPLE_IOS=TRUE -DOGRE_BUILD_PLATFORM_APPLE_IOS=TRUE \
             -DOGRE_STATIC=TRUE \
             -DOGRE_BUILD_DEPENDENCIES=FALSE \
@@ -154,17 +167,40 @@ jobs:
         run: |
           cmake --build ogre/build --config Release --target install \
             2>&1 | tee logs/ogre-build.log
-        continue-on-error: true
 
       - name: Post-build report
         if: always()
         run: |
+          echo "----- built libs (build tree) -----"
+          find ogre/build -name '*.a' -exec ls -la {} \; 2>/dev/null | sort -k9 || true
           echo "----- installed tree -----"
           find "$IOS_PREFIX" -type f \( -name '*.a' -o -name '*.h' -o -name '*.cmake' \) | sort | head -200
-          echo "----- static libs -----"
-          find "$IOS_PREFIX" -name '*.a' -exec ls -la {} \; 2>/dev/null || true
+          echo "----- static libs (install prefix) -----"
+          find "$IOS_PREFIX" -name '*.a' -exec ls -la {} \; 2>/dev/null | sort -k9 || true
           echo "----- error lines in OGRE build -----"
           grep -E "error:" logs/ogre-build.log | sort -u | head -60 || true
+          echo "----- required libs check -----"
+          missing=0
+          for lib in OgreMain OgreGLSupport OgreBites OgreOverlay OgrePaging \
+                     OgreTerrain OgreRTShaderSystem OgreMeshLodGenerator; do
+            if ! find "$IOS_PREFIX" -name "lib${lib}Static.a" | grep -q .; then
+              echo "MISSING: lib${lib}Static.a"; missing=1
+            fi
+          done
+          for lib in RenderSystem_GLES2 Plugin_OctreeSceneManager Plugin_ParticleFX Codec_STBI; do
+            if ! find "$IOS_PREFIX" -name "lib${lib}Static.a" | grep -q .; then
+              echo "MISSING: lib${lib}Static.a"; missing=1
+            fi
+          done
+          if [ "$missing" = "1" ]; then
+            echo "RESULT: some OGRE libraries are NOT installed"; exit 1
+          fi
+          echo "RESULT: all required OGRE libraries present"
+          echo "----- arch check (must be arm64) -----"
+          for f in $(find "$IOS_PREFIX" -name '*.a' | head -3); do
+            echo "$f"; lipo -info "$f" || true
+          done
+          lipo -info "$IOS_PREFIX/lib/libfreetype.a" || true
 
       - name: Upload logs
         if: always()

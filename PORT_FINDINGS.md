@@ -497,6 +497,119 @@ MyGUI, OIS. `freeimage` можно не тащить: в OGRE уже собир�
 (jpg/png/bmp/tga — этого хватает контенту RoR); `zziplib` нужен только если
 RoR действительно грузит `.zip`.
 
+### 7.1. Что должно войти в iOS-набор зависимостей
+
+Список следует не из `conanfile.py`, а из того, какие заголовки включаются
+безусловно (раздел 6) и как `cmake/DependenciesConfig.cmake` включает фичи:
+
+```cmake
+28: find_package(OpenAL)
+29: cmake_dependent_option(ROR_USE_OPENAL     ON "OPENAL_FOUND"                       OFF)
+36: find_package(SocketW)
+37: cmake_dependent_option(ROR_USE_SOCKETW    ON "TARGET SocketW::SocketW"            OFF)
+44: find_package(Angelscript)
+45: cmake_dependent_option(ROR_USE_ANGELSCRIPT ON "TARGET Angelscript::angelscript"   OFF)
+52: find_package(Caelum)
+53: cmake_dependent_option(ROR_USE_CAELUM      ON "TARGET Caelum::Caelum"             OFF)
+56: find_package(PagedGeometry)
+57: cmake_dependent_option(ROR_USE_PAGED       ON "TARGET PagedGeometry::PagedGeometry" OFF)
+```
+
+| Библиотека | Нужна под iOS | Почему |
+|---|---|---|
+| OGRE 1.11 (Bites, Overlay, Paging, RTShaderSystem, MeshLodGenerator, Terrain) | **да** | `DependenciesConfig.cmake:6`, `pch.h:34-35` |
+| FreeType | **да** | открывает `Overlay`/`Bites` и шрифты MyGUI |
+| MyGUI 3.4 | **да** | `find_package(MyGUI REQUIRED)`, 78 файлов GUI |
+| OIS | **да** | уже собран под iOS (веха 5) |
+| fmt, RapidJSON | **да** | REQUIRED / header-only |
+| **AngelScript 2.38** | **да** | 59 безусловных включений. **arm64 поддержан**: в `sdk/angelscript/source` есть `as_callfunc_arm64.cpp` и отдельный `as_callfunc_arm64_xcode.S` |
+| **OpenAL (openal-soft)** | **да** | `pch.h:41-42` |
+| **SocketW** | **да** | `Network.cpp:40` |
+| OpenSSL | **да** | нужен SocketW (`DependenciesConfig.cmake:38-41`) |
+| PagedGeometry | вероятно | `RandomTreeLoader.h:25-27` |
+| Caelum, cURL, discord-rpc | нет (пока) | их `#include` за `#ifdef`; без `find_package` фича просто выключается |
+| zziplib, zlib, libpng, libwebp, jasper | нет (пока) | кодек `STBI` в OGRE закрывает jpg/png; zip нужен только если RoR грузит `.zip` |
+
+Деталь OGRE, которую легко упустить: решения про iOS завязаны на переменную
+**`APPLE_IOS`**, а не на `CMAKE_SYSTEM_NAME`:
+
+```
+CMakeLists.txt:188  if (MSVC OR ANDROID OR EMSCRIPTEN OR APPLE_IOS)
+CMakeLists.txt:332  cmake_dependent_option(OGRE_BUILD_PLUGIN_CG ... "Cg_FOUND;NOT APPLE_IOS;...")
+```
+
+Её выставляет **только** `CMake/toolchain/ios.toolchain.xcode.cmake:37`
+(`set (APPLE_IOS True)`). Современный `-DCMAKE_SYSTEM_NAME=iOS` её не ставит —
+поэтому в маршруте 2 она передаётся вручную (`-DAPPLE_IOS=TRUE`). Если собирать
+OGRE *рецептом conan* с iOS-профилем, её придётся добавить через `user_toolchain`,
+иначе OGRE сконфигурируется как macOS (и потянет Cocoa-код окна).
+
+### 7.2. Первый iOS-SDK: FreeType + OGRE собраны
+
+Прогон `38669963734` (`build-ios-deps.yml`) собрал FreeType и OGRE под
+`iphoneos/arm64` — **все 13 библиотек**:
+
+```
+libOgreMainStatic.a                   libOgreBitesStatic.a
+libOgreGLSupportStatic.a              libOgrePagingStatic.a
+libOgreOverlayStatic.a                libOgreTerrainStatic.a
+libOgreRTShaderSystemStatic.a         libOgreMeshLodGeneratorStatic.a
+libOgreHLMSStatic.a                   libRenderSystem_GLES2Static.a
+libPlugin_OctreeSceneManagerStatic.a  libPlugin_ParticleFXStatic.a
+libCodec_STBIStatic.a
+```
+
+То есть **`Overlay` и `Bites` теперь есть** — достаточно было дать OGRE FreeType
+(`-DFREETYPE_LIBRARY=.../libfreetype.a`, `-DFREETYPE_INCLUDE_DIRS=.../include/freetype2`
+на наш iOS-префикс). Вся сборка — 3м26с.
+
+Но шаг `install` упал:
+
+```
+CMake Error at OgreMain/cmake_install.cmake:62 (file):
+  file INSTALL cannot find
+  ".../ogre/build/lib/$(PLATFORM_NAME)/Release/libOgreMainStatic.a"
+```
+
+Причина — `CMake/Utils/OgreConfigTargets.cmake`:
+
+```cmake
+16:   if(NOT OGRE_BUILD_PLATFORM_ANDROID AND NOT APPLE_IOS)
+17:     set(PLATFORM_NAME "macosx")
+18:   elseif(APPLE_IOS)
+19:     set(PLATFORM_NAME "$(PLATFORM_NAME)")     # <- литерал, не переменная
+26:     set(OGRE_ARCHIVE_OUTPUT ${PROJECT_BINARY_DIR}/lib/${PLATFORM_NAME})
+```
+
+Для iOS OGRE кладёт библиотеки в каталог с **буквальным** именем `$(PLATFORM_NAME)`
+и рассчитывает, что Xcode раскроет его при сборке. Xcode раскрывает (в `iphoneos`),
+а CMake-скрипт `install()` — нет, поэтому ищет файл по несуществующему пути.
+
+Обход, не трогая исходники OGRE: строка 24 — `if (NOT OGRE_ARCHIVE_OUTPUT)`,
+значит явное значение отключает ветку с литералом:
+
+```
+-DOGRE_ARCHIVE_OUTPUT=$PWD/ogre/build/lib/iphoneos
+-DOGRE_LIBRARY_OUTPUT=$PWD/ogre/build/lib/iphoneos
+-DOGRE_RUNTIME_OUTPUT=$PWD/ogre/build/bin
+```
+
+Итоговый layout установки (по установленному `OgreTargets-release.cmake`):
+
+```
+${prefix}/lib/Release/libOgreMainStatic.a
+${prefix}/lib/Release/libOgreBitesStatic.a
+${prefix}/lib/Release/libOgreOverlayStatic.a
+${prefix}/lib/Release/libOgreRTShaderSystemStatic.a
+${prefix}/lib/Release/OGRE/libRenderSystem_GLES2Static.a
+${prefix}/lib/Release/OGRE/libPlugin_OctreeSceneManagerStatic.a
+${prefix}/lib/Release/OGRE/libCodec_STBIStatic.a
+```
+
+Плюс `CMake/OGREConfig.cmake`, `CMake/OgreTargets*.cmake` и pkgconfig-файлы
+(`OGRE.pc`, `OGRE-Overlay.pc`, `OGRE-Bites.pc`, …) — то есть RoR сможет
+подключиться обычным `find_package(OGRE 1.11 REQUIRED COMPONENTS ...)`.
+
 ---
 
 ## Что всё ещё неизвестно / не проверено
