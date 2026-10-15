@@ -1,0 +1,178 @@
+name: Probe OIS + RoR on Apple
+
+# Milestone 6. Milestone 4 showed the macOS RoR build dies while *building the
+# dependency* OIS (std::unary_function / throw(...) - it is C++98 era code and
+# the conan recipe refuses to compile it with anything but C++17).
+#
+# Two questions decide the input strategy, so this run asks both:
+#
+#   ois-ios   : OIS source has an iPhone backend (src/iphone/*.mm, multitouch).
+#               The conan recipe never selects it. Can we build it ourselves
+#               for a device by setting OGRE_BUILD_PLATFORM_APPLE_IOS?
+#   ror-macos : if we supply our own OIS (built with C++14, which makes the
+#               legacy code compile again), how far does RoR's OWN code get on
+#               Apple clang? This is the compile-error list we actually need.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe]
+
+permissions:
+  contents: read
+
+env:
+  OIS_REPO: https://github.com/AnotherFoxGuy/conan-OIS.git
+  CONAN_REMOTE: https://nexus.anotherfoxguy.com/repository/rigs-of-rods/
+
+jobs:
+  ois-ios:
+    name: Can OIS's iPhone backend be built?
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          xcodebuild -version
+          echo "iphoneos SDK: $(xcrun --sdk iphoneos --show-sdk-path)"
+
+      - name: Get OIS source
+        run: git clone --depth 1 "$OIS_REPO" ois
+
+      - name: Configure OIS for iPhone (multitouch backend)
+        run: |
+          mkdir -p logs
+          cmake -S ois -B ois/build-ios -G Ninja \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_STANDARD=14 -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+            -DOGRE_BUILD_PLATFORM_APPLE_IOS=TRUE \
+            2>&1 | tee logs/ois-ios-configure.log
+        continue-on-error: true
+
+      - name: Build OIS for iPhone
+        run: |
+          cmake --build ois/build-ios -j 4 2>&1 | tee logs/ois-ios-build.log
+        continue-on-error: true
+
+      - name: Inspect result
+        if: always()
+        run: |
+          {
+            echo "## OIS iPhone backend"
+            echo '```'
+            ls -la ois/build-ios/*.a 2>/dev/null || echo "(no static lib)"
+            if [ -f ois/build-ios/libOIS.a ]; then
+              lipo -info ois/build-ios/libOIS.a 2>/dev/null || true
+              nm ois/build-ios/libOIS.a 2>/dev/null | grep -c 'iPhone' || true
+            fi
+            echo '```'
+            echo "### Errors"
+            echo '```'
+            grep -E 'error:|fatal error|CMake Error' logs/ois-ios-*.log 2>/dev/null | head -40 || echo "(none)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ois-ios-logs
+          path: logs/
+          retention-days: 30
+          if-no-files-found: warn
+
+  ror-macos:
+    name: RoR's own code on Apple clang (OIS supplied by us)
+    runs-on: macos-15
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          brew install cmake ninja || true
+          (brew install conan || pipx install conan || python3 -m pip install --user --break-system-packages conan) || true
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          cmake --version | head -1
+          ninja --version
+
+      - name: Get RoR source
+        run: git clone --depth 1 https://github.com/RigsOfRods/rigs-of-rods.git ror
+
+      - name: Build OIS from source (C++14 makes the legacy code compile)
+        run: |
+          mkdir -p logs
+          git clone --depth 1 "$OIS_REPO" ois
+          cmake -S ois -B ois/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_STANDARD=14 -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+            2>&1 | tee logs/ois-mac-configure.log
+          cmake --build ois/build -j 4 2>&1 | tee logs/ois-mac-build.log
+          ls -la ois/build/*.a || true
+
+      - name: Patch RoR for the Apple/iOS port
+        run: |
+          python3 patches/ror/apply_ios_patches.py ror \
+            --ois-include "$PWD/ois/includes" \
+            --ois-lib "$PWD/ois/build/libOIS.a"
+
+      - name: Configure Conan
+        working-directory: ror
+        run: |
+          conan profile detect --force
+          conan remote add rigs-of-rods-deps "$CONAN_REMOTE" -f || true
+
+      - name: CMake configure
+        working-directory: ror
+        run: |
+          cmake . -GNinja -DCMAKE_BUILD_TYPE=Release -Bbuild \
+            -DCMAKE_PROJECT_TOP_LEVEL_INCLUDES=cmake/conan_provider.cmake \
+            -DCREATE_CONTENT_FOLDER=OFF -DCONAN_DISABLE_STRICT_MODE=1 \
+            -DROR_OIS_INCLUDE_DIR="$GITHUB_WORKSPACE/ois/includes" \
+            -DROR_OIS_LIBRARY="$GITHUB_WORKSPACE/ois/build/libOIS.a" \
+            2>&1 | tee ../logs/1-configure.log
+        continue-on-error: true
+
+      - name: Build with ninja -k 0 (collect ALL errors)
+        working-directory: ror
+        run: |
+          ninja -C build -k 0 2>&1 | tee ../logs/2-build.log
+        continue-on-error: true
+
+      - name: Summary
+        if: always()
+        working-directory: ror
+        run: |
+          {
+            echo "## RoR on macOS (OIS from source)"
+            echo
+            echo "### Configure: did conan resolve?"
+            echo '```'
+            grep -iE 'fatal error|CMake Error|Could NOT|Conan install failed' ../logs/1-configure.log | head -20 || echo "(no configure errors)"
+            echo '```'
+            ERR=$(grep -cE 'error:' ../logs/2-build.log 2>/dev/null || echo 0)
+            echo "### Total compiler errors: $ERR"
+            echo
+            echo "### First 80 errors"
+            echo '```'
+            grep -E 'error:' ../logs/2-build.log | head -80 || echo "(none)"
+            echo '```'
+            echo "### Error types (top 20)"
+            echo '```'
+            grep -oE 'error: [^:]+' ../logs/2-build.log 2>/dev/null | sort | uniq -c | sort -rn | head -20 || echo "(none)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ror-macos-ois-logs
+          path: logs/
+          retention-days: 30
+          if-no-files-found: warn
