@@ -3,33 +3,17 @@
 <plist version="1.0">
 <dict>
 	<!--
-	NOTE TO EDITORS
+	Deliberately empty.  A free Apple ID cannot carry extra entitlements, and
+	the signature that actually authorises the app is added by whoever
+	sideloads the IPA.  This file exists only so codesign embeds an
+	entitlements blob plus its DER form, exactly as the milestone-0 smoke test
+	(the one bundle that is known to install) was signed.
 
-	RoR is built with plain CMake rather than Xcode, so nothing supplies an
-	entitlements file at all.  This deliberately EMPTY dictionary exists only
-	so that codesign embeds an entitlements blob together with its DER form,
-	exactly the way the one bundle in this repository that is known to
-	install was signed (the milestone-0 smoke test, whose entitlements file
-	is an empty dict too).
-
-	A free Apple ID cannot carry extra entitlements, so there is nothing to
-	put in here.  The signatures that actually authorise the app are added by
-	whoever sideloads the IPA.
-
-	The flags, in words: sign ad-hoc, attach this entitlements file, and
-	generate the DER form of the entitlements.
-
-	DO NOT put two consecutive hyphens in this comment.  XML forbids that
-	sequence inside a comment, and the entitlements parser built into the
-	operating system rejects the whole file if it sees one.  The previous
-	revision of this file did exactly that and codesign answered:
-
-	    Failed to parse entitlements: AMFIUnserializeXML:
-	    syntax error near line 9
-
-	which left the bundle completely unsigned and is what started this whole
-	investigation.  A plain XML parser rejects the file the same way, which
-	is how it was confirmed on a machine with no macOS on it.
+	Keep it SHORT.  XML forbids two consecutive hyphens inside a comment, and
+	the operating system's entitlements parser rejects the whole file when it
+	sees one - see PORT_FINDINGS 7.17.  The previous revision carried a 29-line
+	comment and still worked, but it made the embedded blob 1474 bytes against
+	the smoke test's 372, so there is nothing to gain from length here.
 	-->
 </dict>
 </plist>

@@ -1505,6 +1505,109 @@ iOS проверяет на установке: современные верс�
   `~/Documents/RigsOfRods` (§7.8), но что именно из содержимого `Documents`
   реально подхватится, не проверено.
 
+### 7.17. Первая попытка подписать с entitlements уронила подпись совсем
+
+Первый вариант `patches/ios/RoR.entitlements` (`fcea5d8`) выглядел логично:
+пустой словарь + подробный комментарий, объясняющий, зачем файл нужен. Но
+в комментарий была вставлена командная строка с `--force --sign --entitlements
+--generate-entitlement-der`. В XML **запрещена последовательность из двух
+дефисов внутри комментария**. Парсер entitlements в macOS отвергает весь
+файл целиком:
+
+```
+ad-hoc codesign: FAILED (not fatal, the sideloader re-signs)
+Failed to parse entitlements: AMFIUnserializeXML: syntax error near line 9
+bundle is unsigned (expected; the sideloader adds the signature)
+----- what the signature actually says -----
+ror/build/bin/RoR.app: code object is not signed at all
+```
+
+Последствие: бандл уехел в релиз **полностью без подписи** — `.ipa` стала
+на 145 КБ меньше (144 994 байта ≈ размер пропавшей подписи). Это хуже, чем
+прежняя голая подпись с тремя блобами: iOS получает вообще неподписанный
+bundle.
+
+Причина подтверждена локально, на Windows, без macOS: Python `plistlib`
+использует expat — стандартный XML-парсер:
+
+```
+OURS  (broke codesign) -> ExpatError: not well-formed (invalid token): line 9, column 3
+STUB (works)           -> {}   (Free.entitlements заглушки парсится нормально)
+```
+
+Файл переписан без двойных дефисов в комментарии, добавлено предупреждение
+о ловушке. Парсится в пустой словарь `{}`, как и `Free.entitlements` заглушки.
+
+**Шаг упаковки усилен**, чтобы это никогда не повторилось молча:
+- `plutil -lint` проверяет entitlements-файл до использования, при отказе — подпись без него.
+- Функция `adhoc_sign` при неудаче с entitlements пробует подписать **без** них, чтобы не уйти с полностью неподписанным бандлом.
+- Возвращает ненулевой код, если и это не удалось, что останавливает шаг; upload всё равно сработает (`if: always()`).
+
+Оба бандла (полный и lite) идут через `adhoc_sign`. Логика протестирована
+локально с заглушкой `codesign`: приняты entitlements → первый путь; отказ
+entitlements → fallback; оба варианта упали → UNSIGNED; `plutil` отвергает
+файл → fallback.
+
+### 7.18. Подпись называла бандл не тем именем; добавлена третья (tiny) сборка
+
+Разбор лога успешного запуска `38698653075` дал главное, что не было видно
+снаружи: строку, которую печатает сам codesign.
+
+```
+Executable=/Users/runner/work/ror-ios/ror-ios/ror/build/bin/RoR.app/RoR
+Identifier=RoR-5555494495c14ca205fb3d8ab572baf55691bc9e
+Format=bundle with Mach-O thin (arm64)
+CodeDirectory v=20400 size=142309 flags=0x2(adhoc) hashes=4436+7 location=embedded
+```
+
+`LC_UUID` этого же бинарника — `95c14ca205fb3d8ab572baf55691bc9e`. То есть
+подпись получила имя `<CFBundleExecutable>-<LC_UUID>`. Это внутренний fallback
+codesign на случай, когда `CFBundleIdentifier` из бандла получить не удалось.
+Единственный бандл, который на устройстве ставится — заглушка milestone-0 —
+несёт `Identifier=io.github.ror.ios`, то есть настоящий bundle id. iOS
+сопоставляет подпись и plist при проверке, поэтому расхождение — правдоподобная
+причина «не удаётся установить».
+
+Обе подписи разобраны побайтово (Python, без macOS, скрипты
+`sigver.py`/`codesig.py`/`macho2.py`). **Совпадает** почти всё: `hashType`
+SHA-256, версия CodeDirectory `0x20400`, `flags=0x2` (adhoc), пять блобов
+(`CODEDIRECTORY`, `REQUIREMENTS`, `EMBEDDED_ENTITLEMENTS` xml,
+`EMBEDDED_DER_ENTITLEMENTS`, `BLOBWRAPPER`), DER-полезная нагрузка
+`7005020101b000`, pageSize 4096, nSpecialSlots 7; Mach-O `MH_EXECUTE`,
+сегменты `__PAGEZERO/__TEXT/__DATA_CONST/__DATA/__LINKEDIT`, `__LINKEDIT`
+последний, `LC_CODE_SIGNATURE` в конце файла, файл целиком валиден по zip
+(56 записей, дублей нет, странных имён нет, zip64 нет, симлинков нет).
+
+**Отличается** ровно два пункта:
+- `Identifier` — см. выше;
+- размер XML-entitlements: 1474 байта против 372 у заглушки. Причина чисто
+  косметическая: комментарий в `RoR.entitlements` был на 29 строк.
+
+Также отличаются состав `LC_*` и набор dylib (у нас `LC_DYLD_INFO_ONLY`,
+`LC_DYLIB_CODE_SIGN_DRS`, 13 обычных dylib и нет `LC_BUILD_VERSION`; у заглушки
+`LC_DYLD_EXPORTS_TRIE`/`LC_BUILD_VERSION`, 10 weak-загрузок Swift и
+`LC_RPATH`), но это следствие того, чем собран бинарник, и установке не мешает.
+
+Что сделано:
+- в оба вызова `codesign` добавлено `--identifier $BUNDLE_ID` — подпись теперь
+  несёт тот же идентификатор, что plist, независимо от того, что сбивает
+  определение бандла внутри codesign;
+- комментарий в `RoR.entitlements` сокращён (блоб вернётся к размеру заглушки);
+- в лог добавлена диагностика: та же подпись на копиях с plist в XML, в бинаре
+  и с `--identifier` — она покажет, что именно сбивало codesign;
+- добавлен третий, диагностический `.ipa` — `RoR-ios-tiny.ipa`: тот же
+  `Info.plist`, тот же `PkgInfo`, тот же вызов `codesign` и та же сборка
+  `Payload/` + zip, но исполняемый файл ~50 КБ вместо 18 МБ.
+
+Смысл tiny: если он ставится, а `RoR-ios-lite.ipa` — нет, то упаковка, plist и
+подпись доказанно исправны, и дело в самом бинарнике RoR (размер/структура).
+Если не ставится ни один — дело в упаковке или в подписывальщике, а не в игре.
+
+Чего до сих пор нет: **текста ошибки со стороны устройства**. Симптом
+(иконка появляется, установка обрывается на середине) указывает либо на
+нехватку места, либо на провал проверки подписи после распаковки, и различить
+их можно только по логу `installd` с самого телефона.
+
 ---
 
 ## Уточнённая карта порта

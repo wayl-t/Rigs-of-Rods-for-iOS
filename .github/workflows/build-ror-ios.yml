@@ -253,6 +253,10 @@ jobs:
         run: |
           set +e
           APP_DIR=ror/build/bin/RoR.app
+          # Spelled once.  It is both the plist value and the identifier the
+          # signature is told to use; if those two ever disagree the bundle is
+          # not a valid iOS application (see the codesign note further down).
+          BUNDLE_ID=org.rigsofrods.ror-ios
           if [ ! -f "$APP_DIR/RoR" ]; then
             echo "no linked binary at $APP_DIR/RoR - nothing to package"
             exit 0
@@ -307,7 +311,7 @@ jobs:
             '<dict>' \
             '    <key>CFBundleDevelopmentRegion</key><string>en</string>' \
             '    <key>CFBundleExecutable</key><string>RoR</string>' \
-            '    <key>CFBundleIdentifier</key><string>org.rigsofrods.ror-ios</string>' \
+            "    <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>" \
             '    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>' \
             '    <key>CFBundleName</key><string>Rigs of Rods</string>' \
             '    <key>CFBundleDisplayName</key><string>Rigs of Rods</string>' \
@@ -389,6 +393,18 @@ jobs:
             echo "entitlements file accepted by plutil"
           fi
 
+          # The identifier is spelled out for a reason.  Left to itself,
+          # codesign named this bundle
+          #     RoR-5555494495c14ca205fb3d8ab572baf55691bc9e
+          # i.e. <CFBundleExecutable>-<LC_UUID>, which is what it falls back to
+          # when it cannot obtain CFBundleIdentifier from the bundle.  The one
+          # bundle known to install carries Identifier=io.github.ror.ios - the
+          # real bundle id - and iOS pairs the two when it validates the app,
+          # so a signature that disagrees with the plist is a plausible reason
+          # for "Unable to Install".  Passing --identifier removes the
+          # disagreement no matter what confuses codesign's bundle detection.
+          ID_ARGS="--identifier $BUNDLE_ID"
+
           # Signs $1, falling back to a signature with no entitlements rather
           # than leaving the bundle unsigned.  Returns non-zero only if even
           # that fails, which under `set -e` stops the step; the upload step
@@ -396,13 +412,14 @@ jobs:
           adhoc_sign() {
             local target="$1"
             # shellcheck disable=SC2086
-            if codesign --force --sign - $ENT_ARGS "$target" > adhoc.log 2>&1; then
+            if codesign --force --sign - $ID_ARGS $ENT_ARGS "$target" > adhoc.log 2>&1; then
               echo "  ad-hoc codesign: OK"
               return 0
             fi
             echo "  signing WITH entitlements failed:"
             cat adhoc.log
-            if codesign --force --sign - "$target" >> adhoc.log 2>&1; then
+            # shellcheck disable=SC2086
+            if codesign --force --sign - $ID_ARGS "$target" >> adhoc.log 2>&1; then
               echo "  fell back to signing WITHOUT entitlements"
               echo "  ::warning::this signature has no DER entitlements"
               return 0
@@ -411,6 +428,31 @@ jobs:
             cat adhoc.log
             return 1
           }
+
+          # Why did codesign not use the plist's CFBundleIdentifier?  Three
+          # throwaway bundles with the same binary answer it: the plist as XML,
+          # the plist as binary, and binary with --identifier.  Only the answer
+          # decides whether --identifier can be dropped again later.
+          echo "----- identifier diagnostics -----"
+          plutil -extract CFBundleIdentifier raw -o - "$APP_DIR/Info.plist" \
+            | sed 's/^/  plist says: /' || true
+          for idv in xml bin forced; do
+            d="idtest-$idv.app"
+            rm -rf "$d"; mkdir -p "$d"
+            cp "$APP_DIR/RoR" "$d/RoR"
+            printf 'APPL????' > "$d/PkgInfo"
+            extra=""
+            if [ "$idv" = xml ]; then
+              plutil -convert xml1 -o "$d/Info.plist" "$APP_DIR/Info.plist"
+            else
+              cp "$APP_DIR/Info.plist" "$d/Info.plist"
+            fi
+            [ "$idv" = forced ] && extra="--identifier $BUNDLE_ID"
+            # shellcheck disable=SC2086
+            codesign --force --sign - $extra "$d" > /dev/null 2>&1
+            echo "  $idv -> $(codesign -dvvv "$d" 2>&1 | grep -m1 '^Identifier=' || echo '(none)')"
+            rm -rf "$d"
+          done
 
           echo "----- signing the full bundle -----"
           adhoc_sign "$APP_DIR"
@@ -479,6 +521,42 @@ jobs:
           ls -la RoR-ios-lite.ipa
           du -sh "$APP_DIR/resources" LiteStage/Payload/RoR.app/resources 2>/dev/null || true
 
+          # ------------------------------------------------------------------ #
+          # A third IPA, also diagnostic.                                      #
+          #                                                                    #
+          # Everything here is byte-for-byte identical to the bundles above     #
+          # except the executable: same Info.plist, same PkgInfo, same          #
+          # ad-hoc codesign call, same Payload/ + zip construction.  It is      #
+          # ~50 KB instead of 18 MB.                                            #
+          #                                                                    #
+          # That isolates the two things the milestone-0 smoke test cannot:     #
+          # the game binary, and this packaging.  If this one installs and      #
+          # RoR-ios-lite.ipa does not, the packaging is proven good and the     #
+          # game binary is the problem.                                         #
+          # ------------------------------------------------------------------ #
+          TINY_SRC="$GITHUB_WORKSPACE/patches/ios/TinyApp.m"
+          rm -rf TinyStage RoR-ios-tiny.ipa
+          if [ -f "$TINY_SRC" ] && \
+             xcrun -sdk iphoneos clang -target "arm64-apple-ios$IOS_DEPLOYMENT_TARGET" \
+               -fobjc-arc -framework UIKit -framework Foundation \
+               -o /tmp/RoR-tiny "$TINY_SRC" > tiny-cc.log 2>&1; then
+            echo "tiny: compiled ok"
+            mkdir -p TinyStage/Payload/RoR.app
+            cp /tmp/RoR-tiny TinyStage/Payload/RoR.app/RoR
+            cp "$APP_DIR/Info.plist" TinyStage/Payload/RoR.app/Info.plist
+            cp "$APP_DIR/PkgInfo" TinyStage/Payload/RoR.app/PkgInfo
+            adhoc_sign "TinyStage/Payload/RoR.app" || true
+            rm -f adhoc.log
+            (cd TinyStage && zip -qry ../RoR-ios-tiny.ipa Payload)
+            echo "----- tiny IPA -----"
+            ls -la RoR-ios-tiny.ipa
+            file TinyStage/Payload/RoR.app/RoR
+          else
+            echo "::warning::tiny diagnostic app did not compile"
+            cat tiny-cc.log 2>/dev/null | tail -20 || true
+          fi
+          rm -f tiny-cc.log
+
       - name: Summary
         if: always()
         run: |
@@ -536,6 +614,7 @@ jobs:
           path: |
             RoR-ios.ipa
             RoR-ios-lite.ipa
+            RoR-ios-tiny.ipa
           retention-days: 30
           if-no-files-found: warn
 
@@ -557,16 +636,17 @@ jobs:
           TITLE="Rigs of Rods for iOS - unsigned IPA (rolling)"
           NOTES="Unsigned, ad-hoc-signed RoR IPA for arm64 iPhone/iPad, built from ${GITHUB_SHA:0:9}.
 
-          Two files:
+          Three files:
 
           * RoR-ios.ipa      - the full game, ~112 MB, all resources
           * RoR-ios-lite.ipa - the same app, ~10 MB, most resource archives
                                removed.  DIAGNOSTIC ONLY: it will start but has
                                no sounds, textures or wallpapers.
-
-          If the full one refuses to install with \"Unable to Install - Try Again
-          Later\" while the lite one installs, the problem is size or free space,
-          not the bundle.  If both refuse, it is the signature or the signer.
+          * RoR-ios-tiny.ipa - NOT the game.  A ~50 KB app with RoR's exact
+                               Info.plist, signature and packaging.  If this one
+                               installs while the lite one does not, the
+                               packaging is fine and the game binary is the
+                               problem; if neither installs, packaging/signer.
 
           Hand the file itself to ESIGN / Sideloadly / SideStore - it is served
           as a plain file, nothing to unpack.  An .ipa is a zip whose root
@@ -584,16 +664,18 @@ jobs:
           for a in $(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
                        --json assets --jq '.assets[].name'); do
             case "$a" in
-              RoR-ios.ipa|RoR-ios-lite.ipa) ;;
+              RoR-ios.ipa|RoR-ios-lite.ipa|RoR-ios-tiny.ipa) ;;
               *) echo "removing stale asset: $a"
                  gh release delete-asset "$TAG" "$a" --repo "$GITHUB_REPOSITORY" --yes || true ;;
             esac
           done
 
           gh release upload "$TAG" RoR-ios.ipa --clobber --repo "$GITHUB_REPOSITORY"
-          if [ -f RoR-ios-lite.ipa ]; then
-            gh release upload "$TAG" RoR-ios-lite.ipa --clobber --repo "$GITHUB_REPOSITORY"
-          fi
+          for f in RoR-ios-lite.ipa RoR-ios-tiny.ipa; do
+            if [ -f "$f" ]; then
+              gh release upload "$TAG" "$f" --clobber --repo "$GITHUB_REPOSITORY"
+            fi
+          done
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
             --title "$TITLE" --notes "$NOTES"
 
