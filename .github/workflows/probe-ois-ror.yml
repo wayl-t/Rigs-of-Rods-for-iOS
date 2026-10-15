@@ -89,7 +89,18 @@ jobs:
 
   ror-macos:
     name: RoR's own code on Apple clang (OIS supplied by us)
-    runs-on: macos-15
+    # x86_64 on purpose. OGRE 1.11's OgrePlatformInformation.h decides the CPU
+    # before it ever looks at ARM:
+    #
+    #   #elif OGRE_PLATFORM == OGRE_PLATFORM_APPLE
+    #   #   define OGRE_CPU OGRE_CPU_X86        <- arm64 macOS lands here
+    #   ...
+    #   #elif defined(__arm64__) ... OGRE_CPU_ARM
+    #
+    # so on Apple Silicon OGRE thinks it is Intel, enables SSE and then fails
+    # on <xmmintrin.h>. The iOS path is exempt (__OGRE_HAVE_SSE excludes
+    # OGRE_PLATFORM_APPLE_IOS), so this only hurts the desktop probe.
+    runs-on: macos-15-intel
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
@@ -114,9 +125,9 @@ jobs:
           path: |
             ~/.conan2/p
             ~/.conan2/profiles
-          key: conan2-macos-${{ github.run_id }}
+          key: conan2-macos-intel-${{ github.run_id }}
           restore-keys: |
-            conan2-macos-
+            conan2-macos-intel-
 
       - name: Build OIS from source (C++14 makes the legacy code compile)
         run: |

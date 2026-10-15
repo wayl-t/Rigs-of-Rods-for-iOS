@@ -260,6 +260,85 @@ cmake -S ois -B ois/build-ios -G Ninja \
 
 ---
 
+## Веха 7 — собственная сборка RoR на Apple: четыре грабли
+
+Пока собирался весь граф зависимостей RoR, выяснилось четыре вещи.
+
+### 1. На ремоуте `rigs-of-rods-deps` НЕТ бинарников — только рецепты
+
+Каждый пакет при разрешении печатает:
+
+```
+<package>: Main binary package '...' missing
+<package>: Compatible configurations not found in cache, checking servers
+<package>: No compatible configuration found
+```
+
+То есть **всё собирается из исходников на раннере**, OGRE в том числе. Это
+объясняет, почему первый заход на macOS «скачивал 21 бинарник» и всё равно
+падал на OIS: скачивались **ревизии рецептов**, а не собранные библиотеки.
+
+Следствие: первый прогон всегда долгий, и на нём легко упереться в чужую
+зависимость раньше, чем в свой код.
+
+### 2. Conan 2: `compiler.cppstd` задаётся через `CMAKE_CXX_STANDARD`
+
+`cmake/conan_provider.cmake` (строки 131-135, 402-403) делает:
+
+```cmake
+function(detect_cxx_standard cxx_standard)
+    set(${cxx_standard} ${CMAKE_CXX_STANDARD} PARENT_SCOPE)
+    if(CMAKE_CXX_EXTENSIONS)
+        set(${cxx_standard} "gnu${CMAKE_CXX_STANDARD}" PARENT_SCOPE)
+    endif()
+endfunction()
+...
+string(APPEND profile compiler.cppstd=${compiler_cppstd} "\n")
+```
+
+Значит `-DCMAKE_CXX_STANDARD=14` у RoR превращается в `compiler.cppstd=gnu14`
+для **всего** conan-графа. Это и есть правильный рычаг — а не `conan profile
+update`, которого в Conan 2 нет.
+
+### 3. OGRE 1.11 + Ninja = `bad $-escape`
+
+Сборка `ogre3d` из исходников генератором Ninja падает уже на генерации:
+
+```
+CMake Error: Running ... ninja -t recompact failed with:
+ninja: error: build.ninja:2844: bad $-escape (literal $ must be written as $$)
+```
+
+Провайдер копирует `CMAKE_GENERATOR` в conan-профиль
+(`tools.cmake.cmaketoolchain:generator=${CMAKE_GENERATOR}`), поэтому лечится
+сборкой с `-G"Unix Makefiles"` — тогда и зависимости, и RoR идут через make.
+
+### 4. OGRE 1.11.6 не компилируется под C++17
+
+```
+OgreMain/src/OgreLodStrategy.cpp:89: error: no template named 'binary_function' in namespace 'std'
+OgreMain/src/OgreLodStrategy.cpp:104: error: no template named 'binary_function' in namespace 'std'
+```
+
+`std::binary_function`/`std::unary_function` удалены из libc++ в C++17. То же
+самое было у OIS. Под C++14 всё это ещё есть (с deprecation-предупреждением).
+
+Именно поэтому OGRE под iOS в вехе 3 собрался: там генератор Xcode и стандарт не
+форсился, а conan-путь выставляет `gnu17`.
+
+### Разделение зависимостей
+
+`cmake/DependenciesConfig.cmake` делит зависимости на две группы:
+
+| Обязательные (`find_package(... REQUIRED)`) | Необязательные (`cmake_dependent_option`, фичи за `USE_*`) |
+|---|---|
+| OGRE, OIS, MyGUI, fmt, RapidJSON | OpenAL, discord-rpc, SocketW, AngelScript, cURL, Caelum, PagedGeometry |
+
+Поэтому для первой сквозной сборки conanfile режется до обязательных
+(`apply_ios_patches.py --minimal-deps`), а остальные отключаются сами.
+
+---
+
 ## Что всё ещё неизвестно / не проверено
 
 - **Собственный код RoR на Apple clang** — job `ror-macos` того же прогона
