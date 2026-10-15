@@ -286,6 +286,20 @@ jobs:
           # CMake generated a macOS-style bundle plist from the default
           # template; an iOS bundle needs an iOS one.  printf rather than a
           # heredoc so nothing depends on indentation.
+          #
+          # The keys below mirror what xcodebuild writes for a real iOS app.
+          # That matters for on-device signers (ESIGN and friends) and for
+          # sideloaders, which read the plist before doing anything else:
+          # CFBundleSupportedPlatforms is the key that marks a bundle as an
+          # iOS application at all, and DTPlatformName/DTSDKName say which
+          # SDK produced it.  The milestone-0 smoke-test bundle, built by
+          # xcodebuild, carries all of them - matching it removes a whole
+          # class of "this is not a valid .ipa" refusals.
+          #
+          # MinimumOSVersion is taken from IOS_DEPLOYMENT_TARGET instead of
+          # being spelled out, so the plist and the binary's own LC_BUILD_VERSION
+          # minimum can never drift apart.
+          SDK_VER="$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo 18.5)"
           printf '%s\n' \
             '<?xml version="1.0" encoding="UTF-8"?>' \
             '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
@@ -300,9 +314,15 @@ jobs:
             '    <key>CFBundlePackageType</key><string>APPL</string>' \
             '    <key>CFBundleShortVersionString</key><string>1.0</string>' \
             '    <key>CFBundleVersion</key><string>1</string>' \
+            '    <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>' \
+            "    <key>DTPlatformName</key><string>iphoneos</string>" \
+            "    <key>DTPlatformVersion</key><string>$SDK_VER</string>" \
+            "    <key>DTSDKName</key><string>iphoneos$SDK_VER</string>" \
+            '    <key>LSApplicationCategoryType</key><string>public.app-category.action-games</string>' \
             '    <key>LSRequiresIPhoneOS</key><true/>' \
-            '    <key>MinimumOSVersion</key><string>13.0</string>' \
+            "    <key>MinimumOSVersion</key><string>$IOS_DEPLOYMENT_TARGET</string>" \
             '    <key>UILaunchScreen</key><dict/>' \
+            '    <key>CADisableMinimumFrameDurationOnPhone</key><true/>' \
             '    <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>' \
             '    <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>' \
             '    <key>UIRequiresFullScreen</key><true/>' \
@@ -320,7 +340,16 @@ jobs:
             '    <key>LSSupportsOpeningDocumentsInPlace</key><true/>' \
             '</dict>' \
             '</plist>' > "$APP_DIR/Info.plist"
-          plutil -lint "$APP_DIR/Info.plist" || echo "plutil lint failed (continuing)"
+
+          # xcodebuild always emits a *binary* plist, and so does every .ipa
+          # that has ever been shipped.  Some on-device signers parse only the
+          # binary form, so hand them the same thing Xcode would.
+          plutil -convert binary1 "$APP_DIR/Info.plist"
+          echo "----- Info.plist (binary) -----"
+          plutil -p "$APP_DIR/Info.plist"
+
+          # xcodebuild writes this too, and a few tools check for it.
+          printf 'APPL????' > "$APP_DIR/PkgInfo"
 
           # Ad-hoc signature.  Needs no certificate at all, and whatever
           # sideloads the IPA (AltStore, Sideloadly, ...) re-signs it with the
