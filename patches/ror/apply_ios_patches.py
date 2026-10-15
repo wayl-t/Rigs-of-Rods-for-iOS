@@ -948,6 +948,409 @@ def patch_main_cpp(ror):
     write(path, text)
 
 
+def patch_inputengine_header(ror):
+    """InputEngine.h: teach the engine to be an OIS multitouch listener on iOS.
+
+    OIS's iPhone backend (src/iphone/*.mm, which is what we build and link) has
+    no keyboard and no mouse at all: iPhoneInputManager::freeDeviceList() offers
+    only OISJoyStick (the accelerometer) and OISMultiTouch.  So
+    createInputObject(OISKeyboard) and createInputObject(OISMouse) both throw
+    "No devices match requested type", RoR's own try/catch leaves mKeyboard and
+    mMouse null - and RoR dereferences them unguarded in Capture() and
+    windowResized().  Rather than special-case every dereference, InputEngine
+    becomes the multitouch listener and translates touches into the mouse
+    events RoR already understands.
+    """
+    path = os.path.join(ror, "source", "main", "utils", "InputEngine.h")
+    text = read(path)
+
+    text = must_replace(
+        text,
+        '#include "OISMouse.h"\n',
+        '#include "OISMouse.h"\n'
+        "#ifdef ROR_PLATFORM_IOS\n"
+        '#   include "OISMultiTouch.h"\n'
+        "#endif\n",
+        "InputEngine.h include OISMultiTouch.h",
+    )
+
+    # Deriving from the listener is cheaper than a second class: OIS allows only
+    # one callback object per device anyway.
+    text = must_replace(
+        text,
+        "/// Manages controller configuration, evaluates input events\n"
+        "class InputEngine\n"
+        "{\n"
+        "public:\n",
+        "/// Manages controller configuration, evaluates input events\n"
+        "class InputEngine\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Apple/iOS port: OIS's iPhone backend reports touches through this\n"
+        "    // interface and offers no keyboard or mouse at all.\n"
+        "    : public OIS::MultiTouchListener\n"
+        "#endif\n"
+        "{\n"
+        "public:\n",
+        "InputEngine.h derive from OIS::MultiTouchListener",
+    )
+
+    text = must_replace(
+        text,
+        "    void windowResized(Ogre::RenderWindow* rw);\n"
+        "    OIS::ForceFeedback* getForceFeedbackDevice() { return mForceFeedback; };\n",
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Apple/iOS port -----------------------------------------------\n"
+        "    // OIS::MultiTouchListener\n"
+        "    bool                touchMoved(const OIS::MultiTouchEvent& arg) override;\n"
+        "    bool                touchPressed(const OIS::MultiTouchEvent& arg) override;\n"
+        "    bool                touchReleased(const OIS::MultiTouchEvent& arg) override;\n"
+        "    bool                touchCancelled(const OIS::MultiTouchEvent& arg) override;\n"
+        "    // Translates one touch into RoR's ordinary mouse path.\n"
+        "    void                IosHandleTouch(int action, float x, float y);\n"
+        "    // Creates the accelerometer-as-joystick and the multitouch device.\n"
+        "    void                IosSetupInput(size_t hWnd);\n"
+        "#endif\n"
+        "    void windowResized(Ogre::RenderWindow* rw);\n"
+        "    OIS::ForceFeedback* getForceFeedbackDevice() { return mForceFeedback; };\n",
+        "InputEngine.h multitouch + IosHandleTouch declarations",
+    )
+
+    text = must_replace(
+        text,
+        "    OIS::InputManager* mInputManager;\n"
+        "    OIS::Mouse* mMouse;\n"
+        "    OIS::Keyboard* mKeyboard;\n"
+        "    OIS::JoyStick* mJoy[MAX_JOYSTICKS];\n"
+        "    int free_joysticks; //!< Number of detected game controllers\n"
+        "    OIS::ForceFeedback* mForceFeedback;\n",
+        "    OIS::InputManager* mInputManager;\n"
+        "    OIS::Mouse* mMouse;\n"
+        "    OIS::Keyboard* mKeyboard;\n"
+        "    OIS::JoyStick* mJoy[MAX_JOYSTICKS];\n"
+        "    int free_joysticks; //!< Number of detected game controllers\n"
+        "    OIS::ForceFeedback* mForceFeedback;\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Apple/iOS port: the multitouch device replaces mouse and keyboard,\n"
+        "    // and the listeners have to be remembered here because there is no\n"
+        "    // OIS::Mouse/OIS::Keyboard to hand them to.\n"
+        "    OIS::MultiTouch*   mMultiTouch;\n"
+        "    OIS::MouseListener* mMouseListener;\n"
+        "    OIS::KeyListener*  mKeyboardListener;\n"
+        "#endif\n",
+        "InputEngine.h iOS members",
+    )
+    write(path, text)
+
+
+def patch_inputengine(ror):
+    """InputEngine.cpp: make the engine survive - and work - on iOS.
+
+    Two separate problems:
+
+      * Crashes.  Capture() and windowResized() dereference mKeyboard/mMouse
+        unguarded, and both are null on iOS (see patch_inputengine_header).
+        windowResized() is even called from the constructor, so this is not a
+        hypothetical: the engine cannot be constructed at all.
+      * No input.  Touches arrive on OIS's multitouch device, whose listener is
+        the only thing that calls RoR's mouse callbacks - OIS does that from
+        inside Mouse::capture(), which never runs here.
+    """
+    path = os.path.join(ror, "source", "main", "utils", "InputEngine.cpp")
+    text = read(path)
+
+    # Cleanup: the declarators are fine, but the _L macro and friends are not
+    # the issue here - only the OIS dereferences are.
+    text = must_replace(
+        text,
+        "InputEngine::InputEngine() :\n"
+        "     free_joysticks(0)\n"
+        "    , mForceFeedback(0)\n"
+        "    , mInputManager(0)\n"
+        "    , mKeyboard(0)\n"
+        "    , mMouse(0)\n"
+        "    , uniqueCounter(0)\n",
+        "InputEngine::InputEngine() :\n"
+        "     free_joysticks(0)\n"
+        "    , mForceFeedback(0)\n"
+        "    , mInputManager(0)\n"
+        "    , mKeyboard(0)\n"
+        "    , mMouse(0)\n"
+        "    , uniqueCounter(0)\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    , mMultiTouch(0)\n"
+        "    , mMouseListener(0)\n"
+        "    , mKeyboardListener(0)\n"
+        "#endif\n",
+        "InputEngine.cpp ctor initialiser list",
+    )
+
+    # setup(): the whole desktop path assumes a windowed input system that can
+    # hand out keyboards and mice.  On iOS take the multitouch path instead and
+    # then fall through to the binding table, which the desktop path also needs.
+    text = must_replace(
+        text,
+        "void InputEngine::setup()\n"
+        "{\n"
+        "    size_t hWnd = 0;\n"
+        '    App::GetAppContext()->GetRenderWindow()->getCustomAttribute("WINDOW", &hWnd);\n'
+        "\n"
+        '    LOG("*** Initializing OIS ***");\n',
+        "void InputEngine::setup()\n"
+        "{\n"
+        "    size_t hWnd = 0;\n"
+        '    App::GetAppContext()->GetRenderWindow()->getCustomAttribute("WINDOW", &hWnd);\n'
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Apple/iOS port: OIS's iPhone backend creates its own touch view on\n"
+        "    // top of the UIWindow OGRE made for us, and offers an accelerometer\n"
+        "    // (as a joystick) plus a multitouch device.  There is no keyboard and\n"
+        "    // no mouse, so take that path and then do the binding table setup\n"
+        "    // that the desktop path performs at the end of this function.\n"
+        '    LOG("[RoR|Startup|Input] iOS: using OIS\'s iPhone multitouch backend");\n'
+        "    this->IosSetupInput(hWnd);\n"
+        "    this->loadConfigFile(-1);\n"
+        "    completeMissingEvents();\n"
+        "    return;\n"
+        "#else\n"
+        '    LOG("*** Initializing OIS ***");\n',
+        "InputEngine.cpp setup() iOS branch",
+    )
+    text = must_replace(
+        text,
+        "    completeMissingEvents();\n"
+        "}\n"
+        "\n"
+        "OIS::MouseState InputEngine::getMouseState()\n",
+        "    completeMissingEvents();\n"
+        "#endif // ROR_PLATFORM_IOS\n"
+        "}\n"
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "void InputEngine::IosSetupInput(size_t hWnd)\n"
+        "{\n"
+        "    OIS::ParamList pl;\n"
+        '    pl.insert(OIS::ParamList::value_type("WINDOW", TOSTRING(hWnd)));\n'
+        "\n"
+        "    // OIS's iPhone backend throws if it cannot find a UIWindow, so this\n"
+        "    // must not take the process down - without input the app is still\n"
+        "    // usable enough to see what is wrong.\n"
+        "    try\n"
+        "    {\n"
+        "        mInputManager = OIS::InputManager::createInputSystem(pl);\n"
+        "    }\n"
+        "    catch (OIS::Exception& ex)\n"
+        "    {\n"
+        "        mInputManager = nullptr;\n"
+        '        LOG(String("Exception raised on OIS input system creation: ") + String(ex.eText));\n'
+        "    }\n"
+        "\n"
+        "    if (mInputManager == nullptr)\n"
+        "    {\n"
+        '        LOG("[RoR|Startup|Input] WARNING - no OIS input system, no input will be available");\n'
+        "        return;\n"
+        "    }\n"
+        "\n"
+        "    mKeyboard = nullptr;\n"
+        "    mMouse = nullptr;\n"
+        "\n"
+        "    // The accelerometer is exposed as a joystick; keep it so the existing\n"
+        "    // joystick plumbing (and force feedback lookups) stay happy.\n"
+        "    try\n"
+        "    {\n"
+        "        int numSticks = std::min(mInputManager->getNumberOfDevices(OISJoyStick), (int)MAX_JOYSTICKS);\n"
+        "        free_joysticks = 0;\n"
+        "        for (int i = 0; i < numSticks; ++i)\n"
+        "        {\n"
+        "            mJoy[i] = (OIS::JoyStick*)mInputManager->createInputObject(OISJoyStick, true);\n"
+        "            free_joysticks++;\n"
+        "        }\n"
+        "    }\n"
+        "    catch (OIS::Exception& ex)\n"
+        "    {\n"
+        '        LOG(String("Exception raised on joystick creation: ") + String(ex.eText));\n'
+        "    }\n"
+        "\n"
+        "    try\n"
+        "    {\n"
+        "        mMultiTouch = static_cast<OIS::MultiTouch*>(mInputManager->createInputObject(OISMultiTouch, true));\n"
+        "        mMultiTouch->setEventCallback(this);\n"
+        '        LOG("[RoR|Startup|Input] iOS: multitouch device ready");\n'
+        "    }\n"
+        "    catch (OIS::Exception& ex)\n"
+        "    {\n"
+        "        mMultiTouch = nullptr;\n"
+        '        LOG(String("Exception raised on multitouch creation: ") + String(ex.eText));\n'
+        "    }\n"
+        "}\n"
+        "#endif // ROR_PLATFORM_IOS\n"
+        "\n"
+        "OIS::MouseState InputEngine::getMouseState()\n",
+        "InputEngine.cpp IosSetupInput",
+    )
+
+    text = must_replace(
+        text,
+        "void InputEngine::Capture()\n"
+        "{\n"
+        "    mKeyboard->capture();\n"
+        "    mMouse->capture();\n",
+        "void InputEngine::Capture()\n"
+        "{\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Apple/iOS port: mKeyboard and mMouse do not exist here, and touches\n"
+        "    // arrive through the multitouch listener rather than by polling.\n"
+        "    if (mMultiTouch)\n"
+        "    {\n"
+        "        mMultiTouch->capture();\n"
+        "    }\n"
+        "#else\n"
+        "    mKeyboard->capture();\n"
+        "    mMouse->capture();\n"
+        "#endif\n",
+        "InputEngine.cpp Capture()",
+    )
+
+    text = must_replace(
+        text,
+        "    rw->getMetrics(width, height, depth, left, top);\n"
+        "    const OIS::MouseState& ms = mMouse->getMouseState();\n"
+        "    ms.width = width;\n"
+        "    ms.height = height;\n",
+        "    rw->getMetrics(width, height, depth, left, top);\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Apple/iOS port: no OIS::Mouse owns the state, we keep our own copy.\n"
+        "    // This runs from the constructor, so a null dereference here would mean\n"
+        "    // the input engine could never be constructed at all.\n"
+        "    mouseState.width = width;\n"
+        "    mouseState.height = height;\n"
+        "#else\n"
+        "    const OIS::MouseState& ms = mMouse->getMouseState();\n"
+        "    ms.width = width;\n"
+        "    ms.height = height;\n"
+        "#endif\n",
+        "InputEngine.cpp windowResized()",
+    )
+
+    text = must_replace(
+        text,
+        "void InputEngine::SetKeyboardListener(OIS::KeyListener* keyboard_listener)\n"
+        "{\n"
+        "    ROR_ASSERT(mKeyboard != nullptr);\n"
+        "    mKeyboard->setEventCallback(keyboard_listener);\n"
+        "}\n"
+        "\n"
+        "void InputEngine::SetMouseListener(OIS::MouseListener* mouse_listener)\n"
+        "{\n"
+        "    ROR_ASSERT(mMouse != nullptr);\n"
+        "    mMouse->setEventCallback(mouse_listener);\n"
+        "}\n",
+        "void InputEngine::SetKeyboardListener(OIS::KeyListener* keyboard_listener)\n"
+        "{\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Apple/iOS port: nothing to hand the callback to, remember it instead.\n"
+        "    // (The assert() would be compiled out in Release, but the following call\n"
+        "    // would then dereference null - ROR_ASSERT is a bare assert().)\n"
+        "    mKeyboardListener = keyboard_listener;\n"
+        "#else\n"
+        "    ROR_ASSERT(mKeyboard != nullptr);\n"
+        "    mKeyboard->setEventCallback(keyboard_listener);\n"
+        "#endif\n"
+        "}\n"
+        "\n"
+        "void InputEngine::SetMouseListener(OIS::MouseListener* mouse_listener)\n"
+        "{\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    mMouseListener = mouse_listener;\n"
+        "#else\n"
+        "    ROR_ASSERT(mMouse != nullptr);\n"
+        "    mMouse->setEventCallback(mouse_listener);\n"
+        "#endif\n"
+        "}\n",
+        "InputEngine.cpp Set*Listener",
+    )
+
+    text = must_replace(
+        text,
+        "Ogre::Vector2 InputEngine::getMouseNormalizedScreenPos()\n"
+        "{\n"
+        "    OIS::MouseState const& mstate = mMouse->getMouseState();\n",
+        "Ogre::Vector2 InputEngine::getMouseNormalizedScreenPos()\n"
+        "{\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    OIS::MouseState const& mstate = mouseState;\n"
+        "#else\n"
+        "    OIS::MouseState const& mstate = mMouse->getMouseState();\n"
+        "#endif\n",
+        "InputEngine.cpp getMouseNormalizedScreenPos()",
+    )
+
+    # The touch -> mouse translation itself.  Appended at the end of the file so
+    # it cannot disturb any other anchor.
+    text += (
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "// Apple/iOS port -------------------------------------------------------\n"
+        "// OIS reports touches as OISMultiTouch events on a device that has no\n"
+        "// buttons and no pointer, so translate them into the mouse events RoR\n"
+        "// already handles: MyGUI listens for those, and so does the camera.\n"
+        "bool InputEngine::touchMoved(const OIS::MultiTouchEvent& arg)\n"
+        "{\n"
+        "    this->IosHandleTouch(OIS::MT_Moved, (float)arg.state.X.abs, (float)arg.state.Y.abs);\n"
+        "    return true;\n"
+        "}\n"
+        "\n"
+        "bool InputEngine::touchPressed(const OIS::MultiTouchEvent& arg)\n"
+        "{\n"
+        "    this->IosHandleTouch(OIS::MT_Pressed, (float)arg.state.X.abs, (float)arg.state.Y.abs);\n"
+        "    return true;\n"
+        "}\n"
+        "\n"
+        "bool InputEngine::touchReleased(const OIS::MultiTouchEvent& arg)\n"
+        "{\n"
+        "    this->IosHandleTouch(OIS::MT_Released, (float)arg.state.X.abs, (float)arg.state.Y.abs);\n"
+        "    return true;\n"
+        "}\n"
+        "\n"
+        "bool InputEngine::touchCancelled(const OIS::MultiTouchEvent& arg)\n"
+        "{\n"
+        "    this->IosHandleTouch(OIS::MT_Cancelled, (float)arg.state.X.abs, (float)arg.state.Y.abs);\n"
+        "    return true;\n"
+        "}\n"
+        "\n"
+        "void InputEngine::IosHandleTouch(int action, float x, float y)\n"
+        "{\n"
+        "    // OIS's iPhone backend already applies the view's contentScaleFactor,\n"
+        "    // so these are in the same point space the render window and MyGUI use.\n"
+        "    const int new_x = (int)x;\n"
+        "    const int new_y = (int)y;\n"
+        "    mouseState.X.rel = new_x - mouseState.X.abs;\n"
+        "    mouseState.Y.rel = new_y - mouseState.Y.abs;\n"
+        "    mouseState.X.abs = new_x;\n"
+        "    mouseState.Y.abs = new_y;\n"
+        "\n"
+        "    const BitMask_t btnmask = 1 << OIS::MB_Left;\n"
+        "    const OIS::MouseEvent evt(nullptr, mouseState);\n"
+        "\n"
+        "    if (action == OIS::MT_Pressed)\n"
+        "    {\n"
+        "        BITMASK_SET_1(mouseState.buttons, btnmask);\n"
+        "        if (mMouseListener) { mMouseListener->mousePressed(evt, OIS::MB_Left); }\n"
+        "    }\n"
+        "    else if (action == OIS::MT_Released || action == OIS::MT_Cancelled)\n"
+        "    {\n"
+        "        BITMASK_SET_0(mouseState.buttons, btnmask);\n"
+        "        if (mMouseListener) { mMouseListener->mouseReleased(evt, OIS::MB_Left); }\n"
+        "    }\n"
+        "    else\n"
+        "    {\n"
+        "        if (mMouseListener) { mMouseListener->mouseMoved(evt); }\n"
+        "    }\n"
+        "}\n"
+        "#endif // ROR_PLATFORM_IOS\n"
+    )
+    write(path, text)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("ror_dir")
@@ -979,6 +1382,8 @@ def main():
     patch_repo_selector(args.ror_dir)
     patch_multiplayer_selector(args.ror_dir)
     patch_game_settings_alc(args.ror_dir)
+    patch_inputengine_header(args.ror_dir)
+    patch_inputengine(args.ror_dir)
     # The runtime platform layer: the new iOS files themselves plus the two
     # entry-point/frame-loop changes in main.cpp that hand the process over to
     # UIKit.

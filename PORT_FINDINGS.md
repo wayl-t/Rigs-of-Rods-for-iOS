@@ -1219,6 +1219,88 @@ AngelScript в порядке. Правильный шаблон: `^\s+"(.+?)", 
 сайдлоада всё равно переподпишет своим бесплатным Apple ID) и заворачивает
 `Payload/RoR.app` в zip с именем `.ipa`. Рядом лежит `RoR-ios-ipa`.
 
+### 7.14. Ввод: OIS на iOS есть, но не там, где его ждёт RoR
+
+Три прогона сборки (§7.11–7.13) дали `.ipa`, и следующий вопрос — запустится ли
+приложение вообще. Разбор OIS показал, что **оно бы не запустилось**, причём не
+из-за платформенного слоя, а из-за ввода. Это самая неприятная находка за всю
+работу, потому что она не видна ни в одной сборке: CI линкует, но не запускает.
+
+**Что предлагает iPhone-бэкенд OIS.** `iPhoneInputManager` в
+`src/iphone/iPhoneInputManager.mm` — это то, что мы собираем и линкуем
+(его символы `_UIAccelerometer`, `_UIDevice`, `_UIScreen` и были среди
+неразрешённых 38). Его `freeDeviceList()` отдаёт ровно два устройства:
+
+| Тип | Что это |
+|---|---|
+| `OISJoyStick` | акселерометр (`iPhoneAccelerometer`) |
+| `OISMultiTouch` | мультитач (`iPhoneMultiTouch`) |
+
+**Клавиатуры и мыши там нет вообще.** А RoR в `InputEngine::setup()` создаёт
+именно `OISKeyboard`, `OISMouse` и `OISJoyStick`:
+
+```cpp
+mKeyboard = static_cast<Keyboard*>(mInputManager->createInputObject(OISKeyboard, true));
+mMouse     = static_cast<Mouse*>(mInputManager->createInputObject(OISMouse, true));
+```
+
+`iPhoneInputManager::createObject()` на эти типы попадает в `default:` и бросает
+`"No devices match requested type."`. Оба вызова в RoR обёрнуты в
+`try/catch (OIS::Exception&)` и в `catch` только пишут в лог — то есть
+**`mKeyboard` и `mMouse` остаются `nullptr`**, и RoR продолжает работу.
+
+**А дальше — гарантированное падение**, потому что эти указатели нигде не
+проверяются:
+
+| Место | Что делает |
+|---|---|
+| `InputEngine.cpp:657` в `windowResized()` | `mMouse->getMouseState()` |
+| `InputEngine.cpp:637-638` в `Capture()` | `mKeyboard->capture()`, `mMouse->capture()` |
+| `InputEngine.cpp:664-671` | `ROR_ASSERT(...)` + `->setEventCallback(...)` |
+| `InputEngine.cpp:1716` | `mMouse->getMouseState()` |
+
+Хуже всего первое: `windowResized()` вызывается **из конструктора**
+(`InputEngine.cpp:434`), а конструктор создаётся при старте. То есть приложение
+падало бы сразу.
+
+Отдельная тонкость: `ROR_ASSERT` — это `#define ROR_ASSERT(_EXPR) assert(_EXPR)`
+(`Application.h:40`) без каких-либо стражей. Спасало бы `NDEBUG`, и он есть
+(`CMAKE_BUILD_TYPE=Release`, `CMAKE_CXX_FLAGS_RELEASE=-O3 -DNDEBUG`), но
+`assert` — не защита: строка **после** него всё равно разыменовывает `nullptr`.
+
+**Ещё одна тонкость, которая делает ввод возможным.** `processMouseMotionEvent`,
+`processMousePressEvent` и `processMouseReleaseEvent` в RoR **не вызывают
+слушателя** — они только пишут в `mouseState`. Слушателя (то есть
+`AppContext::mouseMoved`/`mousePressed`/`mouseReleased`, а через него MyGUI)
+вызывает сам OIS, изнутри `Mouse::capture()`. На iOS `Mouse` не существует,
+значит этот путь мёртв и касания до MyGUI не дошли бы вообще.
+
+**Решение** (`patch_inputengine_header` + `patch_inputengine`):
+
+1. `InputEngine` под iOS наследует `OIS::MultiTouchListener` — слушатель всё
+   равно разрешён только один на устройство, так что второй класс не нужен.
+2. `setup()` на iOS не идёт по настольному пути, а зовёт `IosSetupInput()`:
+   создаёт `OIS::InputManager` в `try/catch` (иначе исключение убьёт процесс),
+   берёт акселерометр как джойстик, создаёт `OISMultiTouch` и подписывается на
+   него, после чего **всё равно** выполняет `loadConfigFile(-1)` и
+   `completeMissingEvents()` — иначе не будет таблицы привязок.
+3. Касания переводятся в мышь: `IosHandleTouch()` заполняет `mouseState`
+   (`X.abs`/`Y.abs`/`rel`, бит `MB_Left`) и **сам зовёт** слушателя —
+   `mouseMoved`/`mousePressed`/`mouseReleased`. MyGUI и камера при этом получают
+   ровно то же, что от настольной мыши, и ничего в игровом коде менять не надо.
+   Мультитач пока сведён к одному касанию (первое); остальные — на потом.
+4. Все настольные разыменования закрыты: `windowResized()`,
+   `getMouseNormalizedScreenPos()` и `Capture()` берут состояние из
+   собственного `mouseState`, `SetKeyboardListener`/`SetMouseListener`
+   запоминают указатель вместо передачи в OIS.
+
+Заодно выяснилось, что **координаты касаний уже в точках**: OIS применяет
+`contentScaleFactor` вида, так что пересчёт не нужен — то же пространство, что
+у окна отрисовки и MyGUI.
+
+Что это даёт на практике: должен быть виден главный экран, и по нему можно
+будет нажимать. Экранных кнопок «газ/тормоз» ещё нет — это следующий слой.
+
 ---
 
 ## Что всё ещё неизвестно / не проверено
