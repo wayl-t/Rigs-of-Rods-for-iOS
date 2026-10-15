@@ -452,18 +452,34 @@ jobs:
           # moved to its own `pipeline-check` tag so this one is unambiguously
           # the game.
           TAG=latest-ipa
-          NOTES="Unsigned RoR IPA for arm64 iPhone/iPad, built from ${GITHUB_SHA:0:9}.
-          Install with Sideloadly/AltStore using your own (free) Apple ID; the
-          sideloader re-signs the bundle, so no Apple certificate is needed here.
-          Contains the engine and OGRE resources, but no vehicle/terrain content yet."
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG" RoR-ios.ipa --clobber --repo "$GITHUB_REPOSITORY"
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --title "Rigs of Rods for iOS - unsigned IPA (rolling)" --notes "$NOTES"
-          else
-            gh release create "$TAG" RoR-ios.ipa --repo "$GITHUB_REPOSITORY" \
-              --title "Rigs of Rods for iOS - unsigned IPA (rolling)" \
-              --notes "$NOTES"
+          TITLE="Rigs of Rods for iOS - unsigned IPA (rolling)"
+          NOTES="Unsigned, ad-hoc-signed RoR IPA for arm64 iPhone/iPad, built from ${GITHUB_SHA:0:9}.
+
+          Download RoR-ios.ipa and hand THAT FILE to ESIGN / Sideloadly / SideStore -
+          it is served as a plain file, nothing to unpack. An .ipa is a zip whose
+          root contains Payload/ ; a signer that says \"invalid ipa\" was given an
+          archive that has something else at its root, or a different file."
+
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "$TITLE" --notes "$NOTES"
           fi
+
+          # Drop every asset that is not the IPA we are about to upload.  The
+          # release previously carried the smoke-test bundle, and leaving two
+          # .ipa files side by side is exactly how the wrong one gets installed.
+          for a in $(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+                       --json assets --jq '.assets[].name'); do
+            if [ "$a" != "RoR-ios.ipa" ]; then
+              echo "removing stale asset: $a"
+              gh release delete-asset "$TAG" "$a" --repo "$GITHUB_REPOSITORY" --yes || true
+            fi
+          done
+
+          gh release upload "$TAG" RoR-ios.ipa --clobber --repo "$GITHUB_REPOSITORY"
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --title "$TITLE" --notes "$NOTES"
+
+          echo "----- release contents -----"
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
             --jq '.assets[] | "asset: \(.name) \(.size) bytes"'
