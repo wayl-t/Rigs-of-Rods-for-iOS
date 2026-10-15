@@ -610,20 +610,144 @@ ${prefix}/lib/Release/OGRE/libCodec_STBIStatic.a
 (`OGRE.pc`, `OGRE-Overlay.pc`, `OGRE-Bites.pc`, …) — то есть RoR сможет
 подключиться обычным `find_package(OGRE 1.11 REQUIRED COMPONENTS ...)`.
 
+### 7.3. Три ловушки следующих зависимостей
+
+**AngelScript: `ARCHFLAGS` не понимает `arm64`.** В
+`sdk/angelscript/projects/cmake/CMakeLists.txt`:
+
+```cmake
+24: set(ARCHFLAGS "${CMAKE_SYSTEM_PROCESSOR}")   # под iOS это "arm64"
+25: if (APPLE AND NOT IOS)                       # под iOS ветка не срабатывает
+26:   if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm")
+27:     set(ARCHFLAGS "aarch64")
+117: if(${ARCHFLAGS} MATCHES "^arm")             # "arm64" совпадает -> arm32-файлы
+127: if(${ARCHFLAGS} MATCHES "^aarch64")          # не совпадает -> arm64-файлов нет
+```
+
+Современный `-DCMAKE_SYSTEM_NAME=iOS` не определяет переменную `IOS`, поэтому
+CMake берёт **32-битный** `as_callfunc_arm.cpp` вместо
+`as_callfunc_arm64_xcode.S`. Лечится однострочной правкой условия на `if (APPLE)`.
+
+Зато AngelScript сам ставит `lib/cmake/Angelscript/AngelscriptConfig.cmake` с
+`NAMESPACE Angelscript::` — то есть даёт ровно тот `Angelscript::angelscript`,
+который проверяет RoR (`cmake/DependenciesConfig.cmake:45`). Собирать его самим
+даже удобнее, чем через conan.
+
+**MyGUI: четыре отдельные ловушки.** Первая попытка собрать MyGUI 3.4.0 для
+iOS падала на конфигурации — и сразу по трём причинам:
+
+1. **Carbon/Cocoa объявлены обязательными.** `CMake/Dependencies.cmake:100`
+   открывает `if (APPLE)` и делает `find_package(Carbon)` и
+   `find_package(Cocoa)` **требуемыми** (`macro_log_feature(..., TRUE, ...)`).
+   На iOS `APPLE` истинно, а фреймворков нет — конфигурация умирает с
+   «The following REQUIRED packages could NOT be located: freetype, Carbon,
+   Cocoa». MyGUI нужен Carbon только для macOS-слоя ввода, которого на iOS нет.
+
+2. **Carbon линкуется и в самих библиотеках.** `MyGUIEngine/CMakeLists.txt:51,66`
+   и `Platforms/Ogre/OgrePlatform/CMakeLists.txt:25` добавляют
+   `include_directories(/usr/local/include /usr/include)` и
+   `target_link_libraries(... ${Carbon_LIBRARY})`. На iOS `find_library(Carbon)`
+   даёт `CARBON_LIBRARY-NOTFOUND`, а `NOTFOUND` в `target_link_libraries` — это
+   фатальная ошибка уже на генерации.
+
+3. **Свой `FindFreetype.cmake` ждёт старые имена переменных.**
+   `CMake/Packages/FindFreetype.cmake` ищет `FREETYPE_INCLUDE_DIR`,
+   `FREETYPE_FT2BUILD_INCLUDE_DIR` и `FREETYPE_LIBRARY_REL` — а не
+   `FREETYPE_INCLUDE_DIRS` / `FREETYPE_LIBRARY`, которые ему передавались.
+   Поэтому он через `use_pkgconfig` цеплял **домашний freetype из /opt/homebrew**
+   (macOS-сборку!) и всё равно писал `Could not locate FREETYPE`.
+
+Все три лечатся одним патчем: каждое `if (APPLE)` в этих трёх файлах
+становится `if (APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")`, а в
+конфигурацию передаются точные имена переменных `FREETYPE_INCLUDE_DIR`,
+`FREETYPE_FT2BUILD_INCLUDE_DIR`, `FREETYPE_LIBRARY_REL` плюс
+`-DCMAKE_PREFIX_PATH=$IOS_PREFIX`. Заодно фиксируется `ZLIB_LIBRARY`/`ZLIB_INCLUDE_DIR`
+на `libz.tbd` из iOS SDK, чтобы `find_package(ZLIB)` не оставил `NOTFOUND`.
+
+4. **`MYGUI_STATIC=TRUE` переименовывает библиотеки.** В
+   `CMake/Utils/MyGUIConfigTargets.cmake:475`
+   (`set_target_properties(... OUTPUT_NAME ${PROJECTNAME}Static)`) получаются
+   `libMyGUIEngineStatic.a` и `libMyGUI.OgrePlatformStatic.a`. А собственный
+   `cmake/find-modules/FindMyGUI.cmake` самого RoR ищет **без** суффикса —
+   `find_library(... MyGUIEngine ...)`. Патч убирает `Static` из `OUTPUT_NAME`.
+   Остальное при `MYGUI_STATIC=TRUE` правильно: `MYGUI_LIB_TYPE` становится
+   `STATIC`, а на `UNIX` (куда iOS попадает) библиотеки ставятся в `lib/`, а не
+   в `lib/Release`.
+
+**Про `MyGUI::MyGUI` — прежний вывод был неверен.** У RoR есть собственный
+`cmake/find-modules/FindMyGUI.cmake`, который сам создаёт IMPORTED-цели
+`MyGUI::MyGUI` и `MyGUI::OgrePlatform`; `find_package` по умолчанию идёт
+**сначала в Module mode**, поэтому используется именно он, а не config-файл.
+Вдобавок `CMake/Templates/MYGUIConfig.cmake.in` в 3.4.0 вообще никуда не
+устанавливается (правила `install()` для него в дереве нет). Свой
+`lib/cmake/MyGUI/MyGUIConfig.cmake` мы всё равно дописываем — как страховку на
+случай config mode.
+
+**`MYGUI_EXPORT` на Apple пуст.** `MyGUIEngine/include/MyGUI_Platform.h:85`
+делает его `__attribute__((visibility("default")))` только при
+`MYGUI_GCC_VISIBILITY`, а `MYGUI_STATIC` влияет лишь на Windows
+(`__declspec`). Для статической линковки это неважно.
+
+**Остальное — прямолинейно.** `openal-soft` собирается обычным
+`-DCMAKE_SYSTEM_NAME=iOS`. Проверено, что `APPLE_IOS` в OGRE выбирает
+GLES2 и отключает GL/Cg/tools — то есть «не найден OpenGL» в логе это норма.
+
+### 7.4. Остальные зависимости: OIS, fmt, RapidJSON, SocketW, PagedGeometry
+
+Все они собираются для iphoneos/arm64 и укладываются в тот же префикс
+`ios-sdk`.
+
+- **OIS** — `https://github.com/AnotherFoxGuy/conan-OIS.git`, рецепт ровно тот
+  же, что в `probe-ois-ror.yml`: `-DOGRE_BUILD_PLATFORM_APPLE_IOS=TRUE` включает
+  настоящий iPhone-бэкенд (`src/iphone/*.mm`, multitouch). Даёт `libOIS.a`;
+  заголовки (`OIS.h`, `OISMouse.h`, …) кладутся плоско в `include/OIS/`, потому
+  что RoR включает их как `<OIS.h>`, а `ROR_OIS_INCLUDE_DIR` указывает прямо на
+  этот каталог.
+
+- **fmt 12.2.0** — требует всего лишь `cxx_std_11` и ставит
+  `lib/cmake/fmt/fmt-config.cmake` с целью `fmt::fmt`. Собирается с
+  `-DCMAKE_CXX_STANDARD=14`, как и все остальные зависимости.
+
+- **RapidJSON** — header-only; в `lib/cmake/RapidJSON/RapidJSONConfig.cmake`
+  дописывается только `RapidJSON_INCLUDE_DIRS` (RoR читает именно её,
+  `source/main/CMakeLists.txt:474`).
+
+- **SocketW** — `https://github.com/AnotherFoxGuy/SocketW.git`. У него
+  `cmake_minimum_required(VERSION 3.0.2)`, поэтому нужен
+  `-DCMAKE_POLICY_VERSION_MINIMUM=3.5`. Ставит `SocketWTargets.cmake` с
+  `NAMESPACE SocketW::` → ровно тот `SocketW::SocketW`, который проверяет RoR
+  (`cmake/DependenciesConfig.cmake`). `find_package(OpenSSL)` там **не
+  REQUIRED**, а master-server у RoR — обычный TCP, поэтому OpenSSL не
+  собирается вообще; чтобы домашний OpenSSL не подмешался, передаётся
+  `-DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE`.
+
+- **PagedGeometry 1.2.0** — `https://github.com/AnotherFoxGuy/ogre-pagedgeometry.git`
+  (тег `v1.2.0`). Нужен потому, что `gameplay/RandomTreeLoader.h` включает
+  `PagedGeometry.h` без всяких `#ifdef`. Сборочная система 2009 года умеет
+  искать OGRE только через pkg-config, а `OGRE.pc` из нашего префикса
+  непригоден: в нём зашиты X11/freeimage/boost и `libdir=${prefix}/lib`, тогда
+  как настоящие библиотеки лежат в `lib/Release` (и называются, например,
+  `libOgreMainStatic.a`, а не `libOgreMain.a`). Библиотека — это 12
+  трансляционных единиц, которым нужны только заголовки OGRE, поэтому
+  `CMakeDependenciesConfig.txt` заменяется на пустышку, а пути передаются через
+  `-DOgre_INCLUDE_DIRS` / `-DOgre_LIBRARY_DIRS` / `-DOgre_LIBRARIES`. Ставится
+  как `include/PagedGeometry/*.h` + `lib/libPagedGeometry.a` — именно туда
+  смотрит `cmake/find-modules/FindPagedGeometry.cmake` (он сам создаёт target
+  `PagedGeometry::PagedGeometry`, так что config-файл не нужен).
+
+- **Версия C++.** Все зависимости собираются с `-DCMAKE_CXX_STANDARD=14`. Это
+  принципиально: у AppleClang 17 по умолчанию `gnu++17`, а OGRE 1.11.6 на C++17
+  не компилируется (`std::binary_function`), и MyGUI/PagedGeometry тянут
+  заголовки OGRE. Сам RoR собирается с `-std=c++11` (`CMakeLists.txt:112`,
+  ветка `ELSEIF (UNIX)`, куда iOS попадает как `UNIX`+`APPLE`).
+
 ---
 
 ## Что всё ещё неизвестно / не проверено
 
-- **Собственный код RoR на Apple clang** — job `ror-macos` того же прогона
-  собирает OIS самим и смотрит, как далеко заходит RoR. Это список ошибок,
-  который мы ждали с вехи 4.
-- **MyGUI (GUI) на iOS.** У RoR 78 файлов GUI на MyGUI. MyGUI — чистый C++ и
-  рисуется через OGRE, но ему нужен поток событий ввода, а его на iPhone пока нет.
-- **Прочие зависимости под iOS:** `mygui`, `ogre3d-caelum`, `ogre3d-pagedgeometry`,
-  `socketw`, `openal-soft`, `angelscript`, `discord-rpc`. Готовых бинарников под
-  iOS не существует — придётся собирать из исходников либо отключать.
-- **Контент.** Машины и ландшафты RoR должны попасть в контейнер приложения
-  (как в GTA V iOS кладут данные в Documents через Файлы).
+- **Собственный код RoR на Apple clang** — macOS-проба упёрлась в баг рецепта
+  `angelscript` (CFI-ассемблер x86_64), поэтому список ошибок самого RoR ещё
+  не получен. Планируется получить его сразу на iOS, когда SDK будет полным.
 
 ---
 
@@ -634,7 +758,8 @@ ${prefix}/lib/Release/OGRE/libCodec_STBIStatic.a
 | Отрисовка (OGRE 1.11.6) | оставить, включить штатный iOS-путь GLES2/EAGL |
 | OIS (ввод) | собрать самим с iPhone-бэкендом; события касаний → события RoR |
 | MyGUI (интерфейс) | оставить, подать в него события касаний |
-| Caelum, PagedGeometry | плагины OGRE, едут вместе с ним |
+| PagedGeometry | собираем сами (сборочная система не для iOS), ставим в префикс |
+| Caelum | отключаем (`#ifdef USE_CAELUM`), небо рисуем средствами OGRE |
 | Физика | чистый C++, должна собраться как есть |
 | Парсеры форматов | чистый C++, должны собраться как есть |
 | `main.cpp`, `PlatformUtils` | заменить платформенной обвязкой iOS |

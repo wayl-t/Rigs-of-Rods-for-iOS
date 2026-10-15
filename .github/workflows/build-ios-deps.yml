@@ -16,15 +16,26 @@ name: Build iOS dependency SDK
 # nested configure does not inherit our -DCMAKE_POLICY_VERSION_MINIMUM=3.5,
 # and zziplib fails outright ("** BUILD FAILED **" in zzipfseeko.pc).
 #
-# So this workflow cross-compiles the base of the iOS dependency SDK:
+# So this workflow cross-compiles the whole base of the iOS dependency SDK:
 #
-#   FreeType  (enables OGRE Overlay + Bites, and MyGUI's font loading)
-#   OGRE      (OgreMain + Bites + Overlay + Paging + RTShaderSystem
-#              + MeshLodGenerator + Terrain + Octree/PFX plugins
-#              + GLES2 render system, static)
+#   FreeType     (enables OGRE Overlay + Bites, and MyGUI's font loading)
+#   OGRE         (OgreMain + Bites + Overlay + Paging + RTShaderSystem
+#                 + MeshLodGenerator + Terrain + Octree/PFX plugins
+#                 + GLES2 render system, static)
+#   OIS          (iPhone multitouch backend, src/iphone/*.mm)
+#   fmt          (fmt::fmt)
+#   RapidJSON    (header-only + synthesized RapidJSONConfig.cmake)
+#   SocketW      (SocketW::SocketW; no OpenSSL - plain-TCP master server)
+#   AngelScript  (Angelscript::angelscript; arm64 arch-detection patch)
+#   openal-soft  (libopenal.a)
+#   MyGUI        (libMyGUIEngine.a + libMyGUI.OgrePlatform.a + MyGUI:: targets)
+#   PagedGeometry(libPagedGeometry.a; bypasses its pkg-config-only build)
 #
-# Both are installed into one prefix which is uploaded as an artifact so the
-# next milestone (MyGUI, OIS, then RoR itself) can consume it unchanged.
+# Everything is installed into one prefix which is uploaded as an artifact so
+# the next milestone (RoR itself) can consume it unchanged.
+#
+# Every dependency step is continue-on-error so a single dispatch reports on
+# ALL of them; the final "Verify full iOS SDK" step is the real gate.
 
 on:
   workflow_dispatch:
@@ -203,6 +214,139 @@ jobs:
           lipo -info "$IOS_PREFIX/lib/libfreetype.a" || true
 
       # ---------------------------------------------------------------- #
+      # OIS (Object Oriented Input System)                                #
+      #                                                                   #
+      # iOS gets its input from UIKit, so we need OIS's real iPhone       #
+      # backend (src/iphone/*.mm - multitouch).  The conan recipe never   #
+      # selects it; OGRE's misc var OGRE_BUILD_PLATFORM_APPLE_IOS is the  #
+      # switch that OIS's CMakeLists looks at.                            #
+      # ---------------------------------------------------------------- #
+      - name: Get OIS
+        continue-on-error: true
+        run: |
+          git clone --depth 1 https://github.com/AnotherFoxGuy/conan-OIS.git ois
+
+      - name: Configure OIS (iOS, static, iPhone multitouch backend)
+        continue-on-error: true
+        run: |
+          cmake -S ois -B ois/build -G Ninja \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET \
+            -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_STANDARD=14 -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+            -DOGRE_BUILD_PLATFORM_APPLE_IOS=TRUE \
+            2>&1 | tee logs/ois-configure.log
+
+      - name: Build + install OIS
+        continue-on-error: true
+        run: |
+          cmake --build ois/build -j $(sysctl -n hw.ncpu) 2>&1 | tee logs/ois-build.log
+          mkdir -p "$IOS_PREFIX/lib" "$IOS_PREFIX/include/OIS"
+          cp ois/build/libOIS.a "$IOS_PREFIX/lib/" 2>/dev/null || \
+            find ois/build -name 'libOIS*.a' -exec cp {} "$IOS_PREFIX/lib/" \;
+          # RoR includes flat <OIS.h>, so the headers must sit directly in
+          # the directory we hand to ROR_OIS_INCLUDE_DIR.
+          hdr=$(find ois -name 'OIS.h' -not -path '*/build/*' | head -1)
+          if [ -n "$hdr" ]; then cp "$(dirname "$hdr")"/*.h "$IOS_PREFIX/include/OIS/"; fi
+          echo "----- OIS lib -----"
+          ls -la "$IOS_PREFIX/lib/libOIS.a" || true
+          echo "----- OIS headers -----"
+          ls "$IOS_PREFIX/include/OIS" | head -20 || true
+          lipo -info "$IOS_PREFIX/lib/libOIS.a" 2>/dev/null || true
+
+      # ---------------------------------------------------------------- #
+      # fmt (RoR links fmt::fmt)                                          #
+      # ---------------------------------------------------------------- #
+      - name: Get fmt 12.2.0
+        continue-on-error: true
+        run: |
+          git clone --depth 1 --branch 12.2.0 https://github.com/fmtlib/fmt.git fmt
+
+      - name: Configure fmt (iOS, static, Makefiles)
+        continue-on-error: true
+        run: |
+          cmake -S fmt -B fmt/build -G "Unix Makefiles" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET \
+            -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT" \
+            -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DCMAKE_CXX_STANDARD=14 -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+            -DFMT_TEST=OFF -DFMT_DOC=OFF -DFMT_INSTALL=ON \
+            2>&1 | tee logs/fmt-configure.log
+
+      - name: Build + install fmt
+        continue-on-error: true
+        run: |
+          cmake --build fmt/build -j $(sysctl -n hw.ncpu) 2>&1 | tee logs/fmt-build.log
+          cmake --build fmt/build --target install 2>&1 | tee logs/fmt-install.log
+          find "$IOS_PREFIX" -name 'libfmt*' | head -10
+          find "$IOS_PREFIX" -name 'fmt-config.cmake' -o -name 'fmtConfig.cmake' | head -10
+
+      # ---------------------------------------------------------------- #
+      # RapidJSON (header-only; RoR reads RapidJSON_INCLUDE_DIRS)         #
+      # ---------------------------------------------------------------- #
+      - name: Get RapidJSON
+        continue-on-error: true
+        run: |
+          git clone --depth 1 --branch v1.1.0 https://github.com/Tencent/rapidjson.git rapidjson
+
+      - name: Install RapidJSON + synthesize RapidJSONConfig.cmake
+        continue-on-error: true
+        run: |
+          mkdir -p "$IOS_PREFIX/include" "$IOS_PREFIX/lib/cmake/RapidJSON"
+          cp -R rapidjson/include/rapidjson "$IOS_PREFIX/include/"
+          cat > "$IOS_PREFIX/lib/cmake/RapidJSON/RapidJSONConfig.cmake" <<'EOF'
+          get_filename_component(_prefix "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+          set(RapidJSON_INCLUDE_DIRS "${_prefix}/include")
+          set(RapidJSON_INCLUDE_DIR  "${_prefix}/include")
+          set(RapidJSON_FOUND TRUE)
+          EOF
+          ls "$IOS_PREFIX/include/rapidjson" | head -5
+
+      # ---------------------------------------------------------------- #
+      # SocketW (RoR's master-server / multiplayer TCP layer).            #
+      # OpenSSL is intentionally NOT built: SocketW's find_package(OpenSSL)#
+      # is optional and RoR's protocol is plain TCP.  We disable the      #
+      # search so a homebrew OpenSSL cannot leak into the SDK.            #
+      # ---------------------------------------------------------------- #
+      - name: Get SocketW
+        continue-on-error: true
+        run: |
+          git clone --depth 1 https://github.com/AnotherFoxGuy/SocketW.git socketw
+
+      - name: Configure SocketW (iOS, static, no OpenSSL)
+        continue-on-error: true
+        run: |
+          cmake -S socketw -B socketw/build -G "Unix Makefiles" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET \
+            -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT" \
+            -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_CXX_STANDARD=14 -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE \
+            2>&1 | tee logs/socketw-configure.log
+
+      - name: Build + install SocketW
+        continue-on-error: true
+        run: |
+          cmake --build socketw/build -j $(sysctl -n hw.ncpu) 2>&1 | tee logs/socketw-build.log
+          cmake --build socketw/build --target install 2>&1 | tee logs/socketw-install.log
+          find "$IOS_PREFIX" -name 'libSocketW*' | head -10
+          find "$IOS_PREFIX" -name 'SocketW*.cmake' | head -10
+
+      # ---------------------------------------------------------------- #
       # AngelScript (2.38) - provides Angelscript::angelscript              #
       # ---------------------------------------------------------------- #
       - name: Get AngelScript 2.38.0
@@ -283,9 +427,58 @@ jobs:
         run: |
           git clone --depth 1 --branch MyGUI3.4.0 https://github.com/MyGUI/mygui.git mygui
 
+      - name: Patch MyGUI for iOS (no Carbon/Cocoa, stable archive names)
+        continue-on-error: true
+        run: |
+          python3 - <<'PY'
+          # 1) On iOS, APPLE is TRUE but there is no Carbon/Cocoa framework and
+          #    no host /usr/include.  MyGUI's `if (APPLE)` blocks add all three:
+          #      CMake/Dependencies.cmake      -> makes Carbon+Cocoa REQUIRED
+          #      MyGUIEngine/CMakeLists.txt    -> link Carbon, -I/usr/include
+          #      OgrePlatform/CMakeLists.txt   -> link Carbon, -I/usr/include
+          #    It only needs Carbon for the macOS input layer, which iOS does
+          #    not use at all, so every such guard is made iOS-aware.
+          #
+          # 2) With MYGUI_STATIC=TRUE MyGUI renames its archives to *Static
+          #    (MyGUIConfigTargets.cmake: `OUTPUT_NAME ${PROJECTNAME}Static`),
+          #    i.e. libMyGUIEngineStatic.a.  RoR's own cmake/find-modules/
+          #    FindMyGUI.cmake looks for "MyGUIEngine" and "MyGUI.OgrePlatform"
+          #    (no suffix), so we drop the rename to get libMyGUIEngine.a and
+          #    libMyGUI.OgrePlatform.a.
+          guard_files = [
+              "mygui/CMake/Dependencies.cmake",
+              "mygui/MyGUIEngine/CMakeLists.txt",
+              "mygui/Platforms/Ogre/OgrePlatform/CMakeLists.txt",
+          ]
+          ios_guard = 'if (APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")'
+          for p in guard_files:
+              d = open(p, "r", encoding="utf-8", errors="replace").read()
+              n = d.count("if (APPLE)")
+              assert n, "no `if (APPLE)` found in %s" % p
+              open(p, "w", encoding="utf-8").write(d.replace("if (APPLE)", ios_guard))
+              print("patched %d APPLE guard(s) in %s" % (n, p))
+
+          p = "mygui/CMake/Utils/MyGUIConfigTargets.cmake"
+          d = open(p, "r", encoding="utf-8", errors="replace").read()
+          assert "OUTPUT_NAME ${PROJECTNAME}Static" in d, "Static OUTPUT_NAME anchor missing"
+          d = d.replace("OUTPUT_NAME ${PROJECTNAME}Static", "OUTPUT_NAME ${PROJECTNAME}")
+          open(p, "w", encoding="utf-8").write(d)
+          print("patched archive OUTPUT_NAME in %s" % p)
+          PY
+          grep -rn "CMAKE_SYSTEM_NAME STREQUAL" \
+            mygui/CMake/Dependencies.cmake \
+            mygui/MyGUIEngine/CMakeLists.txt \
+            mygui/Platforms/Ogre/OgrePlatform/CMakeLists.txt
+          grep -n "OUTPUT_NAME" mygui/CMake/Utils/MyGUIConfigTargets.cmake
+
       - name: Configure MyGUI (iOS, static, Ogre + freetype)
         continue-on-error: true
         run: |
+          # MyGUI ships its own CMake/Packages/FindFreetype.cmake which looks at
+          # FREETYPE_INCLUDE_DIR / FREETYPE_FT2BUILD_INCLUDE_DIR / *_LIBRARY_REL
+          # (NOT the modern FREETYPE_LIBRARY / FREETYPE_INCLUDE_DIRS names that
+          # were passed before - that is why it "Could not locate FREETYPE" and
+          # then fell back to homebrew's macOS freetype via pkg-config).
           cmake -S mygui -B mygui/build -G "Unix Makefiles" \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_SYSTEM_NAME=iOS \
@@ -293,15 +486,20 @@ jobs:
             -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET \
             -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT" \
             -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX" \
+            -DCMAKE_PREFIX_PATH="$IOS_PREFIX" \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_STANDARD=14 -DCMAKE_CXX_STANDARD_REQUIRED=ON \
             -DMYGUI_RENDERSYSTEM=3 \
             -DMYGUI_STATIC=TRUE \
             -DMYGUI_USE_FREETYPE=TRUE \
             -DMYGUI_BUILD_DEMOS=FALSE -DMYGUI_BUILD_TOOLS=FALSE -DMYGUI_BUILD_UNITTESTS=FALSE \
             -DMYGUI_BUILD_PLUGINS=FALSE -DMYGUI_DISABLE_PLUGINS=TRUE \
             -DMYGUI_INSTALL_MEDIA=FALSE \
-            -DFREETYPE_LIBRARY="$IOS_PREFIX/lib/libfreetype.a" \
-            -DFREETYPE_INCLUDE_DIRS="$IOS_PREFIX/include/freetype2" \
+            -DFREETYPE_INCLUDE_DIR="$IOS_PREFIX/include/freetype2" \
+            -DFREETYPE_FT2BUILD_INCLUDE_DIR="$IOS_PREFIX/include/freetype2" \
+            -DFREETYPE_LIBRARY_REL="$IOS_PREFIX/lib/libfreetype.a" \
+            -DZLIB_LIBRARY="$IOS_SYSROOT/usr/lib/libz.tbd" \
+            -DZLIB_INCLUDE_DIR="$IOS_SYSROOT/usr/include" \
             -DOGRE_INCLUDE_DIR="$IOS_PREFIX/include/OGRE" \
             -DOGRE_LIBRARIES="OgreMain;OgreOverlay" \
             -DOGRE_LIB_DIR="$IOS_PREFIX/lib/Release" \
@@ -312,29 +510,98 @@ jobs:
         run: |
           cmake --build mygui/build -j $(sysctl -n hw.ncpu) 2>&1 | tee logs/mygui-build.log
           cmake --build mygui/build --target install 2>&1 | tee logs/mygui-install.log
+          # Belt and braces: if the OUTPUT_NAME patch above ever fails to apply,
+          # MyGUI would install libMyGUIEngineStatic.a / libMyGUI.OgrePlatformStatic.a.
+          # RoR's FindMyGUI.cmake only looks for the unsuffixed names, so copy
+          # them across under the canonical name as well.
+          for pair in "MyGUIEngine:MyGUIEngineStatic" "MyGUI.OgrePlatform:MyGUI.OgrePlatformStatic"; do
+            want="${pair%%:*}"; have="${pair##*:}"
+            if [ ! -f "$IOS_PREFIX/lib/lib${want}.a" ] && [ -f "$IOS_PREFIX/lib/lib${have}.a" ]; then
+              echo "renaming lib${have}.a -> lib${want}.a"
+              cp "$IOS_PREFIX/lib/lib${have}.a" "$IOS_PREFIX/lib/lib${want}.a"
+            fi
+          done
           find "$IOS_PREFIX" -name 'libMyGUI*' | head -10
 
-      - name: Synthesize MyGUI namespaced targets config
+      # ---------------------------------------------------------------- #
+      # PagedGeometry 1.2.0 - provides PagedGeometry::PagedGeometry       #
+      #                                                                   #
+      # Its 2009-era build system only speaks pkg-config for OGRE and is  #
+      # wrong for iOS (OGRE.pc hardcodes X11/freeimage/boost and          #
+      # libdir=lib while the real libs are in lib/Release).  The library  #
+      # is just 12 translation units needing OGRE headers, so we replace  #
+      # the dependency probe with a no-op and pass the paths explicitly.  #
+      # RoR's own FindPagedGeometry.cmake then picks up                    #
+      # <prefix>/include/PagedGeometry/PagedGeometry.h and                #
+      # <prefix>/lib/libPagedGeometry.a - exactly where it installs.      #
+      # ---------------------------------------------------------------- #
+      - name: Get PagedGeometry 1.2.0
+        continue-on-error: true
+        run: |
+          git clone --depth 1 --branch v1.2.0 \
+            https://github.com/AnotherFoxGuy/ogre-pagedgeometry.git pagedgeometry
+
+      - name: Configure + build + install PagedGeometry (iOS)
+        continue-on-error: true
+        run: |
+          printf '%s\n' \
+            '# iOS port: no pkg-config. OGRE paths are supplied with -D on the' \
+            '# cmake command line (see build-ios-deps.yml).' \
+            > pagedgeometry/CMakeDependenciesConfig.txt
+          cmake -S pagedgeometry -B pagedgeometry/build -G "Unix Makefiles" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET \
+            -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT" \
+            -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_CXX_STANDARD=14 -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+            -DPAGEDGEOMETRY_BUILD_SAMPLES=FALSE \
+            -DOgre_INCLUDE_DIRS="$IOS_PREFIX/include/OGRE" \
+            -DOgre_LIBRARY_DIRS="$IOS_PREFIX/lib/Release" \
+            -DOgre_LIBRARIES="OgreMain" \
+            2>&1 | tee logs/paged-configure.log
+          cmake --build pagedgeometry/build -j $(sysctl -n hw.ncpu) 2>&1 | tee logs/paged-build.log
+          cmake --build pagedgeometry/build --target install 2>&1 | tee logs/paged-install.log
+          find "$IOS_PREFIX" -name 'libPagedGeometry*' | head -10
+          find "$IOS_PREFIX" -name 'PagedGeometry.h' 2>/dev/null | head -5
+          ls "$IOS_PREFIX/include/PagedGeometry" 2>/dev/null | head -20 || true
+
+      - name: "Normalize MyGUI cmake package (MyGUI:: namespaced targets)"
         if: always()
         continue-on-error: true
         run: |
+          # MyGUI installs its own CMake/Templates/MYGUIConfig.cmake which only
+          # sets the classic variables (MYGUI_LIBRARIES="MyGUIEngine") and knows
+          # nothing about MyGUI::MyGUI / MyGUI::OgrePlatform that RoR links.
+          # Remove whatever MyGUI installed and drop in our namespaced config so
+          # the result is correct regardless of whether CMake prefers module or
+          # config mode (RoR also ships its own FindMyGUI.cmake).
+          rm -rf "$IOS_PREFIX/lib/cmake/MyGUI" "$IOS_PREFIX/lib/MYGUI" "$IOS_PREFIX/lib/MyGUI"
+          find "$IOS_PREFIX" -name 'MYGUIConfig.cmake' -o -name 'MyGUIConfig.cmake' | while read -r f; do rm -f "$f"; done
           mkdir -p "$IOS_PREFIX/lib/cmake/MyGUI"
           cat > "$IOS_PREFIX/lib/cmake/MyGUI/MyGUIConfig.cmake" <<'EOF'
           get_filename_component(_prefix "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
           set(MyGUI_INCLUDE_DIRS "${_prefix}/include/MYGUI")
           set(MyGUI_LIBRARY_DIRS "${_prefix}/lib")
-          add_library(MyGUI::MyGUI STATIC IMPORTED)
-          if(EXISTS "${_prefix}/lib/libMyGUIEngine.a")
+          set(MYGUI_INCLUDE_DIRS "${_prefix}/include/MYGUI")
+
+          if(NOT TARGET MyGUI::MyGUI)
+            add_library(MyGUI::MyGUI STATIC IMPORTED)
             set_target_properties(MyGUI::MyGUI PROPERTIES
               IMPORTED_LOCATION "${_prefix}/lib/libMyGUIEngine.a"
               INTERFACE_INCLUDE_DIRECTORIES "${_prefix}/include/MYGUI")
           endif()
-          add_library(MyGUI::OgrePlatform STATIC IMPORTED)
-          if(EXISTS "${_prefix}/lib/libMyGUI.OgrePlatform.a")
+
+          if(NOT TARGET MyGUI::OgrePlatform)
+            add_library(MyGUI::OgrePlatform STATIC IMPORTED)
             set_target_properties(MyGUI::OgrePlatform PROPERTIES
               IMPORTED_LOCATION "${_prefix}/lib/libMyGUI.OgrePlatform.a"
               INTERFACE_INCLUDE_DIRECTORIES "${_prefix}/include/MYGUI")
           endif()
+
           set(MyGUI_FOUND TRUE)
           EOF
           cat "$IOS_PREFIX/lib/cmake/MyGUI/MyGUIConfig.cmake"
@@ -352,11 +619,27 @@ jobs:
           for lib in RenderSystem_GLES2 Plugin_OctreeSceneManager Plugin_ParticleFX Codec_STBI; do
             if ! find "$IOS_PREFIX" -name "lib${lib}Static.a" | grep -q .; then echo "MISSING OGRE plugin: $lib"; missing=1; fi
           done
-          [ -f "$IOS_PREFIX/lib/libfreetype.a" ] || { echo "MISSING: libfreetype.a"; missing=1; }
-          find "$IOS_PREFIX" -name 'libangelscript*' | grep -q . || { echo "MISSING: angelscript lib"; missing=1; }
-          find "$IOS_PREFIX" -name 'libopenal*' | grep -q . || { echo "MISSING: openal-soft lib"; missing=1; }
-          find "$IOS_PREFIX" -name 'libMyGUIEngine*' | grep -q . || { echo "MISSING: MyGUIEngine lib"; missing=1; }
-          find "$IOS_PREFIX" -name 'libMyGUI.OgrePlatform*' | grep -q . || { echo "MISSING: MyGUI.OgrePlatform lib"; missing=1; }
+          [ -f "$IOS_PREFIX/lib/libfreetype.a" ]             || { echo "MISSING: libfreetype.a"; missing=1; }
+          [ -f "$IOS_PREFIX/lib/libOIS.a" ]                  || { echo "MISSING: libOIS.a"; missing=1; }
+          [ -f "$IOS_PREFIX/include/OIS/OIS.h" ]             || { echo "MISSING: OIS.h"; missing=1; }
+          find "$IOS_PREFIX" -name 'libangelscript*'         | grep -q . || { echo "MISSING: angelscript lib"; missing=1; }
+          find "$IOS_PREFIX" -name 'libopenal*'              | grep -q . || { echo "MISSING: openal-soft lib"; missing=1; }
+          find "$IOS_PREFIX" -name 'libMyGUIEngine*'         | grep -q . || { echo "MISSING: MyGUIEngine lib"; missing=1; }
+          find "$IOS_PREFIX" -name 'libMyGUI.OgrePlatform*'  | grep -q . || { echo "MISSING: MyGUI.OgrePlatform lib"; missing=1; }
+          find "$IOS_PREFIX" -name 'libfmt*'                 | grep -q . || { echo "MISSING: fmt lib"; missing=1; }
+          [ -d "$IOS_PREFIX/include/rapidjson" ]             || { echo "MISSING: rapidjson headers"; missing=1; }
+          find "$IOS_PREFIX" -name 'libSocketW*'             | grep -q . || { echo "MISSING: SocketW lib"; missing=1; }
+          find "$IOS_PREFIX" -name 'libPagedGeometry*'       | grep -q . || { echo "MISSING: PagedGeometry lib"; missing=1; }
+          [ -f "$IOS_PREFIX/include/PagedGeometry/PagedGeometry.h" ] || { echo "MISSING: PagedGeometry.h"; missing=1; }
+          echo "----- cmake package files RoR will look for -----"
+          for f in "$IOS_PREFIX/CMake/OGREConfig.cmake" \
+                   "$IOS_PREFIX/lib/cmake/Angelscript/AngelscriptConfig.cmake" \
+                   "$IOS_PREFIX/lib/cmake/SocketW/SocketWConfig.cmake" \
+                   "$IOS_PREFIX/lib/cmake/RapidJSON/RapidJSONConfig.cmake" \
+                   "$IOS_PREFIX/lib/cmake/MyGUI/MyGUIConfig.cmake"; do
+            if [ -f "$f" ]; then echo "  ok      $f"; else echo "  MISSING $f"; missing=1; fi
+          done
+          find "$IOS_PREFIX" -name 'fmt-config.cmake' -o -name 'fmtConfig.cmake' | head -5
           if [ "$missing" -eq 1 ]; then echo "SDK VERIFICATION FAILED"; exit 1; fi
           echo "SDK VERIFICATION PASSED"
 
