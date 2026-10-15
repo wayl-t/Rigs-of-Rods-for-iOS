@@ -130,9 +130,11 @@ jobs:
 
       - name: Patch RoR for the Apple/iOS port
         run: |
-          python3 patches/ror/apply_ios_patches.py ror \
+          python3 patches/ror/apply_ios_patches.py ror --minimal-deps \
             --ois-include "$PWD/ois/includes" \
             --ois-lib "$PWD/ois/build/libOIS.a"
+          echo "----- patched conanfile requirements -----"
+          sed -n '/def requirements/,/^$/p' ror/conanfile.py
 
       - name: Configure Conan
         working-directory: ror
@@ -147,7 +149,13 @@ jobs:
           # Ninja generator refuses ("bad $-escape"). Also, the conan provider
           # copies CMAKE_GENERATOR into the conan profile, so this decides how
           # every from-source dependency is built too.
+          #
+          # CMAKE_CXX_STANDARD=14: the provider turns this into
+          # `compiler.cppstd=gnu14` for the whole conan graph. OGRE 1.11 and OIS
+          # use std::unary_function/std::binary_function, removed from libc++
+          # in C++17, so C++14 is the newest standard they compile under.
           cmake . -G"Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -Bbuild \
+            -DCMAKE_CXX_STANDARD=14 \
             -DCMAKE_PROJECT_TOP_LEVEL_INCLUDES=cmake/conan_provider.cmake \
             -DCREATE_CONTENT_FOLDER=OFF -DCONAN_DISABLE_STRICT_MODE=1 \
             -DROR_OIS_INCLUDE_DIR="$GITHUB_WORKSPACE/ois/includes" \

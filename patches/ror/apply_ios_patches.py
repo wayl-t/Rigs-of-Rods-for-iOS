@@ -40,7 +40,7 @@ def must_replace(text, old, new, what):
     return text.replace(old, new, 1)
 
 
-def patch_conanfile(ror):
+def patch_conanfile(ror, minimal_deps=False):
     path = os.path.join(ror, "conanfile.py")
     text = read(path)
     text = must_replace(
@@ -49,6 +49,27 @@ def patch_conanfile(ror):
         '        # Apple/iOS port: OIS is built from source, not fetched by conan.\n',
         "conanfile.py ois requirement",
     )
+    if minimal_deps:
+        # Stage-1 probe: keep only what RoR marks REQUIRED (OGRE, MyGUI, fmt,
+        # RapidJSON) and drop the optional ones. Their features are behind
+        # USE_* macros and simply switch off, which keeps the first full Apple
+        # build small enough to actually finish.
+        for dep in (
+            "angelscript",
+            "discord-rpc",
+            "libcurl",
+            "ogre3d-caelum",
+            "ogre3d-pagedgeometry",
+            "openal-soft",
+            "openssl",
+            "socketw",
+        ):
+            line = '        self.requires("%s' % dep
+            lines = text.splitlines(True)
+            kept = [l for l in lines if not l.startswith(line)]
+            if len(kept) == len(lines):
+                sys.exit("ERROR: minimal-deps: no requires line starting with %r" % line)
+            text = "".join(kept)
     write(path, text)
 
 
@@ -100,12 +121,14 @@ def main():
     ap.add_argument("ror_dir")
     ap.add_argument("--ois-include", default="")
     ap.add_argument("--ois-lib", default="")
+    ap.add_argument("--minimal-deps", action="store_true",
+                    help="drop optional conan deps (stage-1 build)")
     args = ap.parse_args()
 
     if not os.path.isdir(args.ror_dir):
         sys.exit("ERROR: not a directory: %s" % args.ror_dir)
 
-    patch_conanfile(args.ror_dir)
+    patch_conanfile(args.ror_dir, minimal_deps=args.minimal_deps)
     patch_dependencies(args.ror_dir)
     patch_main_cmake(args.ror_dir)
 
