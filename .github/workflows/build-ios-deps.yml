@@ -593,15 +593,27 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          lib="$(find pagedgeometry/build -name 'libPagedGeometry.a' -print -quit)"
+          # The project sets the legacy LIBRARY_OUTPUT_PATH variable to
+          # <srcdir>/lib, so the archive does NOT land under build/ - search the
+          # whole tree.  (Unprefixed ARCHIVE_OUTPUT_DIRECTORY is ignored by CMake,
+          # but LIBRARY_OUTPUT_PATH is honoured for library targets.)
+          lib="$(find pagedgeometry -name 'libPagedGeometry.a' -print -quit)"
           if [ -n "$lib" ]; then
             echo "built $lib"
-            cmake --build pagedgeometry/build --target install 2>&1 | tee logs/paged-install.log
+            cmake --build pagedgeometry/build --target install 2>&1 | tee logs/paged-install.log || true
+
+            # Belt and braces: the install rules cover both the source headers
+            # and the generated PagedGeometryConfig.h, but if anything about
+            # them goes wrong, copy the pieces where RoR's FindPagedGeometry
+            # expects them (<prefix>/lib + <prefix>/include/PagedGeometry).
+            mkdir -p "$IOS_PREFIX/lib" "$IOS_PREFIX/include/PagedGeometry"
+            cp -f "$lib" "$IOS_PREFIX/lib/libPagedGeometry.a"
+            cp -f pagedgeometry/include/*.h "$IOS_PREFIX/include/PagedGeometry/" 2>/dev/null || true
+            cp -f pagedgeometry/build/include/*.h "$IOS_PREFIX/include/PagedGeometry/" 2>/dev/null || true
           else
             echo "libPagedGeometry.a was NOT produced"
           fi
           find "$IOS_PREFIX" -name 'libPagedGeometry*' | head -10
-          find "$IOS_PREFIX" -name 'PagedGeometry.h' 2>/dev/null | head -5
           ls "$IOS_PREFIX/include/PagedGeometry" 2>/dev/null | head -20 || true
 
       - name: "Normalize MyGUI cmake package (MyGUI:: namespaced targets)"
