@@ -165,10 +165,15 @@ jobs:
           # `compiler.cppstd=gnu14` for the whole conan graph. OGRE 1.11 and OIS
           # use std::unary_function/std::binary_function, removed from libc++
           # in C++17, so C++14 is the newest standard they compile under.
+          #
+          # CONAN_INSTALL_ARGS is a CMake list, so `-c` confs can be smuggled in
+          # with `;` separators. user_toolchain injects patches/ogre/disable-cg.cmake
+          # into every dependency build (Cg ships Linux .so files on macOS).
           cmake . -G"Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -Bbuild \
             -DCMAKE_CXX_STANDARD=14 \
             -DCMAKE_PROJECT_TOP_LEVEL_INCLUDES=cmake/conan_provider.cmake \
             -DCREATE_CONTENT_FOLDER=OFF -DCONAN_DISABLE_STRICT_MODE=1 \
+            -DCONAN_INSTALL_ARGS="--build=missing;-c;tools.cmake.cmaketoolchain:user_toolchain=$GITHUB_WORKSPACE/patches/ogre/disable-cg.cmake" \
             -DROR_OIS_INCLUDE_DIR="$GITHUB_WORKSPACE/ois/includes" \
             -DROR_OIS_LIBRARY="$GITHUB_WORKSPACE/ois/build/libOIS.a" \
             2>&1 | tee ../logs/1-configure.log

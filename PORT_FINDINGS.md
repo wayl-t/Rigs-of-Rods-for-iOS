@@ -326,6 +326,47 @@ OgreMain/src/OgreLodStrategy.cpp:104: error: no template named 'binary_function'
 Именно поэтому OGRE под iOS в вехе 3 собрался: там генератор Xcode и стандарт не
 форсился, а conan-путь выставляет `gnu17`.
 
+### 5. OGRE 1.11 считает Apple Silicon за x86
+
+`OgreMain/include/OgrePlatformInformation.h` определяет CPU **до** того, как
+смотрит на ARM:
+
+```c
+#if (defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))) || \
+    (defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__)))
+#   define OGRE_CPU OGRE_CPU_X86
+#elif OGRE_PLATFORM == OGRE_PLATFORM_APPLE && defined(__BIG_ENDIAN__)
+#   define OGRE_CPU OGRE_CPU_PPC
+#elif OGRE_PLATFORM == OGRE_PLATFORM_APPLE
+#   define OGRE_CPU OGRE_CPU_X86        /* <- arm64 macOS попадает сюда */
+#elif OGRE_PLATFORM == OGRE_PLATFORM_APPLE_IOS && (defined(__i386__) || defined(__x86_64__))
+#   define OGRE_CPU OGRE_CPU_X86
+#elif defined(__arm__) || defined(_M_ARM) || defined(__arm64__) || defined(__aarch64__)
+#   define OGRE_CPU OGRE_CPU_ARM
+```
+
+На Apple Silicon ни `__i386__`, ни `__x86_64__` не определены, но ветка
+`OGRE_PLATFORM_APPLE` стоит **раньше** ветки ARM. Итог — `OGRE_CPU_X86`, затем
+`__OGRE_HAVE_SSE=1`, затем `<xmmintrin.h>`:
+
+```
+OgreMain/src/OgreOptimisedUtilSSE.cpp:28
+  -> OgreStableHeaders.h -> ... -> <xmmintrin.h>:14:2:
+     error: "This header is only meant to be used on x86 and x64 architecture"
+```
+
+**iOS не задет.** Условие `__OGRE_HAVE_SSE` (строка 71) явно исключает
+`OGRE_PLATFORM_APPLE_IOS`, поэтому на iPhone честно выбирается ARM/NEON —
+ровно поэтому OGRE под iOS в вехе 3 и собрался.
+
+Что делать:
+
+* для настольной пробы — раннер `macos-15-intel` (x86_64), и баг просто не
+  возникает;
+* для настоящей поддержки Apple Silicon этот хедер надо править (проверять
+  `__arm64__` в Apple-ветке). Когда будем собирать OGRE сами — под iOS —
+  пропатчим заодно: страховка дешёвая.
+
 ### Разделение зависимостей
 
 `cmake/DependenciesConfig.cmake` делит зависимости на две группы:
