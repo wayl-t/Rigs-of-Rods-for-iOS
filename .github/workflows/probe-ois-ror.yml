@@ -105,6 +105,19 @@ jobs:
       - name: Get RoR source
         run: git clone --depth 1 https://github.com/RigsOfRods/rigs-of-rods.git ror
 
+      # The rigs-of-rods-deps remote serves RECIPES only: every dependency is
+      # compiled from source here, OGRE included. That is slow, so keep the
+      # conan cache between runs (key is static; newest cache wins).
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.conan2/p
+            ~/.conan2/profiles
+          key: conan2-macos-${{ github.run_id }}
+          restore-keys: |
+            conan2-macos-
+
       - name: Build OIS from source (C++14 makes the legacy code compile)
         run: |
           mkdir -p logs
@@ -130,7 +143,11 @@ jobs:
       - name: CMake configure
         working-directory: ror
         run: |
-          cmake . -GNinja -DCMAKE_BUILD_TYPE=Release -Bbuild \
+          # Unix Makefiles, NOT Ninja: OGRE 1.11's CMake emits a `$` that its
+          # Ninja generator refuses ("bad $-escape"). Also, the conan provider
+          # copies CMAKE_GENERATOR into the conan profile, so this decides how
+          # every from-source dependency is built too.
+          cmake . -G"Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -Bbuild \
             -DCMAKE_PROJECT_TOP_LEVEL_INCLUDES=cmake/conan_provider.cmake \
             -DCREATE_CONTENT_FOLDER=OFF -DCONAN_DISABLE_STRICT_MODE=1 \
             -DROR_OIS_INCLUDE_DIR="$GITHUB_WORKSPACE/ois/includes" \
@@ -138,10 +155,10 @@ jobs:
             2>&1 | tee ../logs/1-configure.log
         continue-on-error: true
 
-      - name: Build with ninja -k 0 (collect ALL errors)
+      - name: Build with make -k (collect ALL errors)
         working-directory: ror
         run: |
-          ninja -C build -k 0 2>&1 | tee ../logs/2-build.log
+          make -C build -k -j4 2>&1 | tee ../logs/2-build.log
         continue-on-error: true
 
       - name: Summary
