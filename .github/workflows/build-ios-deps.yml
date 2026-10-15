@@ -202,11 +202,6 @@ jobs:
           done
           lipo -info "$IOS_PREFIX/lib/libfreetype.a" || true
 
-      - name: Verify base OGRE+FreeType
-        if: always()
-        run: |
-          echo "RESULT: OGRE+FreeType installed"
-
       # ---------------------------------------------------------------- #
       # AngelScript (2.38) - provides Angelscript::angelscript              #
       # ---------------------------------------------------------------- #
@@ -219,26 +214,36 @@ jobs:
         continue-on-error: true
         run: |
           f=angelscript/sdk/angelscript/projects/cmake/CMakeLists.txt
-          python3 -c "
-import sys
-d=open(sys.argv[1],'r',encoding='utf-8',errors='replace').read()
-d=d.replace('if (APPLE AND NOT IOS)', 'if (APPLE)', 1)
-open(sys.argv[1],'w',encoding='utf-8').write(d)
-print('patched')
-" "$f"
+          python3 - "$f" <<'PY'
+          import sys
+          d = open(sys.argv[1], "r", encoding="utf-8", errors="replace").read()
+          assert "if (APPLE AND NOT IOS)" in d, "anchor missing"
+          d = d.replace("if (APPLE AND NOT IOS)", "if (APPLE)", 1)
+          open(sys.argv[1], "w", encoding="utf-8").write(d)
+          print("patched")
+          PY
           sed -n '24,30p' "$f"
 
       - name: Configure AngelScript (iOS, static, Makefiles)
         continue-on-error: true
         run: |
-          cmake -S angelscript/sdk/angelscript/projects/cmake -B angelscript/build -G "Unix Makefiles"             -DCMAKE_POLICY_VERSION_MINIMUM=3.5             -DCMAKE_SYSTEM_NAME=iOS             -DCMAKE_OSX_ARCHITECTURES=arm64             -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET             -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT"             -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX"             -DCMAKE_BUILD_TYPE=Release             -DBUILD_SHARED_LIBS=OFF             2>&1 | tee logs/as-configure.log
+          cmake -S angelscript/sdk/angelscript/projects/cmake -B angelscript/build -G "Unix Makefiles" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET \
+            -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT" \
+            -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            2>&1 | tee logs/as-configure.log
 
       - name: Build + install AngelScript
         continue-on-error: true
         run: |
           cmake --build angelscript/build -j $(sysctl -n hw.ncpu) 2>&1 | tee logs/as-build.log
           cmake --build angelscript/build --target install 2>&1 | tee logs/as-install.log
-          find "$IOS_PREFIX" -name 'libangelscript*' -o -name 'Angelscript*cmake' | head -30
+          find "$IOS_PREFIX" -name 'libangelscript*' | head -10
 
       # ---------------------------------------------------------------- #
       # openal-soft (1.24.3)                                              #
@@ -251,17 +256,27 @@ print('patched')
       - name: Configure openal-soft (iOS, static, Makefiles)
         continue-on-error: true
         run: |
-          cmake -S openal-soft -B openal-soft/build -G "Unix Makefiles"             -DCMAKE_POLICY_VERSION_MINIMUM=3.5             -DCMAKE_SYSTEM_NAME=iOS             -DCMAKE_OSX_ARCHITECTURES=arm64             -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET             -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT"             -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX"             -DCMAKE_BUILD_TYPE=Release             -DLIBTYPE=STATIC             -DALSOFT_EXAMPLES=OFF -DALSOFT_UTILS=OFF -DALSOFT_TESTS=OFF             2>&1 | tee logs/oa-configure.log
+          cmake -S openal-soft -B openal-soft/build -G "Unix Makefiles" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET \
+            -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT" \
+            -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLIBTYPE=STATIC \
+            -DALSOFT_EXAMPLES=OFF -DALSOFT_UTILS=OFF -DALSOFT_TESTS=OFF \
+            2>&1 | tee logs/oa-configure.log
 
       - name: Build + install openal-soft
         continue-on-error: true
         run: |
           cmake --build openal-soft/build -j $(sysctl -n hw.ncpu) 2>&1 | tee logs/oa-build.log
           cmake --build openal-soft/build --target install 2>&1 | tee logs/oa-install.log
-          find "$IOS_PREFIX" -name 'libopenal*' -o -path '*AL/*' | head -20
+          find "$IOS_PREFIX" -name 'libopenal*' | head -10
 
       # ---------------------------------------------------------------- #
-      # MyGUI 3.4.0 + synthesize MyGUI::MyGUI/MyGUI::OgrePlatform config   #
+      # MyGUI 3.4.0 (+ synthesized MyGUI:: namespaced config)              #
       # ---------------------------------------------------------------- #
       - name: Get MyGUI 3.4.0
         continue-on-error: true
@@ -271,14 +286,33 @@ print('patched')
       - name: Configure MyGUI (iOS, static, Ogre + freetype)
         continue-on-error: true
         run: |
-          cmake -S mygui -B mygui/build -G "Unix Makefiles"             -DCMAKE_POLICY_VERSION_MINIMUM=3.5             -DCMAKE_SYSTEM_NAME=iOS             -DCMAKE_OSX_ARCHITECTURES=arm64             -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET             -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT"             -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX"             -DCMAKE_BUILD_TYPE=Release             -DMYGUI_RENDERSYSTEM=3             -DMYGUI_STATIC=TRUE             -DMYGUI_USE_FREETYPE=TRUE             -DMYGUI_BUILD_DEMOS=FALSE -DMYGUI_BUILD_TOOLS=FALSE -DMYGUI_BUILD_UNITTESTS=FALSE             -DMYGUI_BUILD_PLUGINS=FALSE -DMYGUI_DISABLE_PLUGINS=TRUE             -DMYGUI_INSTALL_MEDIA=FALSE             -DFREETYPE_LIBRARY="$IOS_PREFIX/lib/libfreetype.a"             -DFREETYPE_INCLUDE_DIRS="$IOS_PREFIX/include/freetype2"             -DOGRE_INCLUDE_DIR="$IOS_PREFIX/include/OGRE"             -DOGRE_LIBRARIES="OgreMain;OgreOverlay"             -DOGRE_LIB_DIR="$IOS_PREFIX/lib/Release"             2>&1 | tee logs/mygui-configure.log
+          cmake -S mygui -B mygui/build -G "Unix Makefiles" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET \
+            -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT" \
+            -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMYGUI_RENDERSYSTEM=3 \
+            -DMYGUI_STATIC=TRUE \
+            -DMYGUI_USE_FREETYPE=TRUE \
+            -DMYGUI_BUILD_DEMOS=FALSE -DMYGUI_BUILD_TOOLS=FALSE -DMYGUI_BUILD_UNITTESTS=FALSE \
+            -DMYGUI_BUILD_PLUGINS=FALSE -DMYGUI_DISABLE_PLUGINS=TRUE \
+            -DMYGUI_INSTALL_MEDIA=FALSE \
+            -DFREETYPE_LIBRARY="$IOS_PREFIX/lib/libfreetype.a" \
+            -DFREETYPE_INCLUDE_DIRS="$IOS_PREFIX/include/freetype2" \
+            -DOGRE_INCLUDE_DIR="$IOS_PREFIX/include/OGRE" \
+            -DOGRE_LIBRARIES="OgreMain;OgreOverlay" \
+            -DOGRE_LIB_DIR="$IOS_PREFIX/lib/Release" \
+            2>&1 | tee logs/mygui-configure.log
 
       - name: Build + install MyGUI
         continue-on-error: true
         run: |
           cmake --build mygui/build -j $(sysctl -n hw.ncpu) 2>&1 | tee logs/mygui-build.log
           cmake --build mygui/build --target install 2>&1 | tee logs/mygui-install.log
-          find "$IOS_PREFIX" -name 'libMyGUI*' -o -path '*MYGUI*cmake*' | head -20
+          find "$IOS_PREFIX" -name 'libMyGUI*' | head -10
 
       - name: Synthesize MyGUI namespaced targets config
         if: always()
@@ -286,23 +320,23 @@ print('patched')
         run: |
           mkdir -p "$IOS_PREFIX/lib/cmake/MyGUI"
           cat > "$IOS_PREFIX/lib/cmake/MyGUI/MyGUIConfig.cmake" <<'EOF'
-get_filename_component(_prefix "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
-set(MyGUI_INCLUDE_DIRS "${_prefix}/include/MYGUI")
-set(MyGUI_LIBRARY_DIRS "${_prefix}/lib")
-add_library(MyGUI::MyGUI STATIC IMPORTED)
-if(EXISTS "${_prefix}/lib/libMyGUIEngine.a")
-  set_target_properties(MyGUI::MyGUI PROPERTIES
-    IMPORTED_LOCATION "${_prefix}/lib/libMyGUIEngine.a"
-    INTERFACE_INCLUDE_DIRECTORIES "${_prefix}/include/MYGUI")
-endif()
-add_library(MyGUI::OgrePlatform STATIC IMPORTED)
-if(EXISTS "${_prefix}/lib/libMyGUI.OgrePlatform.a")
-  set_target_properties(MyGUI::OgrePlatform PROPERTIES
-    IMPORTED_LOCATION "${_prefix}/lib/libMyGUI.OgrePlatform.a"
-    INTERFACE_INCLUDE_DIRECTORIES "${_prefix}/include/MYGUI")
-endif()
-set(MyGUI_FOUND TRUE)
-EOF
+          get_filename_component(_prefix "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+          set(MyGUI_INCLUDE_DIRS "${_prefix}/include/MYGUI")
+          set(MyGUI_LIBRARY_DIRS "${_prefix}/lib")
+          add_library(MyGUI::MyGUI STATIC IMPORTED)
+          if(EXISTS "${_prefix}/lib/libMyGUIEngine.a")
+            set_target_properties(MyGUI::MyGUI PROPERTIES
+              IMPORTED_LOCATION "${_prefix}/lib/libMyGUIEngine.a"
+              INTERFACE_INCLUDE_DIRECTORIES "${_prefix}/include/MYGUI")
+          endif()
+          add_library(MyGUI::OgrePlatform STATIC IMPORTED)
+          if(EXISTS "${_prefix}/lib/libMyGUI.OgrePlatform.a")
+            set_target_properties(MyGUI::OgrePlatform PROPERTIES
+              IMPORTED_LOCATION "${_prefix}/lib/libMyGUI.OgrePlatform.a"
+              INTERFACE_INCLUDE_DIRECTORIES "${_prefix}/include/MYGUI")
+          endif()
+          set(MyGUI_FOUND TRUE)
+          EOF
           cat "$IOS_PREFIX/lib/cmake/MyGUI/MyGUIConfig.cmake"
 
       - name: Verify full iOS SDK
@@ -325,418 +359,6 @@ EOF
           find "$IOS_PREFIX" -name 'libMyGUI.OgrePlatform*' | grep -q . || { echo "MISSING: MyGUI.OgrePlatform lib"; missing=1; }
           if [ "$missing" -eq 1 ]; then echo "SDK VERIFICATION FAILED"; exit 1; fi
           echo "SDK VERIFICATION PASSED"
-
-
-      - name: Verify base OGRE+FreeType
-        if: always()
-        run: |
-          echo "RESULT: OGRE+FreeType installed"
-
-      # ---------------------------------------------------------------- #
-      # AngelScript (2.38) - provides Angelscript::angelscript              #
-      # ---------------------------------------------------------------- #
-      - name: Get AngelScript 2.38.0
-        continue-on-error: true
-        run: |
-          git clone --depth 1 --branch v2.38.0 https://github.com/anjo76/angelscript.git angelscript
-
-      - name: Patch AngelScript for iOS/arm64 arch detection
-        continue-on-error: true
-        run: |
-          f=angelscript/sdk/angelscript/projects/cmake/CMakeLists.txt
-          python3 -c "
-import sys
-d=open(sys.argv[1],'r',encoding='utf-8',errors='replace').read()
-d=d.replace('if (APPLE AND NOT IOS)', 'if (APPLE)', 1)
-open(sys.argv[1],'w',encoding='utf-8').write(d)
-print('patched')
-" "$f"
-          sed -n '24,30p' "$f"
-
-      - name: Configure AngelScript (iOS, static, Makefiles)
-        continue-on-error: true
-        run: |
-          cmake -S angelscript/sdk/angelscript/projects/cmake -B angelscript/build -G "Unix Makefiles"             -DCMAKE_POLICY_VERSION_MINIMUM=3.5             -DCMAKE_SYSTEM_NAME=iOS             -DCMAKE_OSX_ARCHITECTURES=arm64             -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET             -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT"             -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX"             -DCMAKE_BUILD_TYPE=Release             -DBUILD_SHARED_LIBS=OFF             2>&1 | tee logs/as-configure.log
-
-      - name: Build + install AngelScript
-        continue-on-error: true
-        run: |
-          cmake --build angelscript/build -j $(sysctl -n hw.ncpu) 2>&1 | tee logs/as-build.log
-          cmake --build angelscript/build --target install 2>&1 | tee logs/as-install.log
-          find "$IOS_PREFIX" -name 'libangelscript*' -o -name 'Angelscript*cmake' | head -30
-
-      # ---------------------------------------------------------------- #
-      # openal-soft (1.24.3)                                              #
-      # ---------------------------------------------------------------- #
-      - name: Get openal-soft
-        continue-on-error: true
-        run: |
-          git clone --depth 1 --branch 1.24.3 https://github.com/kcat/openal-soft.git openal-soft
-
-      - name: Configure openal-soft (iOS, static, Makefiles)
-        continue-on-error: true
-        run: |
-          cmake -S openal-soft -B openal-soft/build -G "Unix Makefiles"             -DCMAKE_POLICY_VERSION_MINIMUM=3.5             -DCMAKE_SYSTEM_NAME=iOS             -DCMAKE_OSX_ARCHITECTURES=arm64             -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET             -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT"             -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX"             -DCMAKE_BUILD_TYPE=Release             -DLIBTYPE=STATIC             -DALSOFT_EXAMPLES=OFF -DALSOFT_UTILS=OFF -DALSOFT_TESTS=OFF             2>&1 | tee logs/oa-configure.log
-
-      - name: Build + install openal-soft
-        continue-on-error: true
-        run: |
-          cmake --build openal-soft/build -j $(sysctl -n hw.ncpu) 2>&1 | tee logs/oa-build.log
-          cmake --build openal-soft/build --target install 2>&1 | tee logs/oa-install.log
-          find "$IOS_PREFIX" -name 'libopenal*' -o -path '*AL/*' | head -20
-
-      # ---------------------------------------------------------------- #
-      # MyGUI 3.4.0 + synthesize MyGUI::MyGUI/MyGUI::OgrePlatform config   #
-      # ---------------------------------------------------------------- #
-      - name: Get MyGUI 3.4.0
-        continue-on-error: true
-        run: |
-          git clone --depth 1 --branch MyGUI3.4.0 https://github.com/MyGUI/mygui.git mygui
-
-      - name: Configure MyGUI (iOS, static, Ogre + freetype)
-        continue-on-error: true
-        run: |
-          cmake -S mygui -B mygui/build -G "Unix Makefiles"             -DCMAKE_POLICY_VERSION_MINIMUM=3.5             -DCMAKE_SYSTEM_NAME=iOS             -DCMAKE_OSX_ARCHITECTURES=arm64             -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET             -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT"             -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX"             -DCMAKE_BUILD_TYPE=Release             -DMYGUI_RENDERSYSTEM=3             -DMYGUI_STATIC=TRUE             -DMYGUI_USE_FREETYPE=TRUE             -DMYGUI_BUILD_DEMOS=FALSE -DMYGUI_BUILD_TOOLS=FALSE -DMYGUI_BUILD_UNITTESTS=FALSE             -DMYGUI_BUILD_PLUGINS=FALSE -DMYGUI_DISABLE_PLUGINS=TRUE             -DMYGUI_INSTALL_MEDIA=FALSE             -DFREETYPE_LIBRARY="$IOS_PREFIX/lib/libfreetype.a"             -DFREETYPE_INCLUDE_DIRS="$IOS_PREFIX/include/freetype2"             -DOGRE_INCLUDE_DIR="$IOS_PREFIX/include/OGRE"             -DOGRE_LIBRARIES="OgreMain;OgreOverlay"             -DOGRE_LIB_DIR="$IOS_PREFIX/lib/Release"             2>&1 | tee logs/mygui-configure.log
-
-      - name: Build + install MyGUI
-        continue-on-error: true
-        run: |
-          cmake --build mygui/build -j $(sysctl -n hw.ncpu) 2>&1 | tee logs/mygui-build.log
-          cmake --build mygui/build --target install 2>&1 | tee logs/mygui-install.log
-          find "$IOS_PREFIX" -name 'libMyGUI*' -o -path '*MYGUI*cmake*' | head -20
-
-      - name: Synthesize MyGUI namespaced targets config
-        if: always()
-        continue-on-error: true
-        run: |
-          mkdir -p "$IOS_PREFIX/lib/cmake/MyGUI"
-          cat > "$IOS_PREFIX/lib/cmake/MyGUI/MyGUIConfig.cmake" <<'EOF'
-get_filename_component(_prefix "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
-set(MyGUI_INCLUDE_DIRS "${_prefix}/include/MYGUI")
-set(MyGUI_LIBRARY_DIRS "${_prefix}/lib")
-add_library(MyGUI::MyGUI STATIC IMPORTED)
-if(EXISTS "${_prefix}/lib/libMyGUIEngine.a")
-  set_target_properties(MyGUI::MyGUI PROPERTIES
-    IMPORTED_LOCATION "${_prefix}/lib/libMyGUIEngine.a"
-    INTERFACE_INCLUDE_DIRECTORIES "${_prefix}/include/MYGUI")
-endif()
-add_library(MyGUI::OgrePlatform STATIC IMPORTED)
-if(EXISTS "${_prefix}/lib/libMyGUI.OgrePlatform.a")
-  set_target_properties(MyGUI::OgrePlatform PROPERTIES
-    IMPORTED_LOCATION "${_prefix}/lib/libMyGUI.OgrePlatform.a"
-    INTERFACE_INCLUDE_DIRECTORIES "${_prefix}/include/MYGUI")
-endif()
-set(MyGUI_FOUND TRUE)
-EOF
-          cat "$IOS_PREFIX/lib/cmake/MyGUI/MyGUIConfig.cmake"
-
-      - name: Verify full iOS SDK
-        if: always()
-        run: |
-          echo "----- SDK summary -----"
-          find "$IOS_PREFIX" -name '*.a' | sort
-          echo "----- check required libs -----"
-          missing=0
-          for lib in OgreMain OgreGLSupport OgreBites OgreOverlay OgrePaging OgreTerrain OgreRTShaderSystem OgreMeshLodGenerator; do
-            if ! find "$IOS_PREFIX" -name "lib${lib}Static.a" | grep -q .; then echo "MISSING OGRE lib: $lib"; missing=1; fi
-          done
-          for lib in RenderSystem_GLES2 Plugin_OctreeSceneManager Plugin_ParticleFX Codec_STBI; do
-            if ! find "$IOS_PREFIX" -name "lib${lib}Static.a" | grep -q .; then echo "MISSING OGRE plugin: $lib"; missing=1; fi
-          done
-          [ -f "$IOS_PREFIX/lib/libfreetype.a" ] || { echo "MISSING: libfreetype.a"; missing=1; }
-          find "$IOS_PREFIX" -name 'libangelscript*' | grep -q . || { echo "MISSING: angelscript lib"; missing=1; }
-          find "$IOS_PREFIX" -name 'libopenal*' | grep -q . || { echo "MISSING: openal-soft lib"; missing=1; }
-          find "$IOS_PREFIX" -name 'libMyGUIEngine*' | grep -q . || { echo "MISSING: MyGUIEngine lib"; missing=1; }
-          find "$IOS_PREFIX" -name 'libMyGUI.OgrePlatform*' | grep -q . || { echo "MISSING: MyGUI.OgrePlatform lib"; missing=1; }
-          if [ "$missing" -eq 1 ]; then echo "SDK VERIFICATION FAILED"; exit 1; fi
-          echo "SDK VERIFICATION PASSED"
-
-
-      - name: Verify base OGRE+FreeType
-        if: always()
-        run: |
-          echo "RESULT: OGRE+FreeType installed"
-
-      # ---------------------------------------------------------------- #
-      # AngelScript (2.38) - provides Angelscript::angelscript              #
-      # ---------------------------------------------------------------- #
-      - name: Get AngelScript 2.38.0
-        continue-on-error: true
-        run: |
-          git clone --depth 1 --branch v2.38.0 https://github.com/anjo76/angelscript.git angelscript
-
-      - name: Patch AngelScript for iOS/arm64 arch detection
-        continue-on-error: true
-        run: |
-          f=angelscript/sdk/angelscript/projects/cmake/CMakeLists.txt
-          python3 -c "
-import sys
-d=open(sys.argv[1],'r',encoding='utf-8',errors='replace').read()
-d=d.replace('if (APPLE AND NOT IOS)', 'if (APPLE)', 1)
-open(sys.argv[1],'w',encoding='utf-8').write(d)
-print('patched')
-" "$f"
-          sed -n '24,30p' "$f"
-
-      - name: Configure AngelScript (iOS, static, Makefiles)
-        continue-on-error: true
-        run: |
-          cmake -S angelscript/sdk/angelscript/projects/cmake -B angelscript/build -G "Unix Makefiles"             -DCMAKE_POLICY_VERSION_MINIMUM=3.5             -DCMAKE_SYSTEM_NAME=iOS             -DCMAKE_OSX_ARCHITECTURES=arm64             -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET             -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT"             -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX"             -DCMAKE_BUILD_TYPE=Release             -DBUILD_SHARED_LIBS=OFF             2>&1 | tee logs/as-configure.log
-
-      - name: Build + install AngelScript
-        continue-on-error: true
-        run: |
-          cmake --build angelscript/build -j $(sysctl -n hw.ncpu) 2>&1 | tee logs/as-build.log
-          cmake --build angelscript/build --target install 2>&1 | tee logs/as-install.log
-          find "$IOS_PREFIX" -name 'libangelscript*' -o -name 'Angelscript*cmake' | head -30
-
-      # ---------------------------------------------------------------- #
-      # openal-soft (1.24.3)                                              #
-      # ---------------------------------------------------------------- #
-      - name: Get openal-soft
-        continue-on-error: true
-        run: |
-          git clone --depth 1 --branch 1.24.3 https://github.com/kcat/openal-soft.git openal-soft
-
-      - name: Configure openal-soft (iOS, static, Makefiles)
-        continue-on-error: true
-        run: |
-          cmake -S openal-soft -B openal-soft/build -G "Unix Makefiles"             -DCMAKE_POLICY_VERSION_MINIMUM=3.5             -DCMAKE_SYSTEM_NAME=iOS             -DCMAKE_OSX_ARCHITECTURES=arm64             -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET             -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT"             -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX"             -DCMAKE_BUILD_TYPE=Release             -DLIBTYPE=STATIC             -DALSOFT_EXAMPLES=OFF -DALSOFT_UTILS=OFF -DALSOFT_TESTS=OFF             2>&1 | tee logs/oa-configure.log
-
-      - name: Build + install openal-soft
-        continue-on-error: true
-        run: |
-          cmake --build openal-soft/build -j $(sysctl -n hw.ncpu) 2>&1 | tee logs/oa-build.log
-          cmake --build openal-soft/build --target install 2>&1 | tee logs/oa-install.log
-          find "$IOS_PREFIX" -name 'libopenal*' -o -path '*AL/*' | head -20
-
-      # ---------------------------------------------------------------- #
-      # MyGUI 3.4.0 + synthesize MyGUI::MyGUI/MyGUI::OgrePlatform config   #
-      # ---------------------------------------------------------------- #
-      - name: Get MyGUI 3.4.0
-        continue-on-error: true
-        run: |
-          git clone --depth 1 --branch MyGUI3.4.0 https://github.com/MyGUI/mygui.git mygui
-
-      - name: Configure MyGUI (iOS, static, Ogre + freetype)
-        continue-on-error: true
-        run: |
-          cmake -S mygui -B mygui/build -G "Unix Makefiles"             -DCMAKE_POLICY_VERSION_MINIMUM=3.5             -DCMAKE_SYSTEM_NAME=iOS             -DCMAKE_OSX_ARCHITECTURES=arm64             -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET             -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT"             -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX"             -DCMAKE_BUILD_TYPE=Release             -DMYGUI_RENDERSYSTEM=3             -DMYGUI_STATIC=TRUE             -DMYGUI_USE_FREETYPE=TRUE             -DMYGUI_BUILD_DEMOS=FALSE -DMYGUI_BUILD_TOOLS=FALSE -DMYGUI_BUILD_UNITTESTS=FALSE             -DMYGUI_BUILD_PLUGINS=FALSE -DMYGUI_DISABLE_PLUGINS=TRUE             -DMYGUI_INSTALL_MEDIA=FALSE             -DFREETYPE_LIBRARY="$IOS_PREFIX/lib/libfreetype.a"             -DFREETYPE_INCLUDE_DIRS="$IOS_PREFIX/include/freetype2"             -DOGRE_INCLUDE_DIR="$IOS_PREFIX/include/OGRE"             -DOGRE_LIBRARIES="OgreMain;OgreOverlay"             -DOGRE_LIB_DIR="$IOS_PREFIX/lib/Release"             2>&1 | tee logs/mygui-configure.log
-
-      - name: Build + install MyGUI
-        continue-on-error: true
-        run: |
-          cmake --build mygui/build -j $(sysctl -n hw.ncpu) 2>&1 | tee logs/mygui-build.log
-          cmake --build mygui/build --target install 2>&1 | tee logs/mygui-install.log
-          find "$IOS_PREFIX" -name 'libMyGUI*' -o -path '*MYGUI*cmake*' | head -20
-
-      - name: Synthesize MyGUI namespaced targets config
-        if: always()
-        continue-on-error: true
-        run: |
-          mkdir -p "$IOS_PREFIX/lib/cmake/MyGUI"
-          cat > "$IOS_PREFIX/lib/cmake/MyGUI/MyGUIConfig.cmake" <<'EOF'
-get_filename_component(_prefix "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
-set(MyGUI_INCLUDE_DIRS "${_prefix}/include/MYGUI")
-set(MyGUI_LIBRARY_DIRS "${_prefix}/lib")
-add_library(MyGUI::MyGUI STATIC IMPORTED)
-if(EXISTS "${_prefix}/lib/libMyGUIEngine.a")
-  set_target_properties(MyGUI::MyGUI PROPERTIES
-    IMPORTED_LOCATION "${_prefix}/lib/libMyGUIEngine.a"
-    INTERFACE_INCLUDE_DIRECTORIES "${_prefix}/include/MYGUI")
-endif()
-add_library(MyGUI::OgrePlatform STATIC IMPORTED)
-if(EXISTS "${_prefix}/lib/libMyGUI.OgrePlatform.a")
-  set_target_properties(MyGUI::OgrePlatform PROPERTIES
-    IMPORTED_LOCATION "${_prefix}/lib/libMyGUI.OgrePlatform.a"
-    INTERFACE_INCLUDE_DIRECTORIES "${_prefix}/include/MYGUI")
-endif()
-set(MyGUI_FOUND TRUE)
-EOF
-          cat "$IOS_PREFIX/lib/cmake/MyGUI/MyGUIConfig.cmake"
-
-      - name: Verify full iOS SDK
-        if: always()
-        run: |
-          echo "----- SDK summary -----"
-          find "$IOS_PREFIX" -name '*.a' | sort
-          echo "----- check required libs -----"
-          missing=0
-          for lib in OgreMain OgreGLSupport OgreBites OgreOverlay OgrePaging OgreTerrain OgreRTShaderSystem OgreMeshLodGenerator; do
-            if ! find "$IOS_PREFIX" -name "lib${lib}Static.a" | grep -q .; then echo "MISSING OGRE lib: $lib"; missing=1; fi
-          done
-          for lib in RenderSystem_GLES2 Plugin_OctreeSceneManager Plugin_ParticleFX Codec_STBI; do
-            if ! find "$IOS_PREFIX" -name "lib${lib}Static.a" | grep -q .; then echo "MISSING OGRE plugin: $lib"; missing=1; fi
-          done
-          [ -f "$IOS_PREFIX/lib/libfreetype.a" ] || { echo "MISSING: libfreetype.a"; missing=1; }
-          find "$IOS_PREFIX" -name 'libangelscript*' | grep -q . || { echo "MISSING: angelscript lib"; missing=1; }
-          find "$IOS_PREFIX" -name 'libopenal*' | grep -q . || { echo "MISSING: openal-soft lib"; missing=1; }
-          find "$IOS_PREFIX" -name 'libMyGUIEngine*' | grep -q . || { echo "MISSING: MyGUIEngine lib"; missing=1; }
-          find "$IOS_PREFIX" -name 'libMyGUI.OgrePlatform*' | grep -q . || { echo "MISSING: MyGUI.OgrePlatform lib"; missing=1; }
-          if [ "$missing" -eq 1 ]; then echo "SDK VERIFICATION FAILED"; exit 1; fi
-          echo "SDK VERIFICATION PASSED"
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ogre-ios-sdk-logs
-          path: logs/
-          retention-days: 14
-          if-no-files-found: warn
-
-      - name: Upload iOS SDK
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ios-sdk
-          path: ios-sdk/
-          retention-days: 14
-          if-no-files-found: warn
-
-
-      - name: Verify base OGRE+FreeType
-        if: always()
-        run: |
-          echo "RESULT: OGRE+FreeType installed"
-
-      # ---------------------------------------------------------------- #
-      # AngelScript (2.38) - provides Angelscript::angelscript              #
-      # ---------------------------------------------------------------- #
-      - name: Get AngelScript 2.38.0
-        continue-on-error: true
-        run: |
-          git clone --depth 1 --branch v2.38.0 https://github.com/anjo76/angelscript.git angelscript
-
-      - name: Patch AngelScript for iOS/arm64 arch detection
-        continue-on-error: true
-        run: |
-          f=angelscript/sdk/angelscript/projects/cmake/CMakeLists.txt
-          python3 -c "
-import sys
-d=open(sys.argv[1],'r',encoding='utf-8',errors='replace').read()
-d=d.replace('if (APPLE AND NOT IOS)', 'if (APPLE)', 1)
-open(sys.argv[1],'w',encoding='utf-8').write(d)
-print('patched')
-" "$f"
-          sed -n '24,30p' "$f"
-
-      - name: Configure AngelScript (iOS, static, Makefiles)
-        continue-on-error: true
-        run: |
-          cmake -S angelscript/sdk/angelscript/projects/cmake -B angelscript/build -G "Unix Makefiles"             -DCMAKE_POLICY_VERSION_MINIMUM=3.5             -DCMAKE_SYSTEM_NAME=iOS             -DCMAKE_OSX_ARCHITECTURES=arm64             -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET             -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT"             -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX"             -DCMAKE_BUILD_TYPE=Release             -DBUILD_SHARED_LIBS=OFF             2>&1 | tee logs/as-configure.log
-
-      - name: Build + install AngelScript
-        continue-on-error: true
-        run: |
-          cmake --build angelscript/build -j $(sysctl -n hw.ncpu) 2>&1 | tee logs/as-build.log
-          cmake --build angelscript/build --target install 2>&1 | tee logs/as-install.log
-          find "$IOS_PREFIX" -name 'libangelscript*' -o -name 'Angelscript*cmake' | head -30
-
-      # ---------------------------------------------------------------- #
-      # openal-soft (1.24.3)                                              #
-      # ---------------------------------------------------------------- #
-      - name: Get openal-soft
-        continue-on-error: true
-        run: |
-          git clone --depth 1 --branch 1.24.3 https://github.com/kcat/openal-soft.git openal-soft
-
-      - name: Configure openal-soft (iOS, static, Makefiles)
-        continue-on-error: true
-        run: |
-          cmake -S openal-soft -B openal-soft/build -G "Unix Makefiles"             -DCMAKE_POLICY_VERSION_MINIMUM=3.5             -DCMAKE_SYSTEM_NAME=iOS             -DCMAKE_OSX_ARCHITECTURES=arm64             -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET             -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT"             -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX"             -DCMAKE_BUILD_TYPE=Release             -DLIBTYPE=STATIC             -DALSOFT_EXAMPLES=OFF -DALSOFT_UTILS=OFF -DALSOFT_TESTS=OFF             2>&1 | tee logs/oa-configure.log
-
-      - name: Build + install openal-soft
-        continue-on-error: true
-        run: |
-          cmake --build openal-soft/build -j $(sysctl -n hw.ncpu) 2>&1 | tee logs/oa-build.log
-          cmake --build openal-soft/build --target install 2>&1 | tee logs/oa-install.log
-          find "$IOS_PREFIX" -name 'libopenal*' -o -path '*AL/*' | head -20
-
-      # ---------------------------------------------------------------- #
-      # MyGUI 3.4.0 + synthesize MyGUI::MyGUI/MyGUI::OgrePlatform config   #
-      # ---------------------------------------------------------------- #
-      - name: Get MyGUI 3.4.0
-        continue-on-error: true
-        run: |
-          git clone --depth 1 --branch MyGUI3.4.0 https://github.com/MyGUI/mygui.git mygui
-
-      - name: Configure MyGUI (iOS, static, Ogre + freetype)
-        continue-on-error: true
-        run: |
-          cmake -S mygui -B mygui/build -G "Unix Makefiles"             -DCMAKE_POLICY_VERSION_MINIMUM=3.5             -DCMAKE_SYSTEM_NAME=iOS             -DCMAKE_OSX_ARCHITECTURES=arm64             -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET             -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT"             -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX"             -DCMAKE_BUILD_TYPE=Release             -DMYGUI_RENDERSYSTEM=3             -DMYGUI_STATIC=TRUE             -DMYGUI_USE_FREETYPE=TRUE             -DMYGUI_BUILD_DEMOS=FALSE -DMYGUI_BUILD_TOOLS=FALSE -DMYGUI_BUILD_UNITTESTS=FALSE             -DMYGUI_BUILD_PLUGINS=FALSE -DMYGUI_DISABLE_PLUGINS=TRUE             -DMYGUI_INSTALL_MEDIA=FALSE             -DFREETYPE_LIBRARY="$IOS_PREFIX/lib/libfreetype.a"             -DFREETYPE_INCLUDE_DIRS="$IOS_PREFIX/include/freetype2"             -DOGRE_INCLUDE_DIR="$IOS_PREFIX/include/OGRE"             -DOGRE_LIBRARIES="OgreMain;OgreOverlay"             -DOGRE_LIB_DIR="$IOS_PREFIX/lib/Release"             2>&1 | tee logs/mygui-configure.log
-
-      - name: Build + install MyGUI
-        continue-on-error: true
-        run: |
-          cmake --build mygui/build -j $(sysctl -n hw.ncpu) 2>&1 | tee logs/mygui-build.log
-          cmake --build mygui/build --target install 2>&1 | tee logs/mygui-install.log
-          find "$IOS_PREFIX" -name 'libMyGUI*' -o -path '*MYGUI*cmake*' | head -20
-
-      - name: Synthesize MyGUI namespaced targets config
-        if: always()
-        continue-on-error: true
-        run: |
-          mkdir -p "$IOS_PREFIX/lib/cmake/MyGUI"
-          cat > "$IOS_PREFIX/lib/cmake/MyGUI/MyGUIConfig.cmake" <<'EOF'
-get_filename_component(_prefix "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
-set(MyGUI_INCLUDE_DIRS "${_prefix}/include/MYGUI")
-set(MyGUI_LIBRARY_DIRS "${_prefix}/lib")
-add_library(MyGUI::MyGUI STATIC IMPORTED)
-if(EXISTS "${_prefix}/lib/libMyGUIEngine.a")
-  set_target_properties(MyGUI::MyGUI PROPERTIES
-    IMPORTED_LOCATION "${_prefix}/lib/libMyGUIEngine.a"
-    INTERFACE_INCLUDE_DIRECTORIES "${_prefix}/include/MYGUI")
-endif()
-add_library(MyGUI::OgrePlatform STATIC IMPORTED)
-if(EXISTS "${_prefix}/lib/libMyGUI.OgrePlatform.a")
-  set_target_properties(MyGUI::OgrePlatform PROPERTIES
-    IMPORTED_LOCATION "${_prefix}/lib/libMyGUI.OgrePlatform.a"
-    INTERFACE_INCLUDE_DIRECTORIES "${_prefix}/include/MYGUI")
-endif()
-set(MyGUI_FOUND TRUE)
-EOF
-          cat "$IOS_PREFIX/lib/cmake/MyGUI/MyGUIConfig.cmake"
-
-      - name: Verify full iOS SDK
-        if: always()
-        run: |
-          echo "----- SDK summary -----"
-          find "$IOS_PREFIX" -name '*.a' | sort
-          echo "----- check required libs -----"
-          missing=0
-          for lib in OgreMain OgreGLSupport OgreBites OgreOverlay OgrePaging OgreTerrain OgreRTShaderSystem OgreMeshLodGenerator; do
-            if ! find "$IOS_PREFIX" -name "lib${lib}Static.a" | grep -q .; then echo "MISSING OGRE lib: $lib"; missing=1; fi
-          done
-          for lib in RenderSystem_GLES2 Plugin_OctreeSceneManager Plugin_ParticleFX Codec_STBI; do
-            if ! find "$IOS_PREFIX" -name "lib${lib}Static.a" | grep -q .; then echo "MISSING OGRE plugin: $lib"; missing=1; fi
-          done
-          [ -f "$IOS_PREFIX/lib/libfreetype.a" ] || { echo "MISSING: libfreetype.a"; missing=1; }
-          find "$IOS_PREFIX" -name 'libangelscript*' | grep -q . || { echo "MISSING: angelscript lib"; missing=1; }
-          find "$IOS_PREFIX" -name 'libopenal*' | grep -q . || { echo "MISSING: openal-soft lib"; missing=1; }
-          find "$IOS_PREFIX" -name 'libMyGUIEngine*' | grep -q . || { echo "MISSING: MyGUIEngine lib"; missing=1; }
-          find "$IOS_PREFIX" -name 'libMyGUI.OgrePlatform*' | grep -q . || { echo "MISSING: MyGUI.OgrePlatform lib"; missing=1; }
-          if [ "$missing" -eq 1 ]; then echo "SDK VERIFICATION FAILED"; exit 1; fi
-          echo "SDK VERIFICATION PASSED"
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ogre-ios-sdk-logs
-          path: logs/
-          retention-days: 14
-          if-no-files-found: warn
-
-      - name: Upload iOS SDK
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ios-sdk
-          path: ios-sdk/
-          retention-days: 14
-          if-no-files-found: warn
-
 
       - name: Upload logs
         if: always()
