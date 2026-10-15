@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	RoR is built with plain CMake rather than Xcode, so nothing supplies an
+	entitlements file at all.  This deliberately EMPTY dictionary exists only
+	so that codesign embeds an entitlements blob - and, with
+	--generate-entitlement-der, its DER form - exactly the way the one bundle
+	in this repository that is known to install was signed:
+
+	    codesign --force --sign - --entitlements Free.entitlements \
+	             --generate-entitlement-der "$APP"
+
+	A free Apple ID cannot carry extra entitlements, so there is nothing to
+	put in here.  The signatures that actually authorise the app are added by
+	whoever sideloads the IPA (ESIGN, Sideloadly, SideStore, ...).
+	-->
+</dict>
+</plist>

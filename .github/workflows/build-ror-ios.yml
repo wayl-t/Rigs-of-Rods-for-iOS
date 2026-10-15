@@ -352,11 +352,33 @@ jobs:
           printf 'APPL????' > "$APP_DIR/PkgInfo"
 
           # Ad-hoc signature.  Needs no certificate at all, and whatever
-          # sideloads the IPA (AltStore, Sideloadly, ...) re-signs it with the
-          # user's own free Apple ID anyway, so a failure here must not stop the
-          # packaging - but it has to be visible.  Piping codesign into tail
+          # sideloads the IPA (ESIGN, Sideloadly, SideStore, ...) re-signs it
+          # with the user's own identity anyway, so a failure here must not stop
+          # the packaging - but it has to be visible.  Piping codesign into tail
           # would report tail's status, which is why this is done explicitly.
-          if codesign --force --sign - "$APP_DIR" > codesign.log 2>&1; then
+          #
+          # The flags are not decoration.  The ONE bundle in this repository
+          # that is known to install - the milestone-0 smoke test - was signed
+          # as
+          #     codesign --force --sign - --entitlements Free.entitlements \
+          #              --generate-entitlement-der "$APP"
+          # where Free.entitlements is an EMPTY dictionary.  So the entitlement
+          # *content* is irrelevant; what matters is that the signature carries
+          # an entitlements blob at all and that its DER form is generated.
+          # Modern iOS reads the DER entitlements in preference to the XML
+          # ones, and a signature without them can be refused at install time -
+          # which is the failure being chased here.  A bare
+          # `codesign --force --sign -` (what this step used to do) produces
+          # neither.
+          ENT_FILE="$GITHUB_WORKSPACE/patches/ios/RoR.entitlements"
+          if [ ! -f "$ENT_FILE" ]; then
+            echo "::warning::$ENT_FILE missing - signing without entitlements"
+            ENT_ARGS=""
+          else
+            ENT_ARGS="--entitlements $ENT_FILE --generate-entitlement-der"
+          fi
+          # shellcheck disable=SC2086
+          if codesign --force --sign - $ENT_ARGS "$APP_DIR" > codesign.log 2>&1; then
             echo "ad-hoc codesign: OK"
           else
             echo "ad-hoc codesign: FAILED (not fatal, the sideloader re-signs)"
@@ -368,6 +390,11 @@ jobs:
           else
             echo "bundle is unsigned (expected; the sideloader adds the signature)"
           fi
+          echo "----- what the signature actually says -----"
+          codesign -d --entitlements :- "$APP_DIR" 2>&1 | head -20 || true
+          codesign -dvvv "$APP_DIR" 2>&1 \
+            | grep -Ei 'Identifier|Format|CodeDirectory|Signature|Hash|flags|TeamIdentifier' \
+            | head -20 || true
 
           # An .ipa is just a zip with the bundle at Payload/<name>.app.
           rm -rf Payload RoR-ios.ipa
@@ -378,6 +405,48 @@ jobs:
           ls -la RoR-ios.ipa
           unzip -l RoR-ios.ipa | head -20
           echo "IPA size: $(du -h RoR-ios.ipa | cut -f1)"
+
+          # ------------------------------------------------------------------ #
+          # A deliberately small second IPA, for diagnosis only.               #
+          #                                                                    #
+          # The full bundle is ~112 MB, almost all of it resource archives.    #
+          # When iOS answers an install with the generic "Unable to Install"   #
+          # it is usually either disk space / the installer choking on the     #
+          # size, or a signature problem.  A ~10 MB build of the same app with #
+          # the same Info.plist and the same signing tells those apart in a    #
+          # single install attempt: if the small one lands, it was about size. #
+          # The kept archives are the small ones plus the two the engine needs #
+          # to get as far as drawing anything (skeleton, OgreCore).            #
+          # ------------------------------------------------------------------ #
+          KEEP="OgreCore.zip mygui.zip skeleton.zip materials.zip overlays.zip
+                scripts.zip fonts.zip rtshader.zip managed_materials.zip
+                cubemaps.zip famicons.zip icons.zip flags.zip airfoils.zip
+                beamobjects.zip particles.zip paged.zip"
+          rm -rf LiteStage RoR-ios-lite.ipa
+          mkdir -p LiteStage/Payload
+          cp -R "$APP_DIR" LiteStage/Payload/RoR.app
+          if [ -d LiteStage/Payload/RoR.app/resources ]; then
+            for z in LiteStage/Payload/RoR.app/resources/*.zip; do
+              [ -e "$z" ] || continue
+              b="$(basename "$z")"
+              keep=0
+              for k in $KEEP; do
+                [ "$b" = "$k" ] && keep=1
+              done
+              if [ "$keep" -eq 0 ]; then
+                echo "lite: dropping $b ($(du -h "$z" | cut -f1))"
+                rm -f "$z"
+              fi
+            done
+          fi
+          # Trimming the bundle invalidated the signature above, so sign again.
+          # shellcheck disable=SC2086
+          codesign --force --sign - $ENT_ARGS "LiteStage/Payload/RoR.app" > /dev/null 2>&1 \
+            && echo "lite codesign: OK" || echo "lite codesign: FAILED (not fatal)"
+          (cd LiteStage && zip -qry ../RoR-ios-lite.ipa Payload)
+          echo "----- lite IPA -----"
+          ls -la RoR-ios-lite.ipa
+          du -sh "$APP_DIR/resources" LiteStage/Payload/RoR.app/resources 2>/dev/null || true
 
       - name: Summary
         if: always()
@@ -430,10 +499,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: RoR-ios-ipa
-          # ONLY the IPA.  An earlier revision also uploaded the loose bundle
+          # ONLY the IPAs.  An earlier revision also uploaded the loose bundle
           # files, which made the downloaded archive a zip-of-a-zip and invited
-          # the user to hand the wrong file to Sideloadly.
-          path: RoR-ios.ipa
+          # the user to hand the wrong file to the signer.
+          path: |
+            RoR-ios.ipa
+            RoR-ios-lite.ipa
           retention-days: 30
           if-no-files-found: warn
 
@@ -455,28 +526,43 @@ jobs:
           TITLE="Rigs of Rods for iOS - unsigned IPA (rolling)"
           NOTES="Unsigned, ad-hoc-signed RoR IPA for arm64 iPhone/iPad, built from ${GITHUB_SHA:0:9}.
 
-          Download RoR-ios.ipa and hand THAT FILE to ESIGN / Sideloadly / SideStore -
-          it is served as a plain file, nothing to unpack. An .ipa is a zip whose
-          root contains Payload/ ; a signer that says \"invalid ipa\" was given an
-          archive that has something else at its root, or a different file."
+          Two files:
+
+          * RoR-ios.ipa      - the full game, ~112 MB, all resources
+          * RoR-ios-lite.ipa - the same app, ~10 MB, most resource archives
+                               removed.  DIAGNOSTIC ONLY: it will start but has
+                               no sounds, textures or wallpapers.
+
+          If the full one refuses to install with \"Unable to Install - Try Again
+          Later\" while the lite one installs, the problem is size or free space,
+          not the bundle.  If both refuse, it is the signature or the signer.
+
+          Hand the file itself to ESIGN / Sideloadly / SideStore - it is served
+          as a plain file, nothing to unpack.  An .ipa is a zip whose root
+          contains Payload/ ; a signer that says \"invalid ipa\" was given
+          something else."
 
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
               --title "$TITLE" --notes "$NOTES"
           fi
 
-          # Drop every asset that is not the IPA we are about to upload.  The
-          # release previously carried the smoke-test bundle, and leaving two
-          # .ipa files side by side is exactly how the wrong one gets installed.
+          # Drop every asset we are not about to upload.  The release used to
+          # carry the smoke-test bundle, and a stale .ipa sitting next to the
+          # current one is exactly how the wrong file gets installed.
           for a in $(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
                        --json assets --jq '.assets[].name'); do
-            if [ "$a" != "RoR-ios.ipa" ]; then
-              echo "removing stale asset: $a"
-              gh release delete-asset "$TAG" "$a" --repo "$GITHUB_REPOSITORY" --yes || true
-            fi
+            case "$a" in
+              RoR-ios.ipa|RoR-ios-lite.ipa) ;;
+              *) echo "removing stale asset: $a"
+                 gh release delete-asset "$TAG" "$a" --repo "$GITHUB_REPOSITORY" --yes || true ;;
+            esac
           done
 
           gh release upload "$TAG" RoR-ios.ipa --clobber --repo "$GITHUB_REPOSITORY"
+          if [ -f RoR-ios-lite.ipa ]; then
+            gh release upload "$TAG" RoR-ios-lite.ipa --clobber --repo "$GITHUB_REPOSITORY"
+          fi
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
             --title "$TITLE" --notes "$NOTES"
 
