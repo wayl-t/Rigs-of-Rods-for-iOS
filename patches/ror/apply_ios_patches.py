@@ -565,6 +565,35 @@ def patch_server_script_curl_helpers(ror):
     write(path, text)
 
 
+def patch_game_settings_alc(ror):
+    """GUI_GameSettings.cpp: a flat <alc.h> include only works with macOS frameworks.
+
+    pch.h and SoundManager.h both use the standard openal-soft layout
+    (<AL/al.h>, <AL/alc.h>), which is what our iOS SDK ships, so this lone
+    `#include <alc.h>` was the very last compile error left in the census.
+
+    TargetConditionals.h is already in scope here because SoundManager.h
+    (included just above) pulls it in on Apple platforms.
+    """
+    path = os.path.join(ror, "source", "main", "gui", "panels", "GUI_GameSettings.cpp")
+    text = read(path)
+    text = must_replace(
+        text,
+        "#ifdef USE_OPENAL\n"
+        "#   include <alc.h>\n"
+        "#endif\n",
+        "#ifdef USE_OPENAL\n"
+        "#   if defined(__APPLE__) && TARGET_OS_IPHONE\n"
+        "#       include <AL/alc.h> // Apple/iOS port: openal-soft layout, not the macOS framework\n"
+        "#   else\n"
+        "#       include <alc.h>\n"
+        "#   endif\n"
+        "#endif\n",
+        "GUI_GameSettings.cpp <alc.h> include for iOS",
+    )
+    write(path, text)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("ror_dir")
@@ -594,6 +623,7 @@ def main():
     patch_network_header(args.ror_dir)
     patch_repo_selector(args.ror_dir)
     patch_multiplayer_selector(args.ror_dir)
+    patch_game_settings_alc(args.ror_dir)
 
     print("applied Apple/iOS patches to %s" % args.ror_dir)
     if args.ois_include:

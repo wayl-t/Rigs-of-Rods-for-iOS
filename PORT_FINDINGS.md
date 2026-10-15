@@ -1057,10 +1057,18 @@ upstream-коде ровно для случая «SocketW настроен, lib
 HTTP. Мультиплеер через SocketW остаётся. Моды при этом можно класть в
 `Documents` приложения через «Файлы» — в проекте включён `UIFileSharingEnabled`.
 
-Все исправления лежат в `patches/ror/apply_ios_patches.py` девятью функциями:
+Следующий прогон, `38681835767` (2 м 58 с, сборка впервые дошла до 100%),
+подтвердил разбор: **было 287 ошибок, стала одна**. Ею оказался `#include
+<alc.h>` в `gui/panels/GUI_GameSettings.cpp:31` — плоская раскладка
+заголовков, которая бывает только у macOS-фреймворка OpenAL (его Headers
+лежат прямо в путях поиска), а openal-soft, как и `pch.h` с `SoundManager.h`,
+использует `<AL/alc.h>`. То есть перепись из §7.10 была полной.
+
+Все исправления лежат в `patches/ror/apply_ios_patches.py` десятью функциями:
 `patch_errorutils`, `patch_platformutils`, `patch_appcontext`,
 `patch_soundmanager`, `patch_network_header`, `patch_repo_selector`,
-`patch_multiplayer_selector`, `patch_server_script_curl_helpers` (плюс уже
+`patch_multiplayer_selector`, `patch_server_script_curl_helpers`,
+`patch_game_settings_alc` (плюс уже
 существовавшие патчи системы сборки). Каждая проверена локально на нетронутых
 файлах upstream: якоря совпадают, диффы ровно те, что задуманы.
 
