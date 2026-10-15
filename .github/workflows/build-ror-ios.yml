@@ -418,14 +418,19 @@ jobs:
         run: |
           set -x
           [ -f RoR-ios.ipa ] || { echo "no IPA produced, skipping release"; exit 0; }
-          TAG=ios-alpha
+          # `latest-ipa` is the tag the user already has bookmarked.  It used to
+          # hold the milestone-0 Hello-World smoke test; build-ipa.yml has been
+          # moved to its own `pipeline-check` tag so this one is unambiguously
+          # the game.
+          TAG=latest-ipa
           NOTES="Unsigned RoR IPA for arm64 iPhone/iPad, built from ${GITHUB_SHA:0:9}.
           Install with Sideloadly/AltStore using your own (free) Apple ID; the
           sideloader re-signs the bundle, so no Apple certificate is needed here.
           Contains the engine and OGRE resources, but no vehicle/terrain content yet."
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" RoR-ios.ipa --clobber --repo "$GITHUB_REPOSITORY"
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes "$NOTES"
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "Rigs of Rods for iOS - unsigned IPA (rolling)" --notes "$NOTES"
           else
             gh release create "$TAG" RoR-ios.ipa --repo "$GITHUB_REPOSITORY" \
               --title "Rigs of Rods for iOS - unsigned IPA (rolling)" \

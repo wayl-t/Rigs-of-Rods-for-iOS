@@ -41,8 +41,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete latest-ipa --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
-          gh release create latest-ipa RoRNative.ipa \
+          # Smoke test only - this is NOT the game.  It is republished on every
+          # push to main, so it must not share a tag with the real RoR IPA
+          # (build-ror-ios.yml owns `latest-ipa`); otherwise whichever run
+          # finished last would decide what the download link contains.
+          gh release delete pipeline-check --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
+          gh release create pipeline-check RoRNative.ipa \
             --repo "${{ github.repository }}" \
-            --title "RoR iOS (built $(date -u +%Y-%m-%d))" \
-            --notes "Tap RoRNative.ipa on your phone and choose SideStore / AltStore."
+            --title "Pipeline smoke test - NOT the game (built $(date -u +%Y-%m-%d))" \
+            --notes "This is a Hello-World iOS app.  It exists only to prove the build-and-package pipeline works end to end on a free macOS runner.  **The game itself is in the latest-ipa release.**"
