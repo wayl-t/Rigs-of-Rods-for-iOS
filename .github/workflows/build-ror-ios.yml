@@ -370,21 +370,51 @@ jobs:
           # which is the failure being chased here.  A bare
           # `codesign --force --sign -` (what this step used to do) produces
           # neither.
+          #
+          # That first attempt also taught a lesson worth keeping: an
+          # entitlements file the OS parser rejects makes codesign fail
+          # outright, and the bundle then ships UNSIGNED - strictly worse than
+          # shipping it with a plainer signature.  So the file is linted first
+          # and there is a fallback, below.
           ENT_FILE="$GITHUB_WORKSPACE/patches/ios/RoR.entitlements"
           if [ ! -f "$ENT_FILE" ]; then
             echo "::warning::$ENT_FILE missing - signing without entitlements"
             ENT_ARGS=""
+          elif ! plutil -lint "$ENT_FILE" > ent-lint.log 2>&1; then
+            echo "::warning::$ENT_FILE rejected by plutil - signing without entitlements"
+            cat ent-lint.log
+            ENT_ARGS=""
           else
             ENT_ARGS="--entitlements $ENT_FILE --generate-entitlement-der"
+            echo "entitlements file accepted by plutil"
           fi
-          # shellcheck disable=SC2086
-          if codesign --force --sign - $ENT_ARGS "$APP_DIR" > codesign.log 2>&1; then
-            echo "ad-hoc codesign: OK"
-          else
-            echo "ad-hoc codesign: FAILED (not fatal, the sideloader re-signs)"
-            cat codesign.log
-          fi
-          rm -f codesign.log
+
+          # Signs $1, falling back to a signature with no entitlements rather
+          # than leaving the bundle unsigned.  Returns non-zero only if even
+          # that fails, which under `set -e` stops the step; the upload step
+          # still runs because it is gated on `if: always()`.
+          adhoc_sign() {
+            local target="$1"
+            # shellcheck disable=SC2086
+            if codesign --force --sign - $ENT_ARGS "$target" > adhoc.log 2>&1; then
+              echo "  ad-hoc codesign: OK"
+              return 0
+            fi
+            echo "  signing WITH entitlements failed:"
+            cat adhoc.log
+            if codesign --force --sign - "$target" >> adhoc.log 2>&1; then
+              echo "  fell back to signing WITHOUT entitlements"
+              echo "  ::warning::this signature has no DER entitlements"
+              return 0
+            fi
+            echo "  ad-hoc codesign: FAILED ENTIRELY - bundle is unsigned"
+            cat adhoc.log
+            return 1
+          }
+
+          echo "----- signing the full bundle -----"
+          adhoc_sign "$APP_DIR"
+          rm -f adhoc.log ent-lint.log
           if [ -d "$APP_DIR/_CodeSignature" ]; then
             echo "bundle carries a _CodeSignature"
           else
@@ -439,10 +469,11 @@ jobs:
               fi
             done
           fi
-          # Trimming the bundle invalidated the signature above, so sign again.
-          # shellcheck disable=SC2086
-          codesign --force --sign - $ENT_ARGS "LiteStage/Payload/RoR.app" > /dev/null 2>&1 \
-            && echo "lite codesign: OK" || echo "lite codesign: FAILED (not fatal)"
+          # Trimming the bundle invalidated the signature above, so sign again
+          # through the same fallback path.
+          echo "----- signing the lite bundle -----"
+          adhoc_sign "LiteStage/Payload/RoR.app" || true
+          rm -f adhoc.log
           (cd LiteStage && zip -qry ../RoR-ios-lite.ipa Payload)
           echo "----- lite IPA -----"
           ls -la RoR-ios-lite.ipa
