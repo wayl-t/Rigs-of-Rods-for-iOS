@@ -773,6 +773,20 @@ source/GrassLoader.cpp:1447:6:  error: member access into incomplete type 'Scene
 PagedGeometry вдобавок переведена на `make -k`, чтобы одна ошибка больше не
 прятала остальные.
 
+Прогон `38677214200` это подтвердил: все одиннадцать единиц трансляции
+скомпилировались без единой ошибки, и `libPagedGeometry.a` слинковалась. Но
+`install` всё равно не выполнился, потому что проверка искала архив в
+`pagedgeometry/build/`, а он оказался в `pagedgeometry/lib/`. Причина —
+устаревшая переменная `LIBRARY_OUTPUT_PATH` в корневом `CMakeLists.txt`
+PagedGeometry (строки 36-39): она задана **без** префикса `CMAKE_`, и CMake её
+всё равно уважает для библиотечных целей, в отличие от соседних
+`LIBRARY_OUTPUT_DIRECTORY`/`ARCHIVE_OUTPUT_DIRECTORY`. Исправлено (коммит
+`44412ba`): архив теперь ищется по всему дереву `pagedgeometry`, цель `install`
+запускается всегда, когда архив найден, а сверху добавлено ручное копирование
+как страховка — и заголовков из `include/`, и **сгенерированного**
+`PagedGeometryConfig.h` (его `PagedGeometry.h` подключает на строке 11, а
+генерируется он в `pagedgeometry/build/include/`).
+
 ### 7.6. Чтобы конфиг OGRE заработал у потребителя
 
 `<prefix>/CMake/OGREConfig.cmake` собран CMake'ом из шаблона OGRE и для нашего
@@ -818,19 +832,133 @@ Unix Makefiles и собирает `make -k`.
 Ошибки линковки ожидаемы и не считаются показательными: фреймворки (UIKit,
 OpenGLES, AudioToolbox, …) будут добавляться уже Xcode-проектом приложения.
 
+### 7.8. Платформенный слой RoR: что уже точно сломано на iOS
+
+Это результаты разбора исходников RoR (свежий `HEAD`), а не догадки. Здесь
+собраны места, которые гарантированно не соберутся или гарантированно упадут
+на iOS — их надо править в любом случае.
+
+**1. `OGRE_PLATFORM` на iOS — это НЕ `OGRE_PLATFORM_APPLE`.**
+
+`OgrePlatform.h:149-155`:
+
+```c
+#elif defined(__APPLE_CC__)
+#   include "Availability.h"
+#   ifdef __IPHONE_OS_VERSION_MIN_REQUIRED
+#       define OGRE_PLATFORM OGRE_PLATFORM_APPLE_IOS   // = 4
+#   else
+#       define OGRE_PLATFORM OGRE_PLATFORM_APPLE       // = 3
+#   endif
+```
+
+Это **разные** значения. Любая ветка `#if OGRE_PLATFORM == OGRE_PLATFORM_APPLE`
+на iOS просто не выполняется. Всего в дереве RoR 36 таких упоминаний; важные:
+
+- `AppContext.cpp:521-533` — определение домашнего каталога. На iOS не
+  срабатывает ни `WIN32`, ни `LINUX`, ни `APPLE` → `ror_homedir` остаётся
+  пустой строкой → `sys_user_dir` пустой → все пользовательские пути битые.
+- `ErrorUtils.cpp:36-40` — там `#define _L` определяется только для `WIN32`,
+  `APPLE` и `LINUX`. На iOS **ни одна ветка не срабатывает, и `_L` остаётся
+  неопределённым** → `_L("…")` на строках 49-50 превращается в вызов
+  необъявленной функции → **ошибка компиляции**.
+- `InputEngine.cpp:399-401` — `#define strnlen(str,len) strlen(str)` только для
+  `APPLE`. На iOS либо повезёт (Darwin объявляет `strnlen`), либо получим
+  «call to undeclared function».
+
+**2. `PlatformUtils.cpp` — путь к исполняемому файлу.**
+
+`#ifdef _MSC_VER` / `#else`; iOS идёт по POSIX-ветке, где
+`GetExecutablePath()` = `readlink("/proc/self/exe")`. **На iOS нет `/proc`** →
+функция вернёт пустую строку → `AppContext::SetUpProgramPaths()` покажет
+«Error while retrieving program directory path» и вернёт `false` → **старт
+движка прервётся**. Нужен вариант для iOS (`[[NSBundle mainBundle] bundlePath]`).
+
+Приятная новость: `GetUserHomeDirectory()` = `getenv("HOME")` — на iOS это
+песочница приложения, то есть **работает как есть**.
+
+**3. OIS на iPhone даёт только MultiTouch и акселерометр — ни мыши, ни
+клавиатуры.**
+
+В бэкенде OIS (`src/iphone/iPhoneInputManager.mm`) список устройств — это
+`OISMultiTouch` и `OISJoyStick` (акселерометр). `createInputObject` для
+`OISMouse`/`OISKeyboard` бросает исключение. В `InputEngine::setup()` обе
+попытки создания обёрнуты в `try/catch`, поэтому **ошибка не фатальна, но
+`mMouse` и `mKeyboard` остаются нулевыми** (они инициализированы нулём в
+конструкторе, строки 423-424).
+
+Дальше — гарантированное падение, причём **сразу**:
+
+- `InputEngine::InputEngine()` (строка 434) сразу вызывает
+  `windowResized(...)`, а `windowResized()` (строка 657) делает
+  `mMouse->getMouseState()` при `mMouse == 0` → **падение в конструкторе**.
+- `InputEngine::Capture()` (строки 637-638) безусловно вызывает
+  `mKeyboard->capture()` и `mMouse->capture()` → **падение**.
+- `getMouseState()` (613) и `getKeyNameForKeyCode()` и т.п. — та же история.
+
+Поэтому «просто положить свой слой поверх OIS» недостаточно: нужно, чтобы у
+`InputEngine` на iOS всегда были ненулевые `mMouse`/`mKeyboard` (свои
+заглушки), либо чтобы все обращения были под проверкой. Второй вариант
+предпочтительнее: интерфейс `InputEngine` остаётся, а события касаний
+синтезируют те же `EV_*`, что и клавиатура.
+
+Хорошая новость: **в iOS-окне OGRE есть атрибут `"WINDOW"`**
+(`OgreEAGL2Window.mm:455-459` возвращает `mWindow`), причём есть и `"VIEW"`, и
+`"VIEWCONTROLLER"`. Значит, `InputEngine::setup()` с его
+`getCustomAttribute("WINDOW", &hWnd)` и `pl.insert("WINDOW", TOSTRING(hWnd))`
+передаст в OIS настоящий `UIWindow` — эта часть работает без правок.
+
+**4. `messagePump()` на iOS — пустышка.**
+
+`OgreWindowEventUtilities.cpp:174-212` реализует `messagePump()` только для
+`WIN32` и `LINUX`; на остальных платформах это пустая функция. Значит, главный
+цикл RoR не может «крутиться» в своём `while`, полагаясь на `messagePump()`:
+UIKit отдаёт события только через run loop. Игровой цикл придётся запускать из
+UIKit-колбэка (`CADisplayLink`) либо вручную прокручивать run loop внутри
+цикла.
+
+**5. Статические плагины OGRE.**
+
+Наш OGRE собран статически (`OGRE_STATIC_LIB` в `OgreBuildSettings.h`), а RoR
+читает `plugins.cfg` и вызывает `m_ogre_root->loadPlugin(...)`
+(`AppContext.cpp:240-261`) — со статическими плагинами это не работает. В
+установленном SDK уже лежит готовый `OgreBites::StaticPluginLoader`
+(`include/OGRE/Bites/OgreStaticPluginLoader.h`, `libOgreBitesStatic.a`) —
+именно его и надо поставить вместо чтения `plugins.cfg`.
+
+**6. Мелочи, полезные для обвязки.**
+
+- `Build.Shared_LIBS ON` (корневой `CMakeLists.txt:48`) на iOS безвреден:
+  `angelscript_addons` и `version_info` объявлены `STATIC` явно.
+- Проверка версии зависимостей (`CMakeLists.txt:70-76`) не сработает — файла
+  `version.cmake` в нашем префиксе нет.
+- iOS попадает в ветку `ELSEIF (UNIX)` (`:111`) → `-std=c++11` и Release-флаги
+  `-O2 -ffast-math -DNDEBUG`.
+- `OS_LIBS` (`source/main/CMakeLists.txt:459-465`) в ветке `else()` — это
+  `X11 -ldl -lrt`, чего на iOS нет; патч `apply_ios_patches.py` уже добавляет
+  iOS-ветку с пустым `OS_LIBS`.
+- `imgui` лежит в самом дереве (`source/main/gui/imgui/imgui.h`),
+  `moFileReader.hpp` и `utf8/*.h` — в `external/header_only/`.
+- В `source/main/` 259 единиц трансляции; этого достаточно, чтобы `make -k`
+  уложился в таймаут даже при обилии ошибок.
+
 ---
 
 ## Что всё ещё неизвестно / не проверено
 
 - **Прогон `build-ror-ios.yml` ещё не сделан.** Он даст список ошибок сборки
-  собственного кода RoR — именно то, ради чего он и написан.
-- **Слой ввода.** `touch` → события RoR. Штатный iPhone-бэкенд OIS есть, но он
-  опирается на устаревшие `UIAccelerometer` и `keyWindow`, так что поверх него,
-  скорее всего, придётся положить свой тонкий слой.
-- **Платформенный слой.** `main()`/главный цикл, создание поверхности отрисовки
-  (на iOS нужен view, а не окно), пути (`$HOME`/`/proc/self/exe`), инициализация
-  MyGUI.
-- **Контент.** Упаковка ресурсов в контейнер приложения.
+  собственного кода RoR — именно то, ради чего он и написан. Пункты 1-3 из
+  §7.8 должны появиться в этом списке; если чего-то из них там не будет, значит
+  разбор где-то ошибочен и это надо проверить.
+- **Слой ввода.** Решено: `touch` → `EV_*` внутри `InputEngine`, интерфейс
+  движка не меняем. Осталось определить, как именно рисовать экранные кнопки
+  (MyGUI или собственный оверлей OGRE) и как связать `OISMultiTouch` с
+  `ProcessKeyPress`.
+- **Платформенный слой.** `main()`/главный цикл (см. §7.8, п. 4), создание
+  поверхности отрисовки от `UIView`, пути (п. 2), инициализация MyGUI.
+- **Контент.** Упаковка ресурсов в контейнер приложения. Напоминание:
+  `SetUpResourcesDir` требует наличия каталога `resources/` рядом с
+  «исполняемым файлом», а `ContentManager` добавляет `<sys_process_dir>/content`.
 
 ---
 

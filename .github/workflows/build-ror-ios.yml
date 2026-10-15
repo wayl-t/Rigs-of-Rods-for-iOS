@@ -92,7 +92,7 @@ jobs:
             {
               echo ''
               echo '# iOS port: OgreTargets.cmake lists a ZLIB::ZLIB link dependency'
-              echo '# (OGRE was built with zlib found), but OGRE's own config never'
+              echo '# (OGRE was built with zlib found), but the OGRE config never'
               echo '# re-creates that imported target for consumers.'
               echo 'include(CMakeFindDependencyMacro)'
               echo 'find_dependency(ZLIB)'
