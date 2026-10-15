@@ -24,6 +24,10 @@ permissions:
 env:
   IOS_DEPLOYMENT_TARGET: "16.0"
   ROR_REPO: https://github.com/RigsOfRods/rigs-of-rods.git
+  # Pinned on purpose: patches/ror/apply_ios_patches.py matches upstream text
+  # verbatim, so tracking the moving default branch would make the port
+  # unreproducible (and silently break the patch step instead of the build).
+  ROR_COMMIT: d426a5c5e9f76a77a34e5fba8a41cda20edbe97f
 
 jobs:
   ror-ios:
@@ -134,7 +138,13 @@ jobs:
           fi
 
       - name: Get RoR source
-        run: git clone --depth 1 "$ROR_REPO" ror
+        run: |
+          set -euo pipefail
+          git init ror
+          git -C ror remote add origin "$ROR_REPO"
+          git -C ror fetch --depth 1 origin "$ROR_COMMIT"
+          git -C ror checkout -q FETCH_HEAD
+          git -C ror log -1 --format='RoR source: %H %ci %s'
 
       - name: Patch RoR for the Apple/iOS port
         run: |
@@ -154,6 +164,26 @@ jobs:
           #   (there *is* a host OpenAL.framework) win over the iOS static libs.
           # -DOGRE_DIR: OGREConfig.cmake lives in <prefix>/CMake, which is not a
           #   standard search path.
+          # -DCMAKE_FIND_ROOT_PATH_MODE_*: THE important ones.  For every
+          #   Apple cross-compile, CMake's Modules/Platform/Darwin.cmake
+          #   appends the SDK sysroot to CMAKE_FIND_ROOT_PATH and sets
+          #   CMAKE_FIND_ROOT_PATH_MODE_{LIBRARY,INCLUDE,PACKAGE}=ONLY -
+          #   but only `if (NOT DEFINED ...)`, so defining them here wins.
+          #   Under ONLY, find_path/find_library/find_package look *solely*
+          #   inside that root path (the iPhoneOS SDK), which makes
+          #   $IOS_PREFIX completely invisible.  That is exactly why every
+          #   dependency in the deps workflow had to be pinned by hand.
+          #   BOTH lifts the restriction without the path-re-rooting
+          #   surprises of adding the prefix to CMAKE_FIND_ROOT_PATH, and
+          #   CMAKE_PREFIX_PATH is searched before the host's
+          #   CMAKE_SYSTEM_PREFIX_PATH (homebrew), so the iOS libs win.
+          # -DMyGUI_*/PagedGeometry_*/*_DIR: belt and braces.  MyGUI and
+          #   PagedGeometry are looked up by RoR's own module-mode find
+          #   modules (plain find_path/find_library), the rest are
+          #   config-mode packages; presetting the cache entries makes them
+          #   resolve deterministically instead of by search.
+          # -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL: SocketW is built without
+          #   OpenSSL, so a homebrew OpenSSL must not leak in.
           # -DCMAKE_EXE_LINKER_FLAGS: OGRE_LIBRARIES contains the plain name
           #   OgreGLSupportStatic, which needs -L to lib/Release.
           # -DZLIB_*: OGRE's Overlay component links ZLIB::ZLIB; pin it to the
@@ -168,6 +198,19 @@ jobs:
             -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$IOS_PREFIX" \
+            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH \
+            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
+            -DMyGUI_INCLUDE_DIR="$IOS_PREFIX/include/MYGUI" \
+            -DMyGUI_MyGUIEngine_LIBRARY_REL="$IOS_PREFIX/lib/libMyGUIEngine.a" \
+            -DMyGUI_OgrePlatform_LIBRARY_REL="$IOS_PREFIX/lib/libMyGUI.OgrePlatform.a" \
+            -DPagedGeometry_INCLUDE_DIR="$IOS_PREFIX/include/PagedGeometry" \
+            -DPagedGeometry_LIBRARY="$IOS_PREFIX/lib/libPagedGeometry.a" \
+            -DAngelscript_DIR="$IOS_PREFIX/lib/cmake/Angelscript" \
+            -Dfmt_DIR="$IOS_PREFIX/lib/cmake/fmt" \
+            -DRapidJSON_DIR="$IOS_PREFIX/lib/cmake/RapidJSON" \
+            -DSocketW_DIR="$IOS_PREFIX/lib/cmake/SocketW" \
+            -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE \
             -DCMAKE_FIND_FRAMEWORK=LAST \
             -DOGRE_DIR="$IOS_PREFIX/CMake" \
             -DZLIB_LIBRARY_RELEASE="$IOS_SYSROOT/usr/lib/libz.tbd" \
@@ -180,6 +223,17 @@ jobs:
             -DROR_OIS_INCLUDE_DIR="$IOS_PREFIX/include/OIS" \
             -DROR_OIS_LIBRARY="$IOS_PREFIX/lib/libOIS.a" \
             2>&1 | tee logs/ror-configure.log
+
+          # Diagnostics: show what CMake actually resolved, so a failing
+          # configure explains itself instead of needing another cycle.
+          {
+            echo "----- find-related CMakeCache entries -----"
+            grep -E '^(CMAKE_FIND_ROOT_PATH|CMAKE_FIND_ROOT_PATH_MODE_|CMAKE_OSX_SYSROOT|CMAKE_SYSROOT|OGRE_DIR|MyGUI_|fmt_DIR|RapidJSON_DIR|SocketW_DIR|Angelscript_DIR|PagedGeometry_|ZLIB_)' ror/build/CMakeCache.txt 2>/dev/null || echo "(no CMakeCache.txt)"
+          } | tee -a logs/ror-configure.log
+
+      - name: Dump CMakeCache for diagnosis
+        if: always()
+        run: cp -f ror/build/CMakeCache.txt logs/CMakeCache.txt 2>/dev/null || true
 
       - name: Build with make -k (collect ALL errors)
         continue-on-error: true
