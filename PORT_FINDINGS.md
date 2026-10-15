@@ -743,11 +743,94 @@ GLES2 и отключает GL/Cg/tools — то есть «не найден Op
 
 ---
 
+### 7.5. Первый полный прогон iOS-набора: девять из десяти
+
+Прогон `38675510250` собрал **все** зависимости, включая MyGUI, OIS, fmt,
+RapidJSON, SocketW, AngelScript и openal-soft; споткнулся он ровно на одном
+шаге — `Verify full iOS SDK`, потому что PagedGeometry не поставила ни
+библиотеки, ни заголовков. Вся сборка заняла ~6 минут.
+
+Причина — не сборочная система, а собственно код:
+
+```
+source/GrassLoader.cpp:111:74: error: member access into incomplete type 'Technique'
+source/GrassLoader.cpp:1446:28: error: member access into incomplete type 'Ogre::SceneNode'
+source/GrassLoader.cpp:1447:6:  error: member access into incomplete type 'SceneNode'
+```
+
+`GrassLoader.cpp` дёргает `layer->material->getTechnique(0)->getPass(0)` и
+методы `Ogre::SceneNode`, не включая при этом ни `OgreTechnique.h`, ни
+`OgreSceneNode.h`. Код 2009 года писан в расчёте на «один большой `Ogre.h`»,
+который раньше подключался транзитивно. В нашем OGRE 1.11.6 — не подключается,
+и один сломанный файл останавливает `make`, из-за чего не собирается вообще
+ничего (библиотека не появляется, `install` не ставит ни заголовков, ни `.a`).
+
+Лечение простое и безобидное: сборка дописывает `#include <Ogre.h>` первой
+строкой в каждый `pagedgeometry/source/*.cpp`, если его там ещё нет. `Ogre.h`
+тянет только заголовки OgreMain (`OgreSceneNode.h`, `OgreTechnique.h`,
+`OgreSceneManager.h`, `OgrePass.h`, …) — никаких компонентов — так что это
+ровно то, что нужно, и сразу закрывает всё семейство подобных ошибок. Сборка
+PagedGeometry вдобавок переведена на `make -k`, чтобы одна ошибка больше не
+прятала остальные.
+
+### 7.6. Чтобы конфиг OGRE заработал у потребителя
+
+`<prefix>/CMake/OGREConfig.cmake` собран CMake'ом из шаблона OGRE и для нашего
+статического iOS-префикса содержит два подвоха, которые вылезут уже при
+конфигурировании RoR:
+
+1. `OgreTargets.cmake` записывает **абсолютный** путь к `libfreetype.a` той
+   машины, где собирался OGRE (`OgreOverlay` линкует FreeType). Совпадает это
+   с рабочим каталогом RoR-прогона только по счастливой случайности (GitHub
+   всегда монтирует репозиторий в `/Users/runner/work/ror-ios/ror-ios`), и
+   потому `build-ror-ios.yml` после скачивания артефакта переписывает этот
+   префикс на фактический.
+2. Там же есть `$<LINK_ONLY:ZLIB::ZLIB>`, но `OGREConfig.cmake` **не** создаёт
+   эту цель. CMake валит генерацию сообщением «the target was not found».
+   Поэтому в `OGREConfig.cmake` дописывается `include(CMakeFindDependencyMacro)`
+   и `find_dependency(ZLIB)`, а `ZLIB_LIBRARY`/`ZLIB_INCLUDE_DIR` жёстко
+   указывают в sysroot iOS, чтобы не подмешался домашний zlib.
+
+Заодно: `OGRE_LIBRARIES` мешает имена imported-целей с одним «плоским» именем
+`OgreGLSupportStatic`, а `OGRE_LIBRARY_DIRS` (`<prefix>/lib`, `<prefix>/lib/OGRE`)
+не содержит настоящего каталога `lib/Release`, где лежат архивы. Поэтому архивы
+из `lib/Release` и `lib/Release/OGRE` копируются «плоско» в `<prefix>/lib`, а на
+случай чего в линковку добавляется `-L`.
+
+То же соображение про подмену с хоста касается OpenAL: CMake'овский модуль
+`FindOpenAL` на Apple сначала пробует `OpenAL.framework`, а на macOS он есть
+(устаревший). Поэтому `OPENAL_LIBRARY`/`OPENAL_INCLUDE_DIR` тоже передаются
+явно, а поиск фреймворков переводится в `-DCMAKE_FIND_FRAMEWORK=LAST`.
+
+### 7.7. Следующий шаг: `build-ror-ios.yml`
+
+Добавлен отдельный workflow, который **не** пересобирает зависимости, а
+скачивает готовый артефакт `ios-sdk` из последнего завершённого прогона
+`build-ios-deps.yml` (артефакт грузится с `if: always()`, поэтому переживает
+провалившуюся проверку). Дальше он нормализует префикс (см. 7.6), клонирует
+свежий RoR, применяет `patches/ror/apply_ios_patches.py`, конфигурирует проект
+как `-DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64` с генератором
+Unix Makefiles и собирает `make -k`.
+
+Смысл прогона — **не** получить приложение, а получить полный список мест, где
+собственный C++ RoR не собирается под iOS. Для этого включён `-k` (продолжать
+после ошибок), а все ошибки `error:` вытаскиваются в итоговую сводку прогона.
+Ошибки линковки ожидаемы и не считаются показательными: фреймворки (UIKit,
+OpenGLES, AudioToolbox, …) будут добавляться уже Xcode-проектом приложения.
+
+---
+
 ## Что всё ещё неизвестно / не проверено
 
-- **Собственный код RoR на Apple clang** — macOS-проба упёрлась в баг рецепта
-  `angelscript` (CFI-ассемблер x86_64), поэтому список ошибок самого RoR ещё
-  не получен. Планируется получить его сразу на iOS, когда SDK будет полным.
+- **Прогон `build-ror-ios.yml` ещё не сделан.** Он даст список ошибок сборки
+  собственного кода RoR — именно то, ради чего он и написан.
+- **Слой ввода.** `touch` → события RoR. Штатный iPhone-бэкенд OIS есть, но он
+  опирается на устаревшие `UIAccelerometer` и `keyWindow`, так что поверх него,
+  скорее всего, придётся положить свой тонкий слой.
+- **Платформенный слой.** `main()`/главный цикл, создание поверхности отрисовки
+  (на iOS нужен view, а не окно), пути (`$HOME`/`/proc/self/exe`), инициализация
+  MyGUI.
+- **Контент.** Упаковка ресурсов в контейнер приложения.
 
 ---
 

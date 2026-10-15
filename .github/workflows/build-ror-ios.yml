@@ -1,0 +1,229 @@
+name: Build RoR for iOS (consumes the dependency SDK)
+
+# Milestone 9.
+#
+# build-ios-deps.yml produces exactly one prefix (ios-sdk) holding every
+# third-party library RoR needs for iphoneos/arm64.  This workflow downloads
+# that artifact, applies patches/ror/apply_ios_patches.py to a fresh Rigs of
+# Rods checkout, and then configures + builds RoR itself against it.
+#
+# The point of this run is NOT yet to produce a working app.  It is to get the
+# complete list of places where RoR's own C++ does not compile for iOS/touch,
+# so the build runs `make -k` (keep going) and the summary collects every
+# `error:` line into the step summary.  Link errors are expected and ignored.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe]
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  IOS_DEPLOYMENT_TARGET: "16.0"
+  ROR_REPO: https://github.com/RigsOfRods/rigs-of-rods.git
+
+jobs:
+  ror-ios:
+    name: Configure + build RoR for iphoneos/arm64
+    runs-on: macos-15
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Locate the iOS sysroot
+        run: |
+          mkdir -p logs
+          echo "IOS_SYSROOT=$(xcrun --sdk iphoneos --show-sdk-path)" >> $GITHUB_ENV
+
+      # ------------------------------------------------------------------ #
+      # The dependency SDK comes from the last completed build-ios-deps run. #
+      # Its artifact is uploaded with `if: always()`, so we can use it even  #
+      # when the verification step of that run failed.                       #
+      # ------------------------------------------------------------------ #
+      - name: Download the iOS dependency SDK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          RUN_ID=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/build-ios-deps.yml/runs?per_page=20" \
+            --jq '[.workflow_runs[] | select(.status=="completed")][0].id')
+          echo "using ios-sdk from dependency run $RUN_ID"
+          echo "DEPS_RUN_ID=$RUN_ID" >> $GITHUB_ENV
+          mkdir -p sdk
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -n ios-sdk -D sdk
+          echo "----- downloaded tree (depth 2) -----"
+          find sdk -maxdepth 2 | head -40
+
+      - name: Normalize the downloaded SDK
+        run: |
+          set -euo pipefail
+
+          # `gh run download -n` may or may not nest the artifact in a directory
+          # named after itself.  OGREConfig.cmake must live in <prefix>/CMake for
+          # its PACKAGE_PREFIX_DIR (= CMAKE_CURRENT_LIST_DIR/..) to resolve, so
+          # use it as the anchor.
+          OGRE_CFG="$(find "$GITHUB_WORKSPACE/sdk" -name OGREConfig.cmake -print -quit)"
+          [ -n "$OGRE_CFG" ] || { echo "OGREConfig.cmake not found in the artifact"; exit 1; }
+          PREFIX="$(cd "$(dirname "$(dirname "$OGRE_CFG")")" && pwd)"
+          echo "OGRE config : $OGRE_CFG"
+          echo "IOS_PREFIX=$PREFIX" >> $GITHUB_ENV
+          echo "prefix      : $PREFIX"
+
+          # 1) OgreTargets.cmake records the absolute path of the FreeType
+          #    archive of the machine that *built* OGRE.  Re-point it here.
+          #    (sed's # delimiter because the replacement contains /.)
+          find "$PREFIX" -name '*.cmake' \
+            -exec sed -i '' "s#/Users/runner/work/ror-ios/ror-ios/ios-sdk#$PREFIX#g" {} +
+
+          # 2) ... and it records a `ZLIB::ZLIB` link dependency which
+          #    OGREConfig.cmake never re-creates for consumers, so CMake would
+          #    abort at generate time with "the target was not found".
+          if ! grep -q 'CMakeFindDependencyMacro' "$OGRE_CFG"; then
+            {
+              echo ''
+              echo '# iOS port: OgreTargets.cmake lists a ZLIB::ZLIB link dependency'
+              echo '# (OGRE was built with zlib found), but OGRE's own config never'
+              echo '# re-creates that imported target for consumers.'
+              echo 'include(CMakeFindDependencyMacro)'
+              echo 'find_dependency(ZLIB)'
+            } >> "$OGRE_CFG"
+          fi
+
+          # 3) OGRE_LIBRARIES mixes imported target names with one plain name
+          #    (OgreGLSupportStatic, see OGREConfig.cmake) and OGRE_LIBRARY_DIRS
+          #    does not contain lib/Release.  Copy the archives flat so that a
+          #    plain `-L$IOS_PREFIX/lib` resolves everything.
+          cp -f "$PREFIX"/lib/Release/*.a "$PREFIX/lib/" 2>/dev/null || true
+          cp -f "$PREFIX"/lib/Release/OGRE/*.a "$PREFIX/lib/" 2>/dev/null || true
+          echo "----- prefix/lib -----"
+          ls "$PREFIX/lib" || true
+
+      - name: Check the SDK really is complete
+        run: |
+          set -euo pipefail
+          missing=0
+          for f in "$IOS_PREFIX/CMake/OGREConfig.cmake" \
+                   "$IOS_PREFIX/lib/libOIS.a" \
+                   "$IOS_PREFIX/include/OIS/OIS.h" \
+                   "$IOS_PREFIX/lib/libfreetype.a" \
+                   "$IOS_PREFIX/include/MYGUI/MyGUI.h" \
+                   "$IOS_PREFIX/include/rapidjson/document.h" \
+                   "$IOS_PREFIX/include/PagedGeometry/PagedGeometry.h"; do
+            if [ -e "$f" ]; then echo "  ok      $f"; else echo "  MISSING $f"; missing=1; fi
+          done
+          for lib in MyGUIEngine MyGUI.OgrePlatform fmt SocketW PagedGeometry angelscript openal; do
+            if find "$IOS_PREFIX" -name "lib${lib}*" | grep -q .; then
+              echo "  ok      lib${lib}*"
+            else
+              echo "  MISSING lib${lib}*"; missing=1
+            fi
+          done
+          if [ "$missing" -eq 1 ]; then
+            echo "::error::the dependency SDK is incomplete - check the build-ios-deps run"
+            exit 1
+          fi
+
+      - name: Get RoR source
+        run: git clone --depth 1 "$ROR_REPO" ror
+
+      - name: Patch RoR for the Apple/iOS port
+        run: |
+          python3 patches/ror/apply_ios_patches.py ror \
+            --ois-include "$IOS_PREFIX/include/OIS" \
+            --ois-lib "$IOS_PREFIX/lib/libOIS.a"
+          echo "----- the OS_LIBS branch -----"
+          sed -n '/set(OS_LIBS "Ws2_32")/,/^endif/p' ror/source/main/CMakeLists.txt | head -12
+
+      - name: CMake configure (iOS)
+        continue-on-error: true
+        run: |
+          # -G "Unix Makefiles" on purpose: RoR for iOS is a *static* C++
+          #   cross-compile, the Xcode generator buys us nothing here, and make
+          #   lets us run with -k to collect every error in one pass.
+          # -DCMAKE_FIND_FRAMEWORK=LAST: never let a macOS system framework
+          #   (there *is* a host OpenAL.framework) win over the iOS static libs.
+          # -DOGRE_DIR: OGREConfig.cmake lives in <prefix>/CMake, which is not a
+          #   standard search path.
+          # -DCMAKE_EXE_LINKER_FLAGS: OGRE_LIBRARIES contains the plain name
+          #   OgreGLSupportStatic, which needs -L to lib/Release.
+          # -DZLIB_*: OGRE's Overlay component links ZLIB::ZLIB; pin it to the
+          #   SDK's own zlib so a homebrew one cannot leak in.
+          # -DOPENAL_*: same story for OpenAL (CMake's FindOpenAL would happily
+          #   use the deprecated macOS OpenAL.framework).
+          cmake -S ror -B ror/build -G "Unix Makefiles" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET \
+            -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$IOS_PREFIX" \
+            -DCMAKE_FIND_FRAMEWORK=LAST \
+            -DOGRE_DIR="$IOS_PREFIX/CMake" \
+            -DZLIB_LIBRARY_RELEASE="$IOS_SYSROOT/usr/lib/libz.tbd" \
+            -DZLIB_LIBRARY="$IOS_SYSROOT/usr/lib/libz.tbd" \
+            -DZLIB_INCLUDE_DIR="$IOS_SYSROOT/usr/include" \
+            -DOPENAL_LIBRARY="$IOS_PREFIX/lib/libopenal.a" \
+            -DOPENAL_INCLUDE_DIR="$IOS_PREFIX/include" \
+            -DCMAKE_EXE_LINKER_FLAGS="-L$IOS_PREFIX/lib -L$IOS_PREFIX/lib/Release -L$IOS_PREFIX/lib/Release/OGRE" \
+            -DROR_CREATE_CONTENT_FOLDER=OFF \
+            -DROR_OIS_INCLUDE_DIR="$IOS_PREFIX/include/OIS" \
+            -DROR_OIS_LIBRARY="$IOS_PREFIX/lib/libOIS.a" \
+            2>&1 | tee logs/ror-configure.log
+
+      - name: Build with make -k (collect ALL errors)
+        continue-on-error: true
+        run: |
+          make -C ror/build -k -j 4 2>&1 | tee logs/ror-build.log
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## RoR for iOS - compile error census"
+            echo
+            echo "dependency SDK run: \`$DEPS_RUN_ID\`"
+            echo
+            echo "### Configure problems"
+            echo '```'
+            grep -iE 'CMake Error|Could NOT find|not found|FATAL' logs/ror-configure.log | head -40 || echo "(none)"
+            echo '```'
+            echo "### Configure feature summary"
+            echo '```'
+            sed -n '/Features/,$p' logs/ror-configure.log | head -70 || echo "(none)"
+            echo '```'
+            echo "### compiler errors: $(grep -cE 'error:' logs/ror-build.log || echo 0)"
+            echo
+            echo "### first 120 errors"
+            echo '```'
+            grep -E 'error:' logs/ror-build.log | head -120 || echo "(none)"
+            echo '```'
+            echo "### top error kinds"
+            echo '```'
+            grep -oE 'error: .{0,70}' logs/ror-build.log | sort | uniq -c | sort -rn | head -40 || echo "(none)"
+            echo '```'
+            echo "### source files with errors (count)"
+            echo '```'
+            grep -E '^[^ ]+:[0-9]+:[0-9]+: error:' logs/ror-build.log \
+              | cut -d: -f1 | sort | uniq -c | sort -rn | head -80 || echo "(none)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ror-ios-build-logs
+          path: logs/
+          retention-days: 30
+          if-no-files-found: warn

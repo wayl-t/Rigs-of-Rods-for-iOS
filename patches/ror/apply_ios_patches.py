@@ -95,6 +95,26 @@ def patch_dependencies(ror):
 def patch_main_cmake(ror):
     path = os.path.join(ror, "source", "main", "CMakeLists.txt")
     text = read(path)
+
+    # OS_LIBS: Windows wants ws2_32, Linux wants X11 + libdl + librt.  iOS has
+    # none of those: libdl/librt/lpthread do not exist as separate libraries and
+    # X11 is obviously absent.  Sockets, dlopen and threads all live in
+    # libSystem, which every app links anyway.  The frameworks the app actually
+    # needs (UIKit, OpenGLES, AudioToolbox, ...) are added by the Xcode project
+    # in .github/workflows/build-ipa.yml, not here.
+    text = must_replace(
+        text,
+        "if (WIN32)\n"
+        "    set(OS_LIBS \"Ws2_32\")\n"
+        "else ()\n",
+        "if (WIN32)\n"
+        "    set(OS_LIBS \"Ws2_32\")\n"
+        "elseif (APPLE AND CMAKE_SYSTEM_NAME STREQUAL \"iOS\")\n"
+        "    set(OS_LIBS \"\")\n"
+        "else ()\n",
+        "main/CMakeLists.txt OS_LIBS (iOS branch)",
+    )
+
     text = must_replace(
         text,
         "        ${OGRE_LIBRARIES}\n        ois::ois\n        fmt::fmt\n",

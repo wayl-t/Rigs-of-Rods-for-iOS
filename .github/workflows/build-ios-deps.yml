@@ -548,6 +548,21 @@ jobs:
             '# iOS port: no pkg-config. OGRE paths are supplied with -D on the' \
             '# cmake command line (see build-ios-deps.yml).' \
             > pagedgeometry/CMakeDependenciesConfig.txt
+
+          # v1.2.0 is from 2009 and its sources are written against the classic
+          # "one big Ogre.h" include style.  GrassLoader.cpp dereferences
+          # Material::getTechnique()->getPass() and uses Ogre::SceneNode without
+          # including OgreTechnique.h / OgreSceneNode.h, so on OGRE 1.11 it dies
+          # with "member access into incomplete type".  Ogre.h only pulls in
+          # OgreMain headers, so prepending it to every translation unit fixes
+          # that whole family of errors at once.
+          for f in pagedgeometry/source/*.cpp; do
+            if grep -q 'Ogre\.h' "$f"; then continue; fi
+            awk 'BEGIN { print "#include <Ogre.h>" } { print }' "$f" > "$f.new"
+            mv "$f.new" "$f"
+            echo "prepended <Ogre.h> to $f"
+          done
+
           cmake -S pagedgeometry -B pagedgeometry/build -G "Unix Makefiles" \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_SYSTEM_NAME=iOS \
@@ -563,8 +578,28 @@ jobs:
             -DOgre_LIBRARY_DIRS="$IOS_PREFIX/lib/Release" \
             -DOgre_LIBRARIES="OgreMain" \
             2>&1 | tee logs/paged-configure.log
-          cmake --build pagedgeometry/build -j $(sysctl -n hw.ncpu) 2>&1 | tee logs/paged-build.log
-          cmake --build pagedgeometry/build --target install 2>&1 | tee logs/paged-install.log
+
+          # -k (keep going) on purpose: one broken file must not hide the rest.
+          # The whole point of this workflow is to see every error in one run.
+          make -C pagedgeometry/build -k -j "$(sysctl -n hw.ncpu)" \
+            2>&1 | tee logs/paged-build.log || true
+
+          echo "----- PagedGeometry compile errors -----"
+          grep -E 'error:' logs/paged-build.log | head -40 || echo "(none)"
+          {
+            echo "### PagedGeometry compile errors"
+            echo '```'
+            grep -E 'error:' logs/paged-build.log | head -40 || echo "(none)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          lib="$(find pagedgeometry/build -name 'libPagedGeometry.a' -print -quit)"
+          if [ -n "$lib" ]; then
+            echo "built $lib"
+            cmake --build pagedgeometry/build --target install 2>&1 | tee logs/paged-install.log
+          else
+            echo "libPagedGeometry.a was NOT produced"
+          fi
           find "$IOS_PREFIX" -name 'libPagedGeometry*' | head -10
           find "$IOS_PREFIX" -name 'PagedGeometry.h' 2>/dev/null | head -5
           ls "$IOS_PREFIX/include/PagedGeometry" 2>/dev/null | head -20 || true
