@@ -141,7 +141,14 @@ jobs:
 
       - name: Patch RoR for the Apple/iOS port
         run: |
-          python3 patches/ror/apply_ios_patches.py ror --minimal-deps \
+          # NOTE: no --minimal-deps. Every "optional" dependency turned out to
+          # be de-facto required: pch.h includes <AL/al.h> unconditionally,
+          # utils/memory/RefCountingObjectPtr.h includes <angelscript.h>
+          # unconditionally, network/Network.cpp includes <SocketW.h>,
+          # gfx/SkyManager.cpp includes <Caelum.h>, gameplay/RandomTreeLoader.h
+          # includes "PagedGeometry.h". Removing them from the conan graph just
+          # moves the failure from configure to compile.
+          python3 patches/ror/apply_ios_patches.py ror \
             --ois-include "$PWD/ois/includes" \
             --ois-lib "$PWD/ois/build/libOIS.a"
           echo "----- patched conanfile requirements -----"
