@@ -99,9 +99,27 @@ def patch_main_cmake(ror):
     # OS_LIBS: Windows wants ws2_32, Linux wants X11 + libdl + librt.  iOS has
     # none of those: libdl/librt/lpthread do not exist as separate libraries and
     # X11 is obviously absent.  Sockets, dlopen and threads all live in
-    # libSystem, which every app links anyway.  The frameworks the app actually
-    # needs (UIKit, OpenGLES, AudioToolbox, ...) are added by the Xcode project
-    # in .github/workflows/build-ipa.yml, not here.
+    # libSystem, which every app links anyway.
+    #
+    # What iOS *does* need here is the frameworks.  The build runs a plain
+    # `make`, so nothing else on the command line adds them, and the first
+    # link attempt came back with exactly 38 undefined symbols, every one of
+    # them accounted for:
+    #
+    #   AudioToolbox/CoreAudio (11) AudioComponent*, AudioUnit*,
+    #                               AudioOutputUnit* - openal's CoreAudio backend
+    #   CoreFoundation (8)          macUtils.o (OGRE) + openal's alconfig.cpp
+    #   Foundation (5)              OgreFileSystemLayer/macUtils (OGRE)
+    #   UIKit (6)                   the OIS iPhone backend
+    #   libobjc (7)                 objc_msgSend, objc_release_x8, ...
+    #   CallSystemFunctionNative    libangelscript.a - not a framework problem,
+    #                               see the ARCHFLAGS patch in build-ios-deps.yml
+    #
+    # -lobjc matters because the ObjC runtime is only linked automatically when
+    # the driver is compiling a .mm file; RoR's own translation units are all
+    # plain C++, so it has to be asked for explicitly.  OpenGLES/QuartzCore are
+    # not among the 38 but are what the GLES2 render system and the frame loop
+    # will need as soon as the static OGRE plugins are linked in.
     text = must_replace(
         text,
         "if (WIN32)\n"
@@ -110,7 +128,9 @@ def patch_main_cmake(ror):
         "if (WIN32)\n"
         "    set(OS_LIBS \"Ws2_32\")\n"
         "elseif (APPLE AND CMAKE_SYSTEM_NAME STREQUAL \"iOS\")\n"
-        "    set(OS_LIBS \"\")\n"
+        "    set(OS_LIBS \"-framework UIKit -framework Foundation -framework CoreFoundation\"\n"
+        "                 \" -framework CoreGraphics -framework QuartzCore -framework OpenGLES\"\n"
+        "                 \" -framework AudioToolbox -framework CoreAudio -lobjc\")\n"
         "else ()\n",
         "main/CMakeLists.txt OS_LIBS (iOS branch)",
     )

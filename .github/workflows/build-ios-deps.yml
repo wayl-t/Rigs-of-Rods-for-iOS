@@ -360,13 +360,42 @@ jobs:
           f=angelscript/sdk/angelscript/projects/cmake/CMakeLists.txt
           python3 - "$f" <<'PY'
           import sys
-          d = open(sys.argv[1], "r", encoding="utf-8", errors="replace").read()
-          assert "if (APPLE AND NOT IOS)" in d, "anchor missing"
-          d = d.replace("if (APPLE AND NOT IOS)", "if (APPLE)", 1)
-          open(sys.argv[1], "w", encoding="utf-8").write(d)
+          p = sys.argv[1]
+          d = open(p, "r", encoding="utf-8", errors="replace").read()
+
+          old = 'set(ARCHFLAGS "${CMAKE_SYSTEM_PROCESSOR}")\n' \
+                'if (APPLE AND NOT IOS)\n' \
+                '  if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm")\n' \
+                '    set(ARCHFLAGS "aarch64")\n' \
+                '  endif ()\n' \
+                'endif ()\n'
+
+          new = 'set(ARCHFLAGS "${CMAKE_SYSTEM_PROCESSOR}")\n' \
+                '# Apple/iOS port: CMAKE_SYSTEM_PROCESSOR is NOT the target CPU for an\n' \
+                '# Apple cross-compile - CMake leaves it at the host value, so an\n' \
+                '# iphoneos/arm64 build can report x86_64 here.  That silently skipped\n' \
+                '# both the "^arm" and the "^aarch64" branches further down, so none of\n' \
+                '# the as_callfunc_arm64 sources were compiled and link failed with\n' \
+                '# "CallSystemFunctionNative", undefined, referenced from\n' \
+                '# CallSystemFunction() in as_callfunc.cpp.o.  Derive the target CPU\n' \
+                '# from CMAKE_OSX_ARCHITECTURES, which this port does set.\n' \
+                'if (APPLE)\n' \
+                '  if (CMAKE_OSX_ARCHITECTURES MATCHES "arm64" OR CMAKE_OSX_ARCHITECTURES MATCHES "aarch64")\n' \
+                '    set(ARCHFLAGS "aarch64")\n' \
+                '  elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm")\n' \
+                '    set(ARCHFLAGS "aarch64")\n' \
+                '  endif ()\n' \
+                'endif ()\n' \
+                'message(STATUS "Apple/iOS port: ARCHFLAGS=${ARCHFLAGS} "\n' \
+                '               "(CMAKE_SYSTEM_PROCESSOR=${CMAKE_SYSTEM_PROCESSOR} "\n' \
+                '               "CMAKE_OSX_ARCHITECTURES=${CMAKE_OSX_ARCHITECTURES})")\n'
+
+          assert old in d, "ARCHFLAGS anchor missing"
+          d = d.replace(old, new, 1)
+          open(p, "w", encoding="utf-8").write(d)
           print("patched")
           PY
-          sed -n '24,30p' "$f"
+          sed -n '24,46p' "$f"
 
       - name: Configure AngelScript (iOS, static, Makefiles)
         continue-on-error: true
@@ -670,6 +699,19 @@ jobs:
           [ -f "$IOS_PREFIX/lib/libOIS.a" ]                  || { echo "MISSING: libOIS.a"; missing=1; }
           [ -f "$IOS_PREFIX/include/OIS/OIS.h" ]             || { echo "MISSING: OIS.h"; missing=1; }
           find "$IOS_PREFIX" -name 'libangelscript*'         | grep -q . || { echo "MISSING: angelscript lib"; missing=1; }
+          # A file existing is not enough - the first link attempt failed on
+          # "CallSystemFunctionNative", undefined, referenced from
+          # CallSystemFunction() in as_callfunc.cpp.o, because the arm64
+          # as_callfunc sources had not been compiled into the archive at all.
+          mkdir -p logs
+          nm -g "$IOS_PREFIX/lib/libangelscript.a" > logs/angelscript.nm 2>/dev/null || true
+          if grep "CallSystemFunctionNative" logs/angelscript.nm | grep -qE "^[0-9a-f]+ [TtDdWwSsXB] "; then
+            echo "  ok      libangelscript.a defines CallSystemFunctionNative (arm64 native callfunc present)"
+          else
+            echo "MISSING: libangelscript.a does NOT define CallSystemFunctionNative - the ARCHFLAGS patch did not select the arm64 sources"
+            grep -c . logs/angelscript.nm || true
+            missing=1
+          fi
           find "$IOS_PREFIX" -name 'libopenal*'              | grep -q . || { echo "MISSING: openal-soft lib"; missing=1; }
           find "$IOS_PREFIX" -name 'libMyGUIEngine*'         | grep -q . || { echo "MISSING: MyGUIEngine lib"; missing=1; }
           find "$IOS_PREFIX" -name 'libMyGUI.OgrePlatform*'  | grep -q . || { echo "MISSING: MyGUI.OgrePlatform lib"; missing=1; }
