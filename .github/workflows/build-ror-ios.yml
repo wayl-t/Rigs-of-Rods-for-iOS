@@ -18,11 +18,18 @@ on:
     branches: [probe]
 
 permissions:
-  contents: read
+  # contents: write so the packaging step can attach the finished IPA to the
+  # rolling `ios-alpha` release (a plain .ipa download link, which is a lot
+  # harder to get wrong than the zipped Actions artifact).
+  contents: write
   actions: read
 
 env:
-  IOS_DEPLOYMENT_TARGET: "16.0"
+  # Must match build-ios-deps.yml: every static library in the SDK carries this
+  # minimum, and the linker warns when the app claims an older one.
+  # 13.0 rather than 16.0 so the IPA installs on every arm64 iPhone (6s and
+  # newer) instead of refusing on anything below iOS 16.
+  IOS_DEPLOYMENT_TARGET: "13.0"
   ROR_REPO: https://github.com/RigsOfRods/rigs-of-rods.git
   # Pinned on purpose: patches/ror/apply_ios_patches.py matches upstream text
   # verbatim, so tracking the moving default branch would make the port
@@ -294,7 +301,8 @@ jobs:
             '    <key>CFBundleShortVersionString</key><string>1.0</string>' \
             '    <key>CFBundleVersion</key><string>1</string>' \
             '    <key>LSRequiresIPhoneOS</key><true/>' \
-            '    <key>MinimumOSVersion</key><string>16.0</string>' \
+            '    <key>MinimumOSVersion</key><string>13.0</string>' \
+            '    <key>UILaunchScreen</key><dict/>' \
             '    <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>' \
             '    <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>' \
             '    <key>UIRequiresFullScreen</key><true/>' \
@@ -393,9 +401,35 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: RoR-ios-ipa
-          path: |
-            RoR-ios.ipa
-            ror/build/bin/RoR.app/RoR
-            ror/build/bin/RoR.app/Info.plist
+          # ONLY the IPA.  An earlier revision also uploaded the loose bundle
+          # files, which made the downloaded archive a zip-of-a-zip and invited
+          # the user to hand the wrong file to Sideloadly.
+          path: RoR-ios.ipa
           retention-days: 30
           if-no-files-found: warn
+
+      # A release asset is served as the raw file, so this is the download that
+      # cannot be confused with an archive.  Rolling tag, replaced every run.
+      - name: Publish the IPA as a release asset
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -x
+          [ -f RoR-ios.ipa ] || { echo "no IPA produced, skipping release"; exit 0; }
+          TAG=ios-alpha
+          NOTES="Unsigned RoR IPA for arm64 iPhone/iPad, built from ${GITHUB_SHA:0:9}.
+          Install with Sideloadly/AltStore using your own (free) Apple ID; the
+          sideloader re-signs the bundle, so no Apple certificate is needed here.
+          Contains the engine and OGRE resources, but no vehicle/terrain content yet."
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" RoR-ios.ipa --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes "$NOTES"
+          else
+            gh release create "$TAG" RoR-ios.ipa --repo "$GITHUB_REPOSITORY" \
+              --title "Rigs of Rods for iOS - unsigned IPA (rolling)" \
+              --notes "$NOTES"
+          fi
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[] | "asset: \(.name) \(.size) bytes"'

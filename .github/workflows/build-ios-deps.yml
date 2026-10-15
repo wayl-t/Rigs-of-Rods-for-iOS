@@ -46,7 +46,9 @@ permissions:
   contents: read
 
 env:
-  IOS_DEPLOYMENT_TARGET: "16.0"
+  # Must match build-ror-ios.yml.  Kept at 13.0 so the IPA runs on every arm64
+  # iPhone; 16.0 made iOS refuse to install it on anything older.
+  IOS_DEPLOYMENT_TARGET: "13.0"
 
 jobs:
   ogre-ios-sdk:
