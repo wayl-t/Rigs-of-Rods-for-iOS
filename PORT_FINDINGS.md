@@ -942,14 +942,137 @@ UIKit-колбэка (`CADisplayLink`) либо вручную прокручи�
 - В `source/main/` 259 единиц трансляции; этого достаточно, чтобы `make -k`
   уложился в таймаут даже при обилии ошибок.
 
+### 7.9. Главная ловушка CMake: `CMAKE_FIND_ROOT_PATH_MODE_* = ONLY`
+
+Это стоило целого прогона. Симптом: конфигурация RoR падала на
+
+```
+Could NOT find MyGUI (missing: MyGUI_INCLUDE_DIRS MyGUI_LIBRARIES)
+```
+
+при том, что `libMyGUIEngine.a`, `libMyGUI.OgrePlatform.a` и
+`include/MYGUI/MyGUI.h` точно лежали в артефакте — это проверял отдельный шаг
+«Check the SDK really is complete», и он проходил.
+
+Причина — в `Modules/Platform/Darwin.cmake` самого CMake:
+
+```cmake
+list(APPEND CMAKE_FIND_ROOT_PATH "${_CMAKE_OSX_SYSROOT_PATH}")
+if(NOT DEFINED CMAKE_FIND_ROOT_PATH_MODE_LIBRARY)
+  set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+endif()
+if(NOT DEFINED CMAKE_FIND_ROOT_PATH_MODE_INCLUDE)
+  set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+endif()
+if(NOT DEFINED CMAKE_FIND_ROOT_PATH_MODE_PACKAGE)
+  set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+endif()
+```
+
+То есть при **любой** кросс-сборке под Apple CMake сам дописывает в
+`CMAKE_FIND_ROOT_PATH` путь к sysroot'у и включает режим `ONLY` для
+библиотек, заголовков и пакетов. В режиме `ONLY` `find_path`, `find_library`
+и `find_package` ищут **только** внутри этого root path, то есть внутри
+iPhoneOS SDK. Наш префикс `$IOS_PREFIX`, прописанный в `CMAKE_PREFIX_PATH`,
+для них просто не существует.
+
+Отсюда же объяснение, почему в `build-ios-deps.yml` **каждая** зависимость
+находилась только тогда, когда её переменные (`OGRE_DIR`, `ZLIB_*`,
+`OPENAL_*`, `FREETYPE_*`) задавались вручную: любые поиски, полагавшиеся на
+`CMAKE_PREFIX_PATH`, молча не работали.
+
+Спасает то, что установка защищена `if (NOT DEFINED ...)` — значит, определив
+эти переменные сами, мы её переопределяем. В `build-ror-ios.yml` теперь:
+
+```
+-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH
+-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH
+-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH
+```
+
+Именно `BOTH`, а не `-DCMAKE_FIND_ROOT_PATH="$IOS_PREFIX"`: во втором случае
+префикс становится ещё одним корнем, и CMake начинает отрезать корень от
+найденных путей при возврате результата (механика рассчитана на sysroot, к
+которому компилятор и так добавляет `-isysroot`). Для нашего префикса это
+дало бы неправильные пути. `BOTH` же просто снимает ограничение.
+
+Вдобавок — на всякий случай — вручную задаются переменные модульных находок
+(`MyGUI_*`, `PagedGeometry_*`: их ищут собственные
+`cmake/find-modules/FindMyGUI.cmake` и `FindPagedGeometry.cmake`) и `*_DIR`
+для конфигурационных пакетов (`fmt`, `RapidJSON`, `SocketW`, `Angelscript`).
+Плюс `-DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE`: SocketW собран без OpenSSL,
+и homebrew-овский OpenSSL не должен протечь.
+
+Ещё две меры того же прогона:
+
+- checkout RoR прибит к коммиту
+  `d426a5c5e9f76a77a34e5fba8a41cda20edbe97f`. Патчи `apply_ios_patches.py`
+  сопоставляются с исходным текстом буквально, поэтому плавающая ветка
+  upstream'а однажды сломала бы не сборку, а сам шаг патчинга — поломка куда
+  менее очевидная.
+- в лог конфигурации печатаются найденные значения `CMAKE_FIND_ROOT_PATH*`,
+  `*_DIR`, `MyGUI_*`, `ZLIB_*`, а сам `CMakeCache.txt` уезжает в артефакт,
+  чтобы следующая ошибка объясняла себя сама.
+
+---
+
+### 7.10. Перепись ошибок сборки RoR: 287 строк, но всего пять причин
+
+Прогон `38680551775` (1 м 44 с) — первый, который дошёл до самой сборки.
+Конфигурация стала полностью зелёной: `Found MyGUI`, `Found PagedGeometry`,
+`Found OpenAL`, `Found SocketW`, `Found Angelscript`, затем `Configuring done`
+и `Generating done`. Значит, приём из §7.9 действительно вылечил поиск.
+
+`make -k` прогнал 270 единиц трансляции, 137 из них упали, всего 287 строк с
+`error:`. Но вся эта масса сводится к **пяти** причинам, каждая — в одном
+файле:
+
+| № | Место | Строк | Суть | Исправление |
+|---|---|---|---|---|
+| 1 | `network/Network.h:49` | 152 | `struct CurlFailInfo` объявлена под `USE_SOCKETW`, а её поле имеет тип `CURLcode` из libcurl, которой у нас нет | закрыть поле `#ifdef USE_CURL` |
+| 2 | `audio/SoundManager.h:39` | 106 | `#ifdef __APPLE__` → `<OpenAL/alext.h>`; на iOS это не macOS-фреймворк, а openal-soft с раскладкой `<AL/*.h>` | `#if defined(__APPLE__) && !TARGET_OS_IPHONE` |
+| 3 | `scripting/server/ServerScriptCurlHelpers.h:10` | 13 | перечисление `ServerScriptCurlStatusType` спрятано под `#ifdef USE_CURL`, хотя его называют `ServerScriptEngine.h/.cpp`, которые собираются всегда | вынести enum из-под стража |
+| 4 | `gui/panels/GUI_RepositorySelector.cpp:1603,1918` и `gui/panels/GUI_MultiplayerSelector.cpp:417` | 13 | три места дёргают libcurl вне стража `USE_CURL` | закрыть `#ifdef USE_CURL` |
+| 5 | `utils/ErrorUtils.cpp:49-50`, `utils/PlatformUtils.cpp:202` | 3 | `_L` не определён на iOS, а `system()` на iOS вообще недоступен | см. §7.8 |
+
+Причина №1 объясняет, почему строк так много при такой малой сути:
+`Network.h` подключается почти везде, а `__APPLE__`-ветка в `SoundManager.h`
+вообще везде, где есть звук.
+
+**Важно, что перепись полная.** В логе нет ни одной строки `too many errors`,
+а на одну единицу трансляции приходится 1-5 ошибок (у одной 16) — значит
+clang не обрывался на ошибке в заголовке, а доходил и до собственного кода
+файла. То есть эти пять причин — действительно всё, что мешало сборке, а не
+только её начало.
+
+Отдельно стоит сказать: cURL на iOS **не собирается**, и это официально
+поддерживаемая конфигурация RoR (`cmake_dependent_option(ROR_USE_CURL "use
+curl" ON "CURL_FOUND" OFF)`). Поэтому причины 1, 3 и 4 — это дыры в
+upstream-коде ровно для случая «SocketW настроен, libcurl нет», который у
+разработчиков, видимо, никогда не возникал. Мы их не «обезвреживаем», а
+закрываем недостающими стражами, так что при будущей сборке cURL те же места
+снова скомпилируются как раньше.
+
+Что теряется без cURL: браузер модов (реестр ресурсов) и список серверов по
+HTTP. Мультиплеер через SocketW остаётся. Моды при этом можно класть в
+`Documents` приложения через «Файлы» — в проекте включён `UIFileSharingEnabled`.
+
+Все исправления лежат в `patches/ror/apply_ios_patches.py` девятью функциями:
+`patch_errorutils`, `patch_platformutils`, `patch_appcontext`,
+`patch_soundmanager`, `patch_network_header`, `patch_repo_selector`,
+`patch_multiplayer_selector`, `patch_server_script_curl_helpers` (плюс уже
+существовавшие патчи системы сборки). Каждая проверена локально на нетронутых
+файлах upstream: якоря совпадают, диффы ровно те, что задуманы.
+
 ---
 
 ## Что всё ещё неизвестно / не проверено
 
-- **Прогон `build-ror-ios.yml` ещё не сделан.** Он даст список ошибок сборки
-  собственного кода RoR — именно то, ради чего он и написан. Пункты 1-3 из
-  §7.8 должны появиться в этом списке; если чего-то из них там не будет, значит
-  разбор где-то ошибочен и это надо проверить.
+- **Останется ли сборка чистой после этих пяти исправлений.** Перепись полная
+  (§7.10), так что ожидание — «да», но **линковка не проверялась вообще**: на
+  предыдущем прогоне до неё не дошло. Неизвестно, соберётся ли исполняемый
+  файл из статических библиотек OGRE/MyGUI/OIS/…, и как поведёт себя
+  `plugins.cfg`-механизм (см. §7.8, п. 3 про `StaticPluginLoader`).
 - **Слой ввода.** Решено: `touch` → `EV_*` внутри `InputEngine`, интерфейс
   движка не меняем. Осталось определить, как именно рисовать экранные кнопки
   (MyGUI или собственный оверлей OGRE) и как связать `OISMultiTouch` с
