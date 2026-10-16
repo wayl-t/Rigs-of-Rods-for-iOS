@@ -607,6 +607,25 @@ jobs:
               (cd TinyResStage && zip -qry ../RoR-ios-tinyres.ipa Payload)
               ls -la RoR-ios-tinyres.ipa
             fi
+            # res0/res1: the real binary - the same payload as `bin`, which
+            # installs and runs - plus exactly one entry under resources/.
+            # `bin` installs, everything carrying resources does not, and
+            # those are also bigger, so this separates "resources/ as such
+            # breaks the install" from "payload size breaks the install".
+            # Both stay within ~80 KB of bin's size.
+            rm -rf Res0Stage Res1Stage
+            mkdir -p Res0Stage/Payload/RoR.app/resources Res1Stage/Payload/RoR.app/resources
+            printf 'ror\n' > Res0Stage/Payload/RoR.app/resources/rotest.txt
+            cp LiteStage/Payload/RoR.app/resources/skeleton.zip Res1Stage/Payload/RoR.app/resources/ 2>/dev/null || true
+            for s in Res0Stage Res1Stage; do
+              cp "$APP_DIR/RoR" "$s/Payload/RoR.app/RoR"
+              cp "$APP_DIR/Info.plist" "$s/Payload/RoR.app/Info.plist"
+              cp "$APP_DIR/PkgInfo" "$s/Payload/RoR.app/PkgInfo"
+              if command -v adhoc_sign >/dev/null 2>&1; then adhoc_sign "$s/Payload/RoR.app" || true; fi
+            done
+            (cd Res0Stage && zip -qry ../RoR-ios-res0.ipa Payload)
+            (cd Res1Stage && zip -qry ../RoR-ios-res1.ipa Payload)
+            ls -la RoR-ios-res0.ipa RoR-ios-res1.ipa
             ls -la RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa
           fi
 
@@ -713,6 +732,13 @@ jobs:
                                resources break the install on their own; if it installs,
                                the resources are fine and the real RoR binary is the one
                                that cannot start once it can see them.
+          * RoR-ios-res0.ipa / RoR-ios-res1.ipa - diagnostic (only on 'diag'
+                               tag). The same payload as RoR-ios-bin.ipa (which
+                               installs and runs) plus exactly one entry under
+                               resources/ - a one-line text file (res0), or the
+                               single smallest resource zip (res1). Same size as
+                               bin, so this separates 'resources/ breaks the
+                               install' from 'size breaks the install'.
 
           Hand the file itself to ESIGN / Sideloadly / SideStore - it is served
           as a plain file, nothing to unpack.  An .ipa is a zip whose root
@@ -744,7 +770,7 @@ jobs:
             fi
           done
           if [ "$TAG" = "diag" ]; then
-            for f in RoR-ios-bin.ipa RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa RoR-ios-tinyres.ipa; do
+            for f in RoR-ios-bin.ipa RoR-ios-res0.ipa RoR-ios-res1.ipa RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa RoR-ios-tinyres.ipa; do
               [ -f "$f" ] && gh release upload "$TAG" "$f" --clobber --repo "$GITHUB_REPOSITORY"
             done
           fi
@@ -762,7 +788,7 @@ jobs:
           if it differs by even one byte, download the file again.
 
           "
-          for f in RoR-ios.ipa RoR-ios-lite.ipa RoR-ios-tiny.ipa RoR-ios-bin.ipa RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa RoR-ios-tinyres.ipa; do
+          for f in RoR-ios.ipa RoR-ios-lite.ipa RoR-ios-tiny.ipa RoR-ios-bin.ipa RoR-ios-res0.ipa RoR-ios-res1.ipa RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa RoR-ios-tinyres.ipa; do
             if [ -f "$f" ]; then
               CHECK="${CHECK}$(printf '  %-22s %10d   sha256:%s' "$f" "$(wc -c < "$f" | tr -d ' ')" "$(shasum -a 256 "$f" | cut -d' ' -f1)")
           "
