@@ -964,6 +964,14 @@ void RoR_IosInstallCrashHandlers(void);
 // return to the run loop until its own frame loop starts.
 void RoR_IosStartupTick(const char* format, ...);
 
+// Records a fatal-but-swallowed failure (an exception RoRMain caught and turned
+// into a plain `return 0`) both into ror-trace.log, as a `[fatal]` line, and onto
+// the screen - the latter because RoRMain returning leaves the app alive on a
+// black screen, where there is nothing else to see.  RoR's own LOG() for that
+// exception goes through OGRE's log manager, whose detail threshold can drop it,
+// so this file is the only guaranteed record.
+void RoR_IosShowFatal(const char* format, ...);
+
 #ifdef __cplusplus
 }
 #endif
@@ -1078,6 +1086,63 @@ void RoR_IosStartupTick(const char* format, ...)
     // 0x8badf00d).  Servicing it once per startup phase costs nothing and
     // removes that whole class of failure.
     CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, /*returnAfterSourceHandled=*/false);
+}
+
+void RoR_IosShowFatal(const char* format, ...)
+{
+    ror_trace_open();
+
+    char buffer[4096];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+
+    // The record that survives anything: unbuffered, straight to the file.
+    ror_trace_write("\n[fatal] ");
+    ror_trace_write(buffer);
+    ror_trace_write("\n");
+
+    // And on screen.  RoRMain has returned at this point, so the process only
+    // idles on a black window from here on and there is nothing else to read
+    // on the device.  UIKit is main-thread only; the caller is RoRMain's own
+    // catch block, which runs there.
+    if (![NSThread isMainThread])
+    {
+        return;
+    }
+
+    @autoreleasepool
+    {
+        UIWindow* window = nil;
+        for (UIWindow* candidate in [UIApplication sharedApplication].windows)
+        {
+            if (window == nil || candidate.isKeyWindow)
+            {
+                window = candidate;
+            }
+        }
+        if (window == nil)
+        {
+            return;
+        }
+
+        UITextView* view = [[UITextView alloc] initWithFrame:window.bounds];
+        view.backgroundColor = [UIColor colorWithWhite:0.05f alpha:1.0f];
+        view.textColor = [UIColor colorWithRed:1.0f green:0.4f blue:0.4f alpha:1.0f];
+        UIFont* font = [UIFont fontWithName:@"Menlo" size:11.0f];
+        if (font == nil)
+        {
+            font = [UIFont systemFontOfSize:11.0f];
+        }
+        view.font = font;
+        view.editable = NO;
+        view.selectable = YES; // so the text can be selected and copied off the phone
+        view.text = [NSString stringWithUTF8String:buffer];
+        view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [window addSubview:view];
+        [window bringSubviewToFront:view];
+    }
 }
 
 static const char* ror_signal_name(int sig)
@@ -1496,6 +1561,67 @@ def patch_main_cpp(ror):
             + '        RoR_IosStartupTick("startup: %s");\n' % label
             + "#endif\n",
         )
+
+    # ---------------------------------------------------------------------
+    # Do not let a caught exception turn into a silent black screen
+    # ---------------------------------------------------------------------
+    # The whole frame loop is wrapped in try/catch (Release builds only).  An
+    # exception escaping it is swallowed here, RoRMain falls through to
+    # `return 0`, and on iOS that does NOT end the process: -[RoRAppDelegate
+    # didFinishLaunchingWithOptions:] already returned, so the main run loop
+    # just keeps ticking with an empty queue.  The observed result is a black
+    # screen that never changes - no crash, the app stays in the app switcher -
+    # with the only clue buried in OGRE's own buffered log at a level the
+    # detail threshold may drop.  Make it unmissable instead: one unbuffered
+    # [fatal] line, plus the text on screen.
+    text = must_replace(
+        text,
+        "    catch (Ogre::Exception& e)\n"
+        "    {\n"
+        "        LOG(e.getFullDescription());\n",
+        "    catch (Ogre::Exception& e)\n"
+        "    {\n"
+        "        LOG(e.getFullDescription());\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        '        RoR_IosShowFatal("RoRMain caught an Ogre::Exception and is returning:\\n%s",\n'
+        "                         e.getFullDescription().c_str());\n"
+        "#endif\n",
+        "main.cpp report the caught Ogre::Exception on iOS",
+    )
+
+    text = must_replace(
+        text,
+        "    catch (std::runtime_error& e)\n"
+        "    {\n"
+        "        LOG(e.what());\n",
+        "    catch (std::runtime_error& e)\n"
+        "    {\n"
+        "        LOG(e.what());\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        '        RoR_IosShowFatal("RoRMain caught a std::runtime_error and is returning:\\n%s", e.what());\n'
+        "#endif\n",
+        "main.cpp report the caught std::runtime_error on iOS",
+    )
+
+    # The `return 0` below is reached both when the frame loop ends and when an
+    # exception was caught.  A breadcrumb here says which of the two happened
+    # even when no exception was involved.
+    text = must_replace(
+        text,
+        "    return 0;\n"
+        "}\n"
+        "\n"
+        "#if OGRE_PLATFORM == OGRE_PLATFORM_WIN32\n",
+        "#ifdef ROR_PLATFORM_IOS\n"
+        '    RoR_IosShowFatal("RoRMain is returning: the frame loop has ended.");\n'
+        "#endif\n"
+        "    return 0;\n"
+        "}\n"
+        "\n"
+        "#if OGRE_PLATFORM == OGRE_PLATFORM_WIN32\n",
+        "main.cpp breadcrumb on leaving RoRMain",
+    )
+
     write(path, text)
 
 
