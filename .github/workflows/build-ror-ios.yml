@@ -637,6 +637,21 @@ jobs:
             ls -la RoR-ios-bin.ipa RoR-ios-res0.ipa RoR-ios-res0r.ipa
           fi
 
+      # A bundle can be complete and still be unable to start, and what that
+      # looks like on the phone is a black screen in a process that never dies:
+      # no crash, no dialog, nothing on screen to read.  Finding that out costs
+      # a build, an install and a walk through the Files app; this costs a
+      # second, which is why it is a hard step and not continue-on-error.
+      - name: Check the IPA really can start
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -f RoR-ios.ipa ]; then
+            python3 patches/verify_ipa.py RoR-ios.ipa
+          else
+            echo "no IPA produced - nothing to verify"
+          fi
+
       - name: Summary
         if: always()
         run: |

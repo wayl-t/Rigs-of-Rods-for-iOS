@@ -2050,6 +2050,107 @@ if(viewPort != NULL && viewPort->getCamera() != NULL)
 
 ---
 
+### 7.25. Чёрный экран вместо падения: RoR глотает исключение, а MyGUI ищет шейдеры под чужими именами
+
+Патч §7.24 отработал: приложение перестало падать. Оно стало **запускаться с
+чёрным экраном**, оставаясь в списке запущенных бесконечно. Такой симптом —
+это не зависание, а возврат из `RoRMain`: весь цикл кадров упакован в
+`try/catch`, исключение внутри него логируется и **глотается**, после чего
+функция доходит до `return 0`. На iOS возврат из `RoRMain` не завершает процесс
+(`didFinishLaunchingWithOptions` вернулся уже давно), главный run loop
+продолжает крутиться с пустой очередью — и приложение вечно живёт на чёрном
+окне, без падения и без watchdog.
+
+Чтобы это доказать, а не гадать, в оба `catch` и перед общим `return 0`
+добавлен вызов `RoR_IosShowFatal()`: одна небуферизованная строка `[fatal]` в
+`ror-trace.log` плюс текст ошибки прямо на экране (там всё равно больше нечего
+читать). След запуска:
+
+```
+[trace] startup: content manager initialised
+[trace] startup: scene, camera and environment map ready
+[trace] FileNotFoundException: Cannot locate resource ror.png in resource group FlagsRG.
+[trace] ItemIdentityException: Unable to derive resource group for MyGUI_VP.glsles
+        automatically since the resource was not found.
+[fatal] RoRMain caught an Ogre::Exception and is returning: ItemIdentityException ...
+[fatal] RoRMain is returning: the frame loop has ended.
+```
+
+Ни одной строки `frame N completed` — цикл кадров не запускался вовсе.
+
+**Причина.** `MyGUI::OgreRenderManager::initialise()` в MyGUI 3.4.0 создаёт
+GPU-программы с **зашитыми** именами и тут же загружает их из файла с тем же
+именем:
+
+```cpp
+// Platforms/Ogre/OgrePlatform/src/MyGUI_OgreRenderManager.cpp:127-145
+mVertexProgram = Ogre::HighLevelGpuProgramManager::getSingleton().createProgram(
+    "MyGUI_VP." + shaderLanguage,          // shaderLanguage == "glsles"
+    OgreDataManager::getInstance().getGroup(),
+    shaderLanguage, Ogre::GPT_VERTEX_PROGRAM);
+mVertexProgram->setSourceFile("MyGUI_VP." + shaderLanguage);
+```
+
+А в ресурсах RoR шейдеры называются иначе:
+
+```
+resources/mygui/MyGUI_Ogre_VP.glsles      <- как есть
+resources/mygui/MyGUI_Ogre_FP.glsles      <- как есть
+```
+
+То есть MyGUI 3.4.0 ищет `MyGUI_VP.glsles`, а лежит `MyGUI_Ogre_VP.glsles`.
+Группа ресурсов, которую RoR передаёт в `initialise()`, — это
+`Ogre::ResourceGroupManager::AUTODETECT_RESOURCE_GROUP_NAME` (`"OgreAutodetect"`),
+то есть «ищи во всех группах». Файла нет ни в одной — и
+`ResourceGroupManager::findGroupContainingResource()` бросает
+`ItemIdentityException`, который дальше и проваливает `RoRMain`.
+
+**Почему на десктопе этого нет.** Тот же блок закрыт проверкой на
+поддержку фиксированного конвейера:
+
+```cpp
+if (!mRenderSystem->getCapabilities()->hasCapability(Ogre::RSC_FIXED_FUNCTION)) { ... }
+```
+
+На десктопе OGRE о `RSC_FIXED_FUNCTION` отвечает «есть», и путь со шейдерами
+пропускается целиком. Поэтому устаревшие имена файлов спокойно живут в RoR и
+все платформы, кроме GLES2, о нём не знают. RoR требует MyGUI 3.4.0 по
+`conanfile.py` (`self.requires("mygui/3.4.0@anotherfoxguy/stable")`) — то есть
+совпадает версия, но не совпадают имена файлов: вьюпорту без камеры (§7.24) и
+этому багу нужны разные платформенные условия, и оба они на iOS выполняются.
+
+**Что нельзя было сделать.** Наивное исправление — переименовать файлы RoR.
+Оно не работает: вершинные программы совпадают побайтово, но
+`MyGUI_Ogre_FP.glsles` у RoR объявлен как `#version 300 es` (и использует `in` и
+`texture()`), тогда как его же вершинная программа — `#version 100`. В одной
+линкуемой программе смешивать версии GLSL ES нельзя, а контекст на iOS —
+OpenGL ES 2.0, где `#version 300 es` вообще не компилируется. Взяты собственные
+шейдеры MyGUI 3.4.0 (`Media/MyGUI_Media/`), где обе половины `#version 100`:
+линкуется на ES2 и принимается ES3.
+
+**Исправление** — `patch_mygui_resources()` в
+`patches/ror/apply_ios_patches.py`: пишет `MyGUI_VP.glsles` и `MyGUI_FP.glsles`
+в `resources/mygui/` (там же их упакует `zip_folder_resources` в
+`rorres/mygui.zip`). Валидатор `valanchors.py` дополнительно сверяет оба файла
+побайтово с MyGUI 3.4.0.
+
+Второй, некритичный пункт того же запуска: `GUI_RepositorySelector` просит
+`ror.png` у группы `FlagsRG`, а файл есть только в `resources/icons/` (группа
+`IconsRG`) — на каждый запуск логировался `FileNotFoundException`. Простая копия
+`resources/icons/ror.png` → `resources/flags/ror.png` убирает его.
+
+**Главный вывод по процессу.** Это четвёртый случай подряд одной породы
+(§7.22 — каталог `resources`, §7.23 — `OgreZip.cpp`, §7.24 — камера в
+`layoutSubviews`), и все четыре были бы видны **в CI**, а не на телефоне, если
+бы собирать проверял не только факт сборки, но и то, что в бандле лежит под
+теми именами, под какими его ищут. Добавлен `patches/verify_ipa.py` и шаг
+**Check the IPA really can start** — жёсткий (не `continue-on-error`), который
+падает с `::error::`, если в `rorres/mygui.zip` нет нужных шейдеров, если
+`skeleton.zip` отсутствует или если бандл снова несёт каталог `resources/`.
+Проверка на старом IPA корректно ловит обе проблемы.
+
+---
+
 ## Уточнённая карта порта
 
 | Компонент | Судьба | Состояние |

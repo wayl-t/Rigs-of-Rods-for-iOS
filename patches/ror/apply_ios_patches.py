@@ -21,6 +21,7 @@ Usage
 """
 import argparse
 import os
+import shutil
 import sys
 
 
@@ -2038,6 +2039,108 @@ def patch_inputengine(ror):
     write(path, text)
 
 
+# MyGUI's own GLES2 shaders, under the names MyGUI 3.4.0 looks for.
+#
+# MyGUI::OgreRenderManager::initialise() (3.4.0) creates the GPU programs
+# "MyGUI_VP.<lang>" and "MyGUI_FP.<lang>" and then loads each one from a source
+# file of that same name, searching every OGRE resource group (RoR hands it
+# AUTODETECT_RESOURCE_GROUP_NAME).  RoR's resources/mygui ships the pre-3.4
+# names MyGUI_Ogre_VP.<lang> / MyGUI_Ogre_FP.<lang> instead, so on a render
+# system without fixed function - which is every render system iOS has - MyGUI
+# dies inside ResourceGroupManager::findGroupContainingResource with
+#
+#     ItemIdentityException: Unable to derive resource group for MyGUI_VP.glsles
+#     automatically since the resource was not found.
+#
+# and main()'s catch swallows that into `return 0`, i.e. the black screen.
+# Desktop never trips over it: there OGRE reports RSC_FIXED_FUNCTION and MyGUI
+# skips the shader path completely (see the `if (!...RSC_FIXED_FUNCTION)` guard
+# in MyGUI_OgreRenderManager.cpp), which is why the stale names survive
+# upstream.
+#
+# These are MyGUI 3.4.0's own Media/MyGUI_Media shaders, not renamed copies of
+# RoR's.  The two vertex programs are byte-identical, but RoR's fragment
+# program is `#version 300 es` with `in` / `texture()` while its vertex program
+# is `#version 100`, and a linked program may not mix GLSL ES versions.  MyGUI's
+# pair is `#version 100` on both sides, which links on an ES2 context and is
+# still accepted by an ES3 one.
+MYGUI_VP_GLSLES = """#version 100
+
+precision highp int;
+precision highp float;
+
+attribute vec4 position;
+attribute vec4 uv0;
+attribute vec4 colour;
+uniform float YFlipScale;
+
+varying vec4 outUV0;
+varying vec4 outColor;
+
+// Texturing vertex program for GLSL ES
+void main()
+{
+\tvec4 vpos = position;
+\tvpos.y *= YFlipScale;
+\tgl_Position = vpos;
+\toutUV0 = uv0;
+\toutColor = colour;
+}
+"""
+
+MYGUI_FP_GLSLES = """#version 100
+
+precision highp int;
+precision highp float;
+
+uniform sampler2D sampler;
+
+varying vec4 outUV0;
+varying vec4 outColor;
+
+// Texturing fragment program for GLSL ES
+void main()
+{
+\tgl_FragColor = outColor * texture2D(sampler, outUV0.xy);
+}
+"""
+
+
+def patch_mygui_resources(ror):
+    """Add the resources the GUI would otherwise fail to find.
+
+    1. MyGUI_VP.glsles / MyGUI_FP.glsles - see the comment above.  CMake's
+       zip_folder_resources packs resources/mygui into rorres/mygui.zip, so
+       dropping the two files here is all that is needed.
+    2. resources/flags/ror.png.  GUI_RepositorySelector asks for "ror.png" from
+       FlagsRG (it is the fallback thumbnail for a missing preview), while the
+       file only exists as resources/icons/ror.png.  That lookup fails on every
+       launch and logs a FileNotFoundException; one copy makes it succeed.
+    """
+    gui_dir = os.path.join(ror, "resources", "mygui")
+    if not os.path.isdir(gui_dir):
+        sys.exit("ERROR: resources/mygui is missing from the RoR checkout")
+
+    for name, text in (("MyGUI_VP.glsles", MYGUI_VP_GLSLES),
+                       ("MyGUI_FP.glsles", MYGUI_FP_GLSLES)):
+        path = os.path.join(gui_dir, name)
+        if os.path.exists(path) and read(path) == text:
+            print("  resources/mygui/%s already correct" % name)
+            continue
+        write(path, text)
+        print("  wrote resources/mygui/%s (%d bytes)" % (name, len(text)))
+
+    icons_ror = os.path.join(ror, "resources", "icons", "ror.png")
+    flags_ror = os.path.join(ror, "resources", "flags", "ror.png")
+    if not os.path.exists(flags_ror):
+        if os.path.exists(icons_ror):
+            shutil.copyfile(icons_ror, flags_ror)
+            print("  copied resources/icons/ror.png -> resources/flags/ror.png")
+        else:
+            print("  WARNING: resources/icons/ror.png is missing, "
+                  "FlagsRG will still fail to resolve ror.png")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("ror_dir")
@@ -2079,6 +2182,10 @@ def main():
     # UIKit.
     patch_ios_platform(args.ror_dir)
     patch_main_cpp(args.ror_dir)
+    # Resources rather than code, but the same class of problem: files the GUI
+    # needs and that simply are not there under the name it asks for.
+    # See patch_mygui_resources() for the reasoning.
+    patch_mygui_resources(args.ror_dir)
 
     print("applied Apple/iOS patches to %s" % args.ror_dir)
     if args.ois_include:
