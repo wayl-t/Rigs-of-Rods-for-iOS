@@ -210,6 +210,58 @@ jobs:
       - name: Get OGRE 1.11.6
         run: git clone --depth 1 --branch v1.11.6 https://github.com/OGRECave/ogre.git ogre
 
+      - name: Pin FindZZip to the zziplib in the SDK prefix
+        run: |
+          # OGRE's stock CMake/Packages/FindZZip.cmake cannot see our zziplib.
+          # The configure log of the first attempt says exactly why:
+          #
+          #   -- Looking for ZZip...
+          #   -- ZZip_PREFIX_PATH changed.
+          #   -- Checking for module 'zziplib'
+          #   --   Package 'zziplib' not found
+          #   -- Could not locate ZZip
+          #
+          # Two independent reasons:
+          #
+          #   * clear_if_changed() fires.  It compares ZZip_PREFIX_PATH with the
+          #     ZZip_PREFIX_PATH_LAST it stores in the cache, and on a fresh
+          #     build directory that stored value is empty, so the very first
+          #     configure wipes ZZip_INCLUDE_DIR / ZZip_LIBRARY_REL - every
+          #     -DZZip_* hint passed on the command line is discarded before
+          #     find_path() ever looks at it.
+          #   * after that the module falls back to find_path/find_library,
+          #     which the iOS cross toolchain confines to its root paths (the
+          #     iPhoneOS SDK plus OGRE's empty iOSDependencies trees), so
+          #     $IOS_PREFIX is not reachable.  Freetype only works because its
+          #     path is pinned through FREETYPE_LIBRARY, and hand-pinning is
+          #     what this workflow does for every single dependency.
+          #
+          # Replacing the module is both simpler and more honest than fighting
+          # the search: OGRE reads nothing from it except ZZip_FOUND,
+          # ZZip_INCLUDE_DIRS and ZZip_LIBRARIES.  With ZZip_FOUND TRUE,
+          # CMakeLists.txt:375 keeps OGRE_CONFIG_ENABLE_ZIP at its default TRUE
+          # instead of forcing it to FALSE.
+          {
+            echo '# Written by .github/workflows/build-ios-deps.yml.'
+            echo '#'
+            echo '# Replaces OGRE 1.11.6 CMake/Packages/FindZZip.cmake, which cannot'
+            echo '# work in this cross build: its clear_if_changed() drops any'
+            echo '# pre-set ZZip_* cache entry on the first configure, and the iOS'
+            echo '# toolchain then confines find_path/find_library to the SDK root'
+            echo '# paths, so the zziplib installed under $IOS_PREFIX is invisible.'
+            echo '#'
+            echo '# OGRE consumes only the three variables below.'
+            echo 'set(ZZip_FOUND TRUE)'
+            echo "set(ZZip_INCLUDE_DIRS \"$IOS_PREFIX/include\")"
+            echo "set(ZZip_LIBRARIES \"$IOS_PREFIX/lib/libzzip.a\")"
+            echo "set(ZZip_INCLUDE_DIR \"$IOS_PREFIX/include\")"
+          } > ogre/CMake/Packages/FindZZip.cmake
+
+          [ -f "$IOS_PREFIX/lib/libzzip.a" ]   || { echo "ERROR: libzzip.a missing - the zziplib steps must run first"; exit 1; }
+          [ -f "$IOS_PREFIX/include/zzip/zzip.h" ] || { echo "ERROR: zzip/zzip.h missing - the zziplib steps must run first"; exit 1; }
+          echo "----- ogre/CMake/Packages/FindZZip.cmake -----"
+          cat ogre/CMake/Packages/FindZZip.cmake
+
       - name: Configure OGRE (iOS, static, full component set)
         run: |
           # OGRE's CMake puts the *literal* string "$(PLATFORM_NAME)" into the
@@ -223,21 +275,14 @@ jobs:
           # passing the real path explicitly takes that branch out of play and
           # the build and the installer finally agree on the directory.
           #
-          # ZIP archive support (the zziplib built above).  CMakeLists.txt:375
-          # makes OGRE_CONFIG_ENABLE_ZIP a cmake_dependent_option whose
-          # condition is ZZip_FOUND, so OGRE compiles OgreZip.cpp - and
-          # registers the "Zip" archive factory RoR needs for every single
-          # resource pack - only if CMake/Packages/FindZZip.cmake succeeds.
-          # FindZZip looks for <prefix>/include/zzip/zzip.h and libzzip in
-          # <prefix>/lib, so all three hints below point at that install:
-          #   ZZIP_HOME         -> FindZZip's own create_search_paths() prefixes
-          #   CMAKE_PREFIX_PATH -> the default find_path/find_library search
-          #   ZZip_*            -> pre-seeded cache entries (belt and braces;
-          #                        module mode wins over zziplib's own
-          #                        zzip-config.cmake because OGRE keeps its
-          #                        CMake/Packages on CMAKE_MODULE_PATH)
-          # ZLIB_* is the SDK stub zziplib itself was built against; OGRE
-          # links ZLIB::ZLIB into OgreMain as soon as zip is on.
+          # ZIP archive support: the step above pinned CMake/Packages/FindZZip.cmake
+          # to the zziplib install, so ZZip_FOUND is TRUE here, CMakeLists.txt:375
+          # leaves OGRE_CONFIG_ENABLE_ZIP at its default TRUE, OgreMain compiles
+          # OgreZip.cpp and ArchiveManager registers the "Zip" factory RoR needs
+          # for every resource pack.  The assert step below fails the run if that
+          # ever stops being true.
+          # ZLIB_* is the SDK stub zziplib itself was built against; OGRE links
+          # ZLIB::ZLIB into OgreMain as soon as zip is on.
           cmake -S ogre -B ogre/build -G Xcode \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_SYSTEM_NAME=iOS \
@@ -255,10 +300,6 @@ jobs:
             -DOGRE_BUILD_DEPENDENCIES=FALSE \
             -DFREETYPE_LIBRARY="$IOS_PREFIX/lib/libfreetype.a" \
             -DFREETYPE_INCLUDE_DIRS="$IOS_PREFIX/include/freetype2" \
-            -DCMAKE_PREFIX_PATH="$IOS_PREFIX" \
-            -DZZIP_HOME="$IOS_PREFIX" \
-            -DZZip_INCLUDE_DIR="$IOS_PREFIX/include" \
-            -DZZip_LIBRARY_REL="$IOS_PREFIX/lib/libzzip.a" \
             -DZLIB_LIBRARY="$IOS_SYSROOT/usr/lib/libz.tbd" \
             -DZLIB_INCLUDE_DIR="$IOS_SYSROOT/usr/include" \
             -DOGRE_BUILD_SAMPLES=FALSE \
