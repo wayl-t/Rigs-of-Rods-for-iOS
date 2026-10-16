@@ -135,9 +135,22 @@ jobs:
                    "$IOS_PREFIX/lib/libfreetype.a" \
                    "$IOS_PREFIX/include/MYGUI/MyGUI.h" \
                    "$IOS_PREFIX/include/rapidjson/document.h" \
-                   "$IOS_PREFIX/include/PagedGeometry/PagedGeometry.h"; do
+                   "$IOS_PREFIX/include/PagedGeometry/PagedGeometry.h" \
+                   "$IOS_PREFIX/lib/libzzip.a" \
+                   "$IOS_PREFIX/include/zzip/zzip.h"; do
             if [ -e "$f" ]; then echo "  ok      $f"; else echo "  MISSING $f"; missing=1; fi
           done
+          # OGRE's ZIP archive support comes from zziplib.  Without it OGRE has
+          # no "Zip" archive factory at all, so every .zip resource location RoR
+          # opens throws - the app died on device in
+          # AppContext::SetUpConfigSkeleton() exactly there.  Refuse to build
+          # against an SDK that predates the zziplib step.
+          if grep -q '#define OGRE_NO_ZIP_ARCHIVE 0' "$IOS_PREFIX/include/OGRE/OgreBuildSettings.h" 2>/dev/null; then
+            echo "  ok      OGRE was built with Zip archive support (zziplib)"
+          else
+            echo "  MISSING OGRE was built WITHOUT Zip archive support - re-run build-ios-deps.yml first"
+            missing=1
+          fi
           for lib in MyGUIEngine MyGUI.OgrePlatform fmt SocketW PagedGeometry angelscript openal; do
             if find "$IOS_PREFIX" -name "lib${lib}*" | grep -q .; then
               echo "  ok      lib${lib}*"

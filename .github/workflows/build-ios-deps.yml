@@ -14,11 +14,15 @@ name: Build iOS dependency SDK
 # OGRE's own -DOGRE_BUILD_DEPENDENCIES=TRUE cannot help: its ExternalProject
 # build of freetype dies on `cmake_minimum_required` (< 3.5) because the
 # nested configure does not inherit our -DCMAKE_POLICY_VERSION_MINIMUM=3.5,
-# and zziplib fails outright ("** BUILD FAILED **" in zzipfseeko.pc).
+# and its zziplib ExternalProject fails outright ("** BUILD FAILED **" in
+# zzipfseeko.pc).  zziplib is therefore built here by hand - see the
+# "zziplib" section below, it is what turns OGRE's Zip archive support on
+# and the port cannot open a single RoR resource pack without it.
 #
 # So this workflow cross-compiles the whole base of the iOS dependency SDK:
 #
 #   FreeType     (enables OGRE Overlay + Bites, and MyGUI's font loading)
+#   zziplib      (OGRE's Zip archive backend - MANDATORY, see below)
 #   OGRE         (OgreMain + Bites + Overlay + Paging + RTShaderSystem
 #                 + MeshLodGenerator + Terrain + Octree/PFX plugins
 #                 + GLES2 render system, static)
@@ -109,6 +113,98 @@ jobs:
           find "$IOS_PREFIX" -type f | sort
 
       # ---------------------------------------------------------------- #
+      # zziplib - OGRE's Zip archive backend (MANDATORY)                  #
+      #                                                                   #
+      # OGRE gates ALL Zip archive support on ZZip_FOUND:                 #
+      #   CMakeLists.txt:375                                              #
+      #     cmake_dependent_option(OGRE_CONFIG_ENABLE_ZIP "... " TRUE     #
+      #                            "ZZip_FOUND" FALSE)                    #
+      # With no zziplib the option silently resolves to FALSE,            #
+      # OgreMain/CMakeLists.txt:156 then never compiles OgreZip.cpp,      #
+      # OgreBuildSettings.h gets `#define OGRE_NO_ZIP_ARCHIVE 1`, and     #
+      # ArchiveManager never registers a "Zip" factory - the OGRE log     #
+      # has no "ArchiveFactory for archive type Zip registered." line.    #
+      #                                                                   #
+      # That is fatal for RoR: every resource pack it ships is a .zip     #
+      # (skeleton.zip, wallpapers.zip, meshes.zip, ...) and both the      #
+      # ResourceGroupManager::addResourceLocation() callers and          #
+      # ContentManager::AddResourcePack() name them as "Zip".  The first  #
+      # one, AppContext::SetUpConfigSkeleton(), runs immediately after    #
+      # the render window exists - which is exactly where the app died on #
+      # device:                                                           #
+      #   [trace] startup: OGRE is up and the render window was created   #
+      #   [crash] SIGSEGV - invalid memory access                         #
+      #                                                                   #
+      # zziplib is built with our own cross-toolchain flags and installed #
+      # into the SDK prefix, where OGRE's CMake/Packages/FindZZip.cmake   #
+      # (module mode wins over zziplib's own zzip-config.cmake) finds      #
+      # `zzip/zzip.h` and `libzzip.a`.                                    #
+      #                                                                   #
+      # Only the base libzzip is built.  ZZIPMMAPPED and ZZIPFSEEKO are   #
+      # off (OGRE uses neither, and mmap'd access is the one portability  #
+      # trap in the library); the compat/libtool/pkg-config extras and    #
+      # the example/binary/doc targets want bash and only make noise on   #
+      # iOS.  zlib comes from the SDK itself                              #
+      # ($IOS_SYSROOT/usr/lib/libz.tbd) - the same stub RoR already links.#
+      # ---------------------------------------------------------------- #
+      - name: Get zziplib 0.13.78
+        run: |
+          git clone --depth 1 --branch v0.13.78 \
+            https://github.com/gdraheim/zziplib.git zziplib
+
+      - name: Configure zziplib (iOS, static, base libzzip only)
+        run: |
+          cmake -S zziplib -B zziplib/build -G "Unix Makefiles" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET \
+            -DCMAKE_OSX_SYSROOT="$IOS_SYSROOT" \
+            -DCMAKE_INSTALL_PREFIX="$IOS_PREFIX" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=FALSE \
+            -DBUILD_TESTS=FALSE \
+            -DZZIPMMAPPED=OFF -DZZIPFSEEKO=OFF \
+            -DZZIP_COMPAT=OFF -DZZIP_LIBTOOL=OFF -DZZIP_PKGCONFIG=OFF \
+            -DZZIPWRAP=OFF -DZZIPSDL=OFF -DZZIPBINS=OFF -DZZIPTEST=OFF \
+            -DZZIPDOCS=OFF \
+            -DZLIB_LIBRARY="$IOS_SYSROOT/usr/lib/libz.tbd" \
+            -DZLIB_INCLUDE_DIR="$IOS_SYSROOT/usr/include" \
+            2>&1 | tee logs/zzip-configure.log
+
+      - name: Build + install zziplib
+        run: |
+          cmake --build zziplib/build -j $(sysctl -n hw.ncpu) 2>&1 | tee logs/zzip-build.log
+          cmake --build zziplib/build --target install 2>&1 | tee logs/zzip-install.log
+
+          # zziplib sets RELEASE_POSTFIX "-0" on libzzip
+          # (zzip/CMakeLists.txt: set_target_properties(libzzip PROPERTIES
+          #  OUTPUT_NAME "zzip" RELEASE_POSTFIX "-${RELNUM}")), so a Release
+          # static build installs lib/libzzip-0.a.  OGRE's FindZZip searches
+          # the names `zziplib zzip zzip-0`, so either file resolves, but the
+          # RoR workflow also links with -L$IOS_PREFIX/lib, and the canonical
+          # unsuffixed name is what makes a plain `-lzzip` work too.
+          if [ ! -f "$IOS_PREFIX/lib/libzzip.a" ]; then
+            src="$(find "$IOS_PREFIX" -name 'libzzip*.a' -print -quit)"
+            if [ -n "$src" ]; then
+              echo "copying $src -> $IOS_PREFIX/lib/libzzip.a"
+              cp -f "$src" "$IOS_PREFIX/lib/libzzip.a"
+            fi
+          fi
+
+          echo "----- installed zzip artefacts -----"
+          find "$IOS_PREFIX" -name '*zzip*' -maxdepth 3 | sort | head -40
+          echo "----- zzip build errors -----"
+          grep -E 'error:' logs/zzip-build.log | head -20 || echo "(none)"
+
+          [ -f "$IOS_PREFIX/include/zzip/zzip.h" ] || { echo "ERROR: zziplib did not install include/zzip/zzip.h"; exit 1; }
+          [ -f "$IOS_PREFIX/lib/libzzip.a" ]       || { echo "ERROR: zziplib did not produce libzzip.a"; exit 1; }
+          echo "----- arch check -----"
+          lipo -info "$IOS_PREFIX/lib/libzzip.a"
+          echo "----- zzip.h location -----"
+          ls "$IOS_PREFIX/include/zzip" | head -30
+
+      # ---------------------------------------------------------------- #
       # OGRE 1.11.6                                                       #
       # ---------------------------------------------------------------- #
       - name: Get OGRE 1.11.6
@@ -126,6 +222,22 @@ jobs:
           # OgreConfigTargets.cmake:24 is `if (NOT OGRE_ARCHIVE_OUTPUT)`, so
           # passing the real path explicitly takes that branch out of play and
           # the build and the installer finally agree on the directory.
+          #
+          # ZIP archive support (the zziplib built above).  CMakeLists.txt:375
+          # makes OGRE_CONFIG_ENABLE_ZIP a cmake_dependent_option whose
+          # condition is ZZip_FOUND, so OGRE compiles OgreZip.cpp - and
+          # registers the "Zip" archive factory RoR needs for every single
+          # resource pack - only if CMake/Packages/FindZZip.cmake succeeds.
+          # FindZZip looks for <prefix>/include/zzip/zzip.h and libzzip in
+          # <prefix>/lib, so all three hints below point at that install:
+          #   ZZIP_HOME         -> FindZZip's own create_search_paths() prefixes
+          #   CMAKE_PREFIX_PATH -> the default find_path/find_library search
+          #   ZZip_*            -> pre-seeded cache entries (belt and braces;
+          #                        module mode wins over zziplib's own
+          #                        zzip-config.cmake because OGRE keeps its
+          #                        CMake/Packages on CMAKE_MODULE_PATH)
+          # ZLIB_* is the SDK stub zziplib itself was built against; OGRE
+          # links ZLIB::ZLIB into OgreMain as soon as zip is on.
           cmake -S ogre -B ogre/build -G Xcode \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_SYSTEM_NAME=iOS \
@@ -143,6 +255,12 @@ jobs:
             -DOGRE_BUILD_DEPENDENCIES=FALSE \
             -DFREETYPE_LIBRARY="$IOS_PREFIX/lib/libfreetype.a" \
             -DFREETYPE_INCLUDE_DIRS="$IOS_PREFIX/include/freetype2" \
+            -DCMAKE_PREFIX_PATH="$IOS_PREFIX" \
+            -DZZIP_HOME="$IOS_PREFIX" \
+            -DZZip_INCLUDE_DIR="$IOS_PREFIX/include" \
+            -DZZip_LIBRARY_REL="$IOS_PREFIX/lib/libzzip.a" \
+            -DZLIB_LIBRARY="$IOS_SYSROOT/usr/lib/libz.tbd" \
+            -DZLIB_INCLUDE_DIR="$IOS_SYSROOT/usr/include" \
             -DOGRE_BUILD_SAMPLES=FALSE \
             -DOGRE_BUILD_TESTS=FALSE \
             -DOGRE_BUILD_TOOLS=FALSE \
@@ -176,6 +294,36 @@ jobs:
           sed -n '/FEATURE SUMMARY/,/^----/p' logs/ogre-configure.log | head -40 >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
+      - name: "Assert OGRE has Zip archive support (OGRE_NO_ZIP_ARCHIVE 0)"
+        run: |
+          set +e
+          # The whole port hinges on this one define.  OGRE writes it into the
+          # generated OgreBuildSettings.h at *configure* time, so check it here
+          # rather than after the 10-minute build - and dump the evidence that
+          # explains a FALSE reading (i.e. FindZZip not finding zziplib).
+          f="$(find ogre/build -name OgreBuildSettings.h -print -quit)"
+          echo "OgreBuildSettings.h: ${f:-<not generated>}"
+          if [ -z "$f" ]; then
+            echo "ERROR: OgreBuildSettings.h was not generated by the OGRE configure step"
+            exit 1
+          fi
+          grep -n 'OGRE_NO_ZIP_ARCHIVE' "$f"
+          if grep -q '#define OGRE_NO_ZIP_ARCHIVE 0' "$f"; then
+            echo "OK: Zip archive support is compiled in (OgreZip.cpp + ZipArchiveFactory)"
+            exit 0
+          fi
+          echo "ERROR: OGRE was configured WITHOUT zziplib."
+          echo "       OgreZip.cpp is not compiled, so ArchiveManager has no 'Zip'"
+          echo "       factory and the first .zip resource RoR opens (skeleton.zip"
+          echo "       in SetUpConfigSkeleton) aborts the app."
+          echo "----- zzip / zlib lines from the OGRE configure log -----"
+          grep -iE 'zzip|zlib' logs/ogre-configure.log || true
+          echo "----- zziplib artefacts in the prefix -----"
+          find "$IOS_PREFIX" -name '*zzip*' | sort || true
+          echo "----- OGRE feature summary -----"
+          sed -n '/FEATURE SUMMARY/,/^----/p' logs/ogre-configure.log | head -60 || true
+          exit 1
+
       - name: Build + install OGRE
         run: |
           cmake --build ogre/build --config Release --target install \
@@ -192,6 +340,22 @@ jobs:
           find "$IOS_PREFIX" -name '*.a' -exec ls -la {} \; 2>/dev/null | sort -k9 || true
           echo "----- error lines in OGRE build -----"
           grep -E "error:" logs/ogre-build.log | sort -u | head -60 || true
+          echo "----- ZIP archive support -----"
+          grep -n 'OGRE_NO_ZIP_ARCHIVE' "$IOS_PREFIX/include/OGRE/OgreBuildSettings.h" || true
+          find "$IOS_PREFIX" -name '*zzip*' | sort || true
+          # The string literal below only exists in OgreZip.cpp, so finding it
+          # inside libOgreMainStatic.a proves OgreZip.cpp was really compiled in
+          # (and not silently dropped because OGRE_NO_ZIP_ARCHIVE was 1).
+          if strings "$IOS_PREFIX/lib/Release/libOgreMainStatic.a" 2>/dev/null | grep -q 'Modification of zipped archives is not supported'; then
+            echo "  ok      libOgreMainStatic.a contains the OgreZip.cpp objects"
+          else
+            echo "  MISSING libOgreMainStatic.a has no OgreZip.cpp objects"
+          fi
+          if nm -g "$IOS_PREFIX/lib/Release/libOgreMainStatic.a" 2>/dev/null | grep -q 'ZipArchiveFactory'; then
+            echo "  ok      libOgreMainStatic.a defines ZipArchiveFactory"
+          else
+            echo "  MISSING libOgreMainStatic.a does NOT define ZipArchiveFactory"
+          fi
           echo "----- required libs check -----"
           missing=0
           for lib in OgreMain OgreGLSupport OgreBites OgreOverlay OgrePaging \
@@ -722,6 +886,16 @@ jobs:
           find "$IOS_PREFIX" -name 'libSocketW*'             | grep -q . || { echo "MISSING: SocketW lib"; missing=1; }
           find "$IOS_PREFIX" -name 'libPagedGeometry*'       | grep -q . || { echo "MISSING: PagedGeometry lib"; missing=1; }
           [ -f "$IOS_PREFIX/include/PagedGeometry/PagedGeometry.h" ] || { echo "MISSING: PagedGeometry.h"; missing=1; }
+          # Zip archive support is what every RoR resource pack needs.  A
+          # missing zziplib is invisible until the app dies on device in
+          # SetUpConfigSkeleton(), so gate the SDK artifact on it here.
+          [ -f "$IOS_PREFIX/lib/libzzip.a" ]                 || { echo "MISSING: libzzip.a"; missing=1; }
+          [ -f "$IOS_PREFIX/include/zzip/zzip.h" ]           || { echo "MISSING: zzip/zzip.h"; missing=1; }
+          grep -q '#define OGRE_NO_ZIP_ARCHIVE 0' "$IOS_PREFIX/include/OGRE/OgreBuildSettings.h" \
+            || { echo "MISSING: OGRE was built without Zip archive support (OGRE_NO_ZIP_ARCHIVE is not 0)"; missing=1; }
+          strings "$IOS_PREFIX/lib/Release/libOgreMainStatic.a" 2>/dev/null \
+            | grep -q 'Modification of zipped archives is not supported' \
+            || { echo "MISSING: libOgreMainStatic.a has no OgreZip.cpp objects"; missing=1; }
           echo "----- cmake package files RoR will look for -----"
           for f in "$IOS_PREFIX/CMake/OGREConfig.cmake" \
                    "$IOS_PREFIX/lib/cmake/Angelscript/AngelscriptConfig.cmake" \
