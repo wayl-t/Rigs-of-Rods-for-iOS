@@ -566,25 +566,45 @@ jobs:
           # Diagnostic: real RoR binary, no resources. Also build lite-h1/h2 splits.
           echo "------ building diagnostics (bin, lite-h1, lite-h2) ------"
           if [ -f "$APP_DIR/RoR" ]; then
-            # bin: no resources
+            # bin
             rm -rf BinStage RoR-ios-bin.ipa
             mkdir -p BinStage/Payload/RoR.app
             cp "$APP_DIR/RoR" BinStage/Payload/RoR.app/RoR
             cp "$APP_DIR/Info.plist" BinStage/Payload/RoR.app/Info.plist
             cp "$APP_DIR/PkgInfo" BinStage/Payload/RoR.app/PkgInfo
-            if declare -F adhoc_sign >/dev/null 2>&1; then
-              adhoc_sign "BinStage/Payload/RoR.app" || true
-            fi
-            rm -f adhoc.log
+            if command -v adhoc_sign >/dev/null 2>&1; then adhoc_sign "BinStage/Payload/RoR.app" || true; fi
             (cd BinStage && zip -qry ../RoR-ios-bin.ipa Payload)
 
-            # build h1/h2 from lite resource set
+            # h1/h2
+            rm -rf H1Stage H2Stage
+            mkdir -p H1Stage/Payload/RoR.app/resources H2Stage/Payload/RoR.app/resources
             if [ -d "$APP_DIR/resources" ]; then
-              rm -rf H1Stage H2Stage
-              mkdir -p H1Stage/Payload/RoR.app/resources H2Stage/Payload/RoR.app/resources
-              python3 -c "import os; d=os.path.join(os.environ['APP_DIR'],'resources'); items=sorted([x for x in os.listdir(d) if not x.startswith('.')]); mid=len(items)//2; open('/tmp/h1.list','w').write('\n'.join(items[:mid])); open('/tmp/h2.list','w').write('\n'.join(items[mid:])); print('split',mid,len(items)-mid)"
-              ls -la RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa
+              python3 -c "
+import os
+d=os.environ['APP_DIR']+'/resources'
+items=sorted([x for x in os.listdir(d) if not x.startswith('.')])
+mid=len(items)//2
+open('/tmp/h1.list','w').write('
+'.join(items[:mid]))
+open('/tmp/h2.list','w').write('
+'.join(items[mid:]))
+"
+              [ -f /tmp/h1.list ] && while IFS= read -r f; do [ -n "$f" ] && cp -R "$APP_DIR/resources/$f" H1Stage/Payload/RoR.app/resources/ 2>/dev/null; done < /tmp/h1.list
+              [ -f /tmp/h2.list ] && while IFS= read -r f; do [ -n "$f" ] && cp -R "$APP_DIR/resources/$f" H2Stage/Payload/RoR.app/resources/ 2>/dev/null; done < /tmp/h2.list
             fi
+            [ -e "$APP_DIR/resources/managed_materials" ] && cp -R "$APP_DIR/resources/managed_materials" H1Stage/Payload/RoR.app/resources/ 2>/dev/null
+            [ -e "$APP_DIR/resources/managed_materials" ] && cp -R "$APP_DIR/resources/managed_materials" H2Stage/Payload/RoR.app/resources/ 2>/dev/null
+            for s in H1Stage H2Stage; do
+              cp "$APP_DIR/RoR" "$s/Payload/RoR.app/RoR"
+              cp "$APP_DIR/Info.plist" "$s/Payload/RoR.app/Info.plist"
+              cp "$APP_DIR/PkgInfo" "$s/Payload/RoR.app/PkgInfo"
+              if command -v adhoc_sign >/dev/null 2>&1; then adhoc_sign "$s/Payload/RoR.app" || true; fi
+            done
+            (cd H1Stage && zip -qry ../RoR-ios-lite-h1.ipa Payload)
+            (cd H2Stage && zip -qry ../RoR-ios-lite-h2.ipa Payload)
+            ls -la RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa
+          fi
+
           fi
 
       - name: Summary
