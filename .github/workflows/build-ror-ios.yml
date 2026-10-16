@@ -563,10 +563,10 @@ jobs:
           fi
           rm -f tiny-cc.log
 
-          # Diagnostic: real RoR binary, no resources. Determines if the 18 MB
-          # executable itself prevents installation (vs resources/).
-          echo "------ building RoR-ios-bin.ipa (real binary, no resources) ------"
+          # Diagnostic: real RoR binary, no resources. Also build lite-h1/h2 splits.
+          echo "------ building diagnostics (bin, lite-h1, lite-h2) ------"
           if [ -f "$APP_DIR/RoR" ]; then
+            # bin: no resources
             rm -rf BinStage RoR-ios-bin.ipa
             mkdir -p BinStage/Payload/RoR.app
             cp "$APP_DIR/RoR" BinStage/Payload/RoR.app/RoR
@@ -577,11 +577,14 @@ jobs:
             fi
             rm -f adhoc.log
             (cd BinStage && zip -qry ../RoR-ios-bin.ipa Payload)
-            echo "----- bin IPA -----"
-            ls -la RoR-ios-bin.ipa
-            file BinStage/Payload/RoR.app/RoR
-          else
-            echo "::warning::RoR binary missing at $APP_DIR/RoR, skipping bin diagnostic"
+
+            # build h1/h2 from lite resource set
+            if [ -d "$APP_DIR/resources" ]; then
+              rm -rf H1Stage H2Stage
+              mkdir -p H1Stage/Payload/RoR.app/resources H2Stage/Payload/RoR.app/resources
+              python3 -c "import os; d=os.path.join(os.environ['APP_DIR'],'resources'); items=sorted([x for x in os.listdir(d) if not x.startswith('.')]); mid=len(items)//2; open('/tmp/h1.list','w').write('\n'.join(items[:mid])); open('/tmp/h2.list','w').write('\n'.join(items[mid:])); print('split',mid,len(items)-mid)"
+              ls -la RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa
+            fi
           fi
 
       - name: Summary
