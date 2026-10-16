@@ -818,6 +818,7 @@ IOS_MAIN_MM = r'''// Rigs of Rods - Apple/iOS process entry point.  See ios_plat
 #include "ios_platform.h"
 
 #import <UIKit/UIKit.h>
+#import <dispatch/dispatch.h>
 
 static int    g_argc = 0;
 static char** g_argv = nullptr;
@@ -833,9 +834,17 @@ static char** g_argv = nullptr;
     (void)application;
     (void)launchOptions;
 
-    // Blocks for the whole lifetime of the process: RoR owns its frame loop and
-    // services UIKit from inside it via RoR_IosPumpRunLoop().
-    RoRMain(g_argc, g_argv);
+    // Return from -didFinishLaunchingWithOptions: immediately and start RoR on
+    // the next main run loop turn.  iOS kills an app whose launch phase does
+    // not finish in time (watchdog 0x8badf00d), and RoRMain never returns - it
+    // blocks for the whole lifetime of the process.  Doing the blocking work
+    // here would keep -didFinishLaunching from ever returning, which is exactly
+    // the pathological case the watchdog exists for.  RoR still owns the main
+    // thread afterwards and services UIKit from inside its frame loop via
+    // RoR_IosPumpRunLoop().
+    dispatch_async(dispatch_get_main_queue(), ^{
+        RoRMain(g_argc, g_argv);
+    });
     return YES;
 }
 
