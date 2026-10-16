@@ -275,13 +275,25 @@ jobs:
           # RoR resolves its data relative to the executable's parent directory
           # (AppContext::SetUpResourcesDir -> sys_process_dir), i.e. inside the
           # bundle, and SetUpConfigSkeleton() hard-requires
-          # resources/skeleton.zip.  CMake's zip_folder_resources target writes
-          # the zips to bin/resources, one level above the bundle.
+          # <resource dir>/skeleton.zip.  CMake's zip_folder_resources target
+          # writes the zips to bin/resources, one level above the bundle.
+          #
+          # Inside the bundle that directory is called `rorres`, not
+          # `resources`.  An .app carrying a top-level directory *named*
+          # resources (or Resources - the check is case-insensitive) is refused
+          # by the iOS installer with the generic "Unable to Install": codesign
+          # flips its resource rules to the macOS "resource envelope" set
+          # (rules=^Resources/, plus `^[^/]+$ -> nested` in rules2) the moment
+          # such a directory appears, and iOS will not install a bundle sealed
+          # that way.  Every other name - zzz/, Base.lproj/, rorres/ - keeps the
+          # normal ^.* rules and installs.  apply_ios_patches.py renames the
+          # directory in AppContext.cpp and ContentManager.cpp to match.
+          # See PORT_FINDINGS.md section 7.22.
           if [ -d ror/build/bin/resources ]; then
-            rm -rf "$APP_DIR/resources"
-            cp -R ror/build/bin/resources "$APP_DIR/resources"
-            echo "----- bundled resources -----"
-            ls -la "$APP_DIR/resources" | head -30
+            rm -rf "$APP_DIR/rorres"
+            cp -R ror/build/bin/resources "$APP_DIR/rorres"
+            echo "----- bundled resources (rorres/) -----"
+            ls -la "$APP_DIR/rorres" | head -30
           else
             echo "WARNING: ror/build/bin/resources is missing - RoR will refuse to start"
           fi
@@ -503,8 +515,8 @@ jobs:
           rm -rf LiteStage RoR-ios-lite.ipa
           mkdir -p LiteStage/Payload
           cp -R "$APP_DIR" LiteStage/Payload/RoR.app
-          if [ -d LiteStage/Payload/RoR.app/resources ]; then
-            for z in LiteStage/Payload/RoR.app/resources/*.zip; do
+          if [ -d LiteStage/Payload/RoR.app/rorres ]; then
+            for z in LiteStage/Payload/RoR.app/rorres/*.zip; do
               [ -e "$z" ] || continue
               b="$(basename "$z")"
               keep=0
@@ -525,7 +537,7 @@ jobs:
           (cd LiteStage && zip -qry ../RoR-ios-lite.ipa Payload)
           echo "----- lite IPA -----"
           ls -la RoR-ios-lite.ipa
-          du -sh "$APP_DIR/resources" LiteStage/Payload/RoR.app/resources 2>/dev/null || true
+          du -sh "$APP_DIR/rorres" LiteStage/Payload/RoR.app/rorres 2>/dev/null || true
 
           # ------------------------------------------------------------------ #
           # A third IPA, also diagnostic.                                      #
@@ -563,146 +575,50 @@ jobs:
           fi
           rm -f tiny-cc.log
 
-          # Diagnostic: real RoR binary, no resources. Also build lite-h1/h2 splits.
-          echo "------ building diagnostics (bin, lite-h1, lite-h2) ------"
+          # ------------------------------------------------------------------ #
+          # Focused controls.  Measured on device: an .app whose bundle         #
+          # carries a top-level directory *named* resources/ - or Resources/,   #
+          # the check is case-insensitive - is refused by the installer, while  #
+          # the very same directory under any other name installs and runs.     #
+          # codesign is what flips: it switches to the macOS "resource          #
+          # envelope" rules (rules=^Resources/) whenever such a directory is    #
+          # present, and iOS will not install a bundle sealed that way.         #
+          # See the resource-directory note above and PORT_FINDINGS 7.22.       #
+          #                                                                     #
+          #   bin   - the real binary, no data at all: the known-good baseline  #
+          #   res0  - bin + resources/rotest.txt : the known-bad reference      #
+          #   res0r - bin + rorres/rotest.txt    : one file, one directory name #
+          #           apart from res0.  If this installs, the rename is the     #
+          #           whole fix, and the real bundles - which now ship their    #
+          #           data in rorres/ - install too.                            #
+          # ------------------------------------------------------------------ #
+          echo "------ building controls (bin, res0, res0r) ------"
           if [ -f "$APP_DIR/RoR" ]; then
-            # bin
-            rm -rf BinStage RoR-ios-bin.ipa
-            mkdir -p BinStage/Payload/RoR.app
-            cp "$APP_DIR/RoR" BinStage/Payload/RoR.app/RoR
-            cp "$APP_DIR/Info.plist" BinStage/Payload/RoR.app/Info.plist
-            cp "$APP_DIR/PkgInfo" BinStage/Payload/RoR.app/PkgInfo
-            if command -v adhoc_sign >/dev/null 2>&1; then adhoc_sign "BinStage/Payload/RoR.app" || true; fi
-            (cd BinStage && zip -qry ../RoR-ios-bin.ipa Payload)
-
-            # h1/h2: split the *lite* resource set in half by top-level entry
-            rm -rf H1Stage H2Stage
-            mkdir -p H1Stage/Payload/RoR.app/resources H2Stage/Payload/RoR.app/resources
-            if [ -d LiteStage/Payload/RoR.app/resources ]; then
-              python3 -c "import os;d='LiteStage/Payload/RoR.app/resources';items=sorted([x for x in os.listdir(d) if not x.startswith('.')]);mid=len(items)//2;open('h1.list','w').write(chr(10).join(items[:mid])+chr(10));open('h2.list','w').write(chr(10).join(items[mid:])+chr(10));print('split',len(items),'h1',mid,'h2',len(items)-mid)"
-              echo "h1 half ($(wc -l < h1.list) entries):"; cat h1.list; echo "h2 half ($(wc -l < h2.list) entries):"; cat h2.list
-              while IFS= read -r f; do f="${f%$'\r'}"; [ -n "$f" ] && cp -R "LiteStage/Payload/RoR.app/resources/$f" H1Stage/Payload/RoR.app/resources/ 2>/dev/null; done < h1.list
-              while IFS= read -r f; do f="${f%$'\r'}"; [ -n "$f" ] && cp -R "LiteStage/Payload/RoR.app/resources/$f" H2Stage/Payload/RoR.app/resources/ 2>/dev/null; done < h2.list
-            fi
-            for s in H1Stage H2Stage; do
+            rm -rf BinStage Res0Stage Res0rStage
+            for s in BinStage Res0Stage Res0rStage; do
+              mkdir -p "$s/Payload/RoR.app"
               cp "$APP_DIR/RoR" "$s/Payload/RoR.app/RoR"
               cp "$APP_DIR/Info.plist" "$s/Payload/RoR.app/Info.plist"
               cp "$APP_DIR/PkgInfo" "$s/Payload/RoR.app/PkgInfo"
-              if command -v adhoc_sign >/dev/null 2>&1; then adhoc_sign "$s/Payload/RoR.app" || true; fi
             done
-            (cd H1Stage && zip -qry ../RoR-ios-lite-h1.ipa Payload)
-            (cd H2Stage && zip -qry ../RoR-ios-lite-h2.ipa Payload)
-            # tinyres: the known-good ~89 KB tiny binary plus the whole
-            # lite resource set.  This separates "resources break the
-            # install" from "the RoR binary fails to start once it can
-            # see resources".
-            if [ -f /tmp/RoR-tiny ]; then
-              rm -rf TinyResStage RoR-ios-tinyres.ipa
-              mkdir -p TinyResStage/Payload/RoR.app
-              cp /tmp/RoR-tiny TinyResStage/Payload/RoR.app/RoR
-              cp "$APP_DIR/Info.plist" TinyResStage/Payload/RoR.app/Info.plist
-              cp "$APP_DIR/PkgInfo" TinyResStage/Payload/RoR.app/PkgInfo
-              cp -R LiteStage/Payload/RoR.app/resources TinyResStage/Payload/RoR.app/resources
-              if command -v adhoc_sign >/dev/null 2>&1; then adhoc_sign "TinyResStage/Payload/RoR.app" || true; fi
-              (cd TinyResStage && zip -qry ../RoR-ios-tinyres.ipa Payload)
-              ls -la RoR-ios-tinyres.ipa
-            fi
-            # res0/res1: the real binary - the same payload as `bin`, which
-            # installs and runs - plus exactly one entry under resources/.
-            # `bin` installs, everything carrying resources does not, and
-            # those are also bigger, so this separates "resources/ as such
-            # breaks the install" from "payload size breaks the install".
-            # Both stay within ~80 KB of bin's size.
-            rm -rf Res0Stage Res1Stage
-            mkdir -p Res0Stage/Payload/RoR.app/resources Res1Stage/Payload/RoR.app/resources
+            mkdir -p Res0Stage/Payload/RoR.app/resources Res0rStage/Payload/RoR.app/rorres
             printf 'ror\n' > Res0Stage/Payload/RoR.app/resources/rotest.txt
-            cp LiteStage/Payload/RoR.app/resources/skeleton.zip Res1Stage/Payload/RoR.app/resources/ 2>/dev/null || true
-            for s in Res0Stage Res1Stage; do
-              cp "$APP_DIR/RoR" "$s/Payload/RoR.app/RoR"
-              cp "$APP_DIR/Info.plist" "$s/Payload/RoR.app/Info.plist"
-              cp "$APP_DIR/PkgInfo" "$s/Payload/RoR.app/PkgInfo"
-              if command -v adhoc_sign >/dev/null 2>&1; then adhoc_sign "$s/Payload/RoR.app" || true; fi
-            done
+            printf 'ror\n' > Res0rStage/Payload/RoR.app/rorres/rotest.txt
+            if command -v adhoc_sign >/dev/null 2>&1; then
+              adhoc_sign "BinStage/Payload/RoR.app" || true
+              adhoc_sign "Res0Stage/Payload/RoR.app" || true
+              adhoc_sign "Res0rStage/Payload/RoR.app" || true
+            fi
+            (cd BinStage && zip -qry ../RoR-ios-bin.ipa Payload)
             (cd Res0Stage && zip -qry ../RoR-ios-res0.ipa Payload)
-            (cd Res1Stage && zip -qry ../RoR-ios-res1.ipa Payload)
-            ls -la RoR-ios-res0.ipa RoR-ios-res1.ipa
-
-            # Four narrow variants, all on top of bin's payload (the one that
-            # installs and runs), to pin down what one extra file actually
-            # changes:
-            #   file0   - the extra file sits at the app root; no new directory
-            #   res0c   - the extra file sits in Resources/ (capital R), the
-            #             only spelling codesign's resource rules seal
-            #   res0u   - identical to res0 but shipped WITHOUT a pre-made
-            #             ad-hoc signature.  iOS cannot install an ad-hoc
-            #             signature anyway, so the sideloader re-signs either
-            #             way.  If this installs, the bug is our signature
-            #             rather than the resources.
-            #   liteu   - the whole lite app with no pre-made signature.
-            rm -rf Res0uStage Res0cStage File0Stage
-            for s in Res0uStage Res0cStage File0Stage; do
-              mkdir -p "$s/Payload/RoR.app"
-              cp "$APP_DIR/RoR" "$s/Payload/RoR.app/RoR"
-              cp "$APP_DIR/Info.plist" "$s/Payload/RoR.app/Info.plist"
-              cp "$APP_DIR/PkgInfo" "$s/Payload/RoR.app/PkgInfo"
+            (cd Res0rStage && zip -qry ../RoR-ios-res0r.ipa Payload)
+            echo "----- control signatures (what codesign decided) -----"
+            for ipa in RoR-ios-bin.ipa RoR-ios-res0.ipa RoR-ios-res0r.ipa RoR-ios-lite.ipa; do
+              [ -f "$ipa" ] || continue
+              python3 -c "import plistlib,sys,zipfile;z=zipfile.ZipFile(sys.argv[1]);n=[x for x in z.namelist() if x.endswith('_CodeSignature/CodeResources')];d=plistlib.loads(z.read(n[0]));print(sys.argv[1],'-> rules:',list((d.get('rules') or {}).keys()))" "$ipa" 2>/dev/null \
+                || echo "$ipa -> no CodeResources (unsigned)"
             done
-            mkdir -p Res0uStage/Payload/RoR.app/resources Res0cStage/Payload/RoR.app/Resources
-            printf 'ror\n' > Res0uStage/Payload/RoR.app/resources/rotest.txt
-            printf 'ror\n' > Res0cStage/Payload/RoR.app/Resources/rotest.txt
-            printf 'ror\n' > File0Stage/Payload/RoR.app/rotest.txt
-            if command -v adhoc_sign >/dev/null 2>&1; then
-              adhoc_sign "Res0cStage/Payload/RoR.app" || true
-              adhoc_sign "File0Stage/Payload/RoR.app" || true
-            fi
-            (cd Res0uStage && zip -qry ../RoR-ios-res0u.ipa Payload)
-            (cd Res0cStage && zip -qry ../RoR-ios-res0c.ipa Payload)
-            (cd File0Stage && zip -qry ../RoR-ios-file0.ipa Payload)
-            rm -rf UnsLiteStage
-            mkdir -p UnsLiteStage/Payload
-            cp -R LiteStage/Payload/RoR.app UnsLiteStage/Payload/RoR.app
-            rm -rf UnsLiteStage/Payload/RoR.app/_CodeSignature
-            (cd UnsLiteStage && zip -qry ../RoR-ios-liteu.ipa Payload)
-            ls -la RoR-ios-res0u.ipa RoR-ios-res0c.ipa RoR-ios-file0.ipa RoR-ios-liteu.ipa
-
-            # Boundary batch.  file0 installs (the extra file sits at the app
-            # root), while every variant that carries a sub-directory - signed
-            # or not - does not.  These five separate three questions: is it
-            # the directory entry itself, the file inside it, or its name?
-            #   binu   - bin's payload shipped unsigned; the control for
-            #            whether an unsigned bundle installs at all
-            #   d0     - bin + an EMPTY resources/ directory (no file inside)
-            #   zzz0   - bin + zzz/rotest.txt (an arbitrary directory name)
-            #   lproj0 - bin + Base.lproj/rotest.txt (a name iOS already
-            #            treats as a resource container)
-            #   flat0  - bin + skeleton.zip at the bundle root, so no directory
-            #            exists at all.  If this installs, flattening the
-            #            resources next to the executable is the way forward.
-            rm -rf BinuStage D0Stage Zzz0Stage Lproj0Stage Flat0Stage
-            for s in BinuStage D0Stage Zzz0Stage Lproj0Stage Flat0Stage; do
-              mkdir -p "$s/Payload/RoR.app"
-              cp "$APP_DIR/RoR" "$s/Payload/RoR.app/RoR"
-              cp "$APP_DIR/Info.plist" "$s/Payload/RoR.app/Info.plist"
-              cp "$APP_DIR/PkgInfo" "$s/Payload/RoR.app/PkgInfo"
-            done
-            mkdir -p D0Stage/Payload/RoR.app/resources
-            mkdir -p Zzz0Stage/Payload/RoR.app/zzz
-            mkdir -p Lproj0Stage/Payload/RoR.app/Base.lproj
-            printf 'ror\n' > Zzz0Stage/Payload/RoR.app/zzz/rotest.txt
-            printf 'ror\n' > Lproj0Stage/Payload/RoR.app/Base.lproj/rotest.txt
-            cp LiteStage/Payload/RoR.app/resources/skeleton.zip Flat0Stage/Payload/RoR.app/skeleton.zip
-            if command -v adhoc_sign >/dev/null 2>&1; then
-              adhoc_sign "D0Stage/Payload/RoR.app" || true
-              adhoc_sign "Zzz0Stage/Payload/RoR.app" || true
-              adhoc_sign "Lproj0Stage/Payload/RoR.app" || true
-              adhoc_sign "Flat0Stage/Payload/RoR.app" || true
-            fi
-            (cd D0Stage && zip -qry ../RoR-ios-d0.ipa Payload)
-            (cd Zzz0Stage && zip -qry ../RoR-ios-zzz0.ipa Payload)
-            (cd Lproj0Stage && zip -qry ../RoR-ios-lproj0.ipa Payload)
-            (cd Flat0Stage && zip -qry ../RoR-ios-flat0.ipa Payload)
-            (cd BinuStage && zip -qry ../RoR-ios-binu.ipa Payload)
-            ls -la RoR-ios-d0.ipa RoR-ios-zzz0.ipa RoR-ios-lproj0.ipa RoR-ios-flat0.ipa RoR-ios-binu.ipa
-            ls -la RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa
+            ls -la RoR-ios-bin.ipa RoR-ios-res0.ipa RoR-ios-res0r.ipa
           fi
 
       - name: Summary
@@ -764,9 +680,8 @@ jobs:
             RoR-ios-lite.ipa
             RoR-ios-tiny.ipa
             RoR-ios-bin.ipa
-            RoR-ios-lite-h1.ipa
-            RoR-ios-lite-h2.ipa
-            RoR-ios-tinyres.ipa
+            RoR-ios-res0.ipa
+            RoR-ios-res0r.ipa
           retention-days: 30
           if-no-files-found: warn
 
@@ -790,49 +705,37 @@ jobs:
 
           Files (release-dependent):
 
-          * RoR-ios.ipa      - the full game, ~112 MB, all resources
-          * RoR-ios-lite.ipa - diagnostic, trimmed resources. If this works with the
-                               identifier fix, the packaging/signature change helped.
+          * RoR-ios.ipa      - the full game, ~112 MB. Ships its data in
+                               RoR.app/rorres/ (not resources/ - see below).
+          * RoR-ios-lite.ipa - the same app with a trimmed resource set, ~18 MB.
           * RoR-ios-tiny.ipa - NOT the game. Shares Info.plist/signature/packaging
                                with the game. Installs and launches (green screen).
           * RoR-ios-bin.ipa  - diagnostic (only on 'diag' tag). Real RoR binary,
-                               no resources/. Tests whether the binary itself blocks
-                               installation.
-          * RoR-ios-lite-h1.ipa / RoR-ios-lite-h2.ipa - diagnostic (only on 'diag'
-                               tag). The real binary plus one half each of the lite
-                               resource set. Whichever half fails to install holds the
-                               resource that breaks ESIGN; split that half again.
-          * RoR-ios-tinyres.ipa - diagnostic (only on 'diag' tag). The ~89 KB tiny
-                               binary (known to install and show a green screen) plus
-                               the whole lite resource set. If this fails to install,
-                               resources break the install on their own; if it installs,
-                               the resources are fine and the real RoR binary is the one
-                               that cannot start once it can see them.
-          * RoR-ios-res0.ipa / RoR-ios-res1.ipa - diagnostic (only on 'diag'
-                               tag). The same payload as RoR-ios-bin.ipa (which
-                               installs and runs) plus exactly one entry under
-                               resources/ - a one-line text file (res0), or the
-                               single smallest resource zip (res1). Same size as
-                               bin, so this separates 'resources/ breaks the
-                               install' from 'size breaks the install'.
-          * RoR-ios-file0.ipa / RoR-ios-res0c.ipa / RoR-ios-res0u.ipa -
-                               diagnostic (only on 'diag' tag). bin's payload
-                               with one extra file at the app root (file0), in
-                               Resources/ spelled with a capital R (res0c), or
-                               in resources/ but shipped with NO pre-made
-                               ad-hoc signature (res0u).  Measured: only file0
-                               installs, so the signature is not the cause.
-          * RoR-ios-liteu.ipa - diagnostic (only on 'diag' tag). The whole
-                               lite app with no pre-made signature.  Measured:
-                               fails, which removes the signature as a cause.
-          * RoR-ios-binu.ipa / RoR-ios-d0.ipa / RoR-ios-zzz0.ipa /
-            RoR-ios-lproj0.ipa / RoR-ios-flat0.ipa - diagnostic (only on
-                               'diag' tag). bin's payload shipped unsigned
-                               (binu, control), plus an empty resources/
-                               directory (d0), an arbitrary zzz/ directory
-                               (zzz0), a Base.lproj/ directory (lproj0), and
-                               skeleton.zip at the bundle root with no
-                               directory at all (flat0).
+                               no data directory at all. The known-good baseline.
+          * RoR-ios-res0.ipa - diagnostic (only on 'diag' tag). bin plus a single
+                               file in resources/ . The known-BAD reference.
+          * RoR-ios-res0r.ipa - diagnostic (only on 'diag' tag). bin plus the same
+                               single file, in rorres/ instead. What the fix does.
+
+          Why the directory is called rorres:
+
+          An .app whose bundle contains a top-level directory *named* resources
+          (or Resources - the check is case-insensitive) is refused by the iOS
+          installer with the generic \"Unable to Install\", while the very same
+          directory under any other name (zzz/, Base.lproj/, rorres/) installs
+          and runs.  Measured on device:  bin - no directory        -> installs
+                                            zzz/rotest.txt        -> installs
+                                            Base.lproj/rotest.txt -> installs
+                                            resources/rotest.txt  -> refused
+                                            Resources/rotest.txt  -> refused
+
+          codesign is what flips.  With a resources/ (or Resources/) directory
+          present it switches its resource rules to the macOS \"resource
+          envelope\" set - rules=^Resources/, plus a '^[^/]+$ -> nested' rule in
+          rules2 - and iOS will not install a bundle sealed that way.  With any
+          other directory name it keeps the plain ^.* rules that iOS accepts.
+          The ad-hoc signature was never the problem: an unsigned variant with
+          resources/ is refused just the same.
 
           Hand the file itself to ESIGN / Sideloadly / SideStore - it is served
           as a plain file, nothing to unpack.  An .ipa is a zip whose root
@@ -846,7 +749,7 @@ jobs:
           # Drop every asset we are not about to upload.
           ALLOWED="RoR-ios.ipa|RoR-ios-lite.ipa|RoR-ios-tiny.ipa"
           if [ "$TAG" = "diag" ]; then
-            ALLOWED="RoR-ios.ipa|RoR-ios-lite.ipa|RoR-ios-tiny.ipa|RoR-ios-bin.ipa|RoR-ios-lite-h1.ipa|RoR-ios-lite-h2.ipa|RoR-ios-tinyres.ipa"
+            ALLOWED="RoR-ios.ipa|RoR-ios-lite.ipa|RoR-ios-tiny.ipa|RoR-ios-bin.ipa|RoR-ios-res0.ipa|RoR-ios-res0r.ipa"
           fi
           for a in $(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
                        --json assets --jq '.assets[].name'); do
@@ -864,7 +767,7 @@ jobs:
             fi
           done
           if [ "$TAG" = "diag" ]; then
-            for f in RoR-ios-bin.ipa RoR-ios-res0.ipa RoR-ios-res1.ipa RoR-ios-res0u.ipa RoR-ios-res0c.ipa RoR-ios-file0.ipa RoR-ios-liteu.ipa RoR-ios-binu.ipa RoR-ios-d0.ipa RoR-ios-zzz0.ipa RoR-ios-lproj0.ipa RoR-ios-flat0.ipa RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa RoR-ios-tinyres.ipa; do
+            for f in RoR-ios-bin.ipa RoR-ios-res0.ipa RoR-ios-res0r.ipa; do
               [ -f "$f" ] && gh release upload "$TAG" "$f" --clobber --repo "$GITHUB_REPOSITORY"
             done
           fi
@@ -882,7 +785,7 @@ jobs:
           if it differs by even one byte, download the file again.
 
           "
-          for f in RoR-ios.ipa RoR-ios-lite.ipa RoR-ios-tiny.ipa RoR-ios-bin.ipa RoR-ios-res0.ipa RoR-ios-res1.ipa RoR-ios-res0u.ipa RoR-ios-res0c.ipa RoR-ios-file0.ipa RoR-ios-liteu.ipa RoR-ios-binu.ipa RoR-ios-d0.ipa RoR-ios-zzz0.ipa RoR-ios-lproj0.ipa RoR-ios-flat0.ipa RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa RoR-ios-tinyres.ipa; do
+          for f in RoR-ios.ipa RoR-ios-lite.ipa RoR-ios-tiny.ipa RoR-ios-bin.ipa RoR-ios-res0.ipa RoR-ios-res0r.ipa; do
             if [ -f "$f" ]; then
               CHECK="${CHECK}$(printf '  %-22s %10d   sha256:%s' "$f" "$(wc -c < "$f" | tr -d ' ')" "$(shasum -a 256 "$f" | cut -d' ' -f1)")
           "

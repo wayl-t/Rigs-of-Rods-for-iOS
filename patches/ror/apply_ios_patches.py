@@ -442,6 +442,57 @@ def patch_appcontext(ror):
         "    // Review render window settings\n",
         "AppContext.cpp iOS screen size instead of video modes",
     )
+
+    # ---------------------------------------------------------------------
+    # The resource directory is called rorres, not resources
+    # ---------------------------------------------------------------------
+    # An iOS .app whose bundle contains a top-level directory *named*
+    # `resources` - or `Resources`, the check is case-insensitive - is refused
+    # by the installer with the generic "Unable to Install / Please try again
+    # later", while the very same directory under any other name (`zzz`,
+    # `Base.lproj`, `rorres`) installs and runs.  Measured on device, see
+    # PORT_FINDINGS.md section 7.22.
+    #
+    # What flips is codesign's resource rules: with such a directory present it
+    # switches to the macOS "resource envelope" set (rules=^Resources/, and a
+    # `^[^/]+$ -> nested` rule in rules2) which iOS will not install; with any
+    # other name it keeps the normal `^.*` set that iOS accepts.
+    #
+    # RoR hard-codes the name in exactly four places; everything else resolves
+    # through App::sys_resources_dir, so renaming here and in ContentManager.cpp
+    # is enough.  The packaging step puts the archives in RoR.app/rorres.
+    text = must_replace(
+        text,
+        '    std::string process_dir = PathCombine(App::sys_process_dir->getStr(), "resources");\n',
+        "    // Apple/iOS port: `resources` is a directory name the iOS installer\n"
+        "    // rejects outright, so the bundle ships its data in `rorres` instead.\n"
+        '    std::string process_dir = PathCombine(App::sys_process_dir->getStr(), "rorres");\n',
+        "AppContext.cpp resource directory name",
+    )
+    write(path, text)
+
+
+def patch_contentmanager(ror):
+    """ContentManager.cpp: three resource paths spell out `resources` themselves.
+
+    Every other resource path is built from App::sys_resources_dir, which
+    patch_appcontext() already points at `rorres`.  These three combine
+    sys_process_dir with their own literal, so they need the same rename - see
+    the note on the iOS installer's rejection of a `resources` directory in
+    patch_appcontext().
+    """
+    path = os.path.join(ror, "source", "main", "resources", "ContentManager.cpp")
+    text = read(path)
+    for var, name in (("objects", "beamobjects.zip"),
+                      ("dashboards", "dashboards.zip"),
+                      ("gadgets", "gadgets.zip")):
+        text = must_replace(
+            text,
+            '    std::string %s = PathCombine("resources", "%s");\n' % (var, name),
+            '    // Apple/iOS port: see the resource directory note in AppContext.cpp.\n'
+            '    std::string %s = PathCombine("rorres", "%s");\n' % (var, name),
+            "ContentManager.cpp resource directory name (%s)" % name,
+        )
     write(path, text)
 
 
@@ -1391,6 +1442,9 @@ def main():
     patch_errorutils(args.ror_dir)
     patch_platformutils(args.ror_dir)
     patch_appcontext(args.ror_dir)
+    # The resource directory is renamed to `rorres` (iOS refuses a bundle
+    # carrying a top-level `resources` directory) - see patch_appcontext().
+    patch_contentmanager(args.ror_dir)
     # Platform-specific headers/libs that simply do not exist with that
     # meaning on iOS.
     patch_soundmanager(args.ror_dir)
