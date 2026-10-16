@@ -546,6 +546,57 @@ def patch_appcontext(ror):
         "}\n",
         "AppContext.cpp iOS log mirror registration",
     )
+    # ---------------------------------------------------------------------
+    # Breadcrumbs inside SetUpConfigSkeleton()
+    # ---------------------------------------------------------------------
+    # This function is where RoR first uses a Zip archive: it adds
+    # <bundle>/rorres/skeleton.zip to resource group "SrcRG", copies every file
+    # out of it into the user directory and then drops both groups again.  A
+    # failure anywhere in here leaves the app dead before any other output, so
+    # each step gets its own line in the trace file.
+    text = must_replace(
+        text,
+        "    Ogre::String src_path = PathCombine(App::sys_resources_dir->getStr(), \"skeleton.zip\");\n",
+        "#ifdef ROR_PLATFORM_IOS\n"
+        '    RoR_IosStartupTick("SetUpConfigSkeleton: entering");\n'
+        "#endif\n"
+        "    Ogre::String src_path = PathCombine(App::sys_resources_dir->getStr(), \"skeleton.zip\");\n",
+        "AppContext.cpp SetUpConfigSkeleton entry breadcrumb",
+    )
+    text = must_replace(
+        text,
+        "    Ogre::ResourceGroupManager::getSingleton().addResourceLocation(src_path, \"Zip\", \"SrcRG\");\n",
+        "    Ogre::ResourceGroupManager::getSingleton().addResourceLocation(src_path, \"Zip\", \"SrcRG\");\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        '    RoR_IosStartupTick("SetUpConfigSkeleton: skeleton.zip opened as a Zip archive");\n'
+        "#endif\n",
+        "AppContext.cpp SetUpConfigSkeleton zip breadcrumb",
+    )
+    text = must_replace(
+        text,
+        "    Ogre::ResourceGroupManager::getSingleton().addResourceLocation(dst_path, \"FileSystem\", \"DstRG\", false, false);\n",
+        "    Ogre::ResourceGroupManager::getSingleton().addResourceLocation(dst_path, \"FileSystem\", \"DstRG\", false, false);\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        '    RoR_IosStartupTick("SetUpConfigSkeleton: user directory mounted as DstRG");\n'
+        "#endif\n",
+        "AppContext.cpp SetUpConfigSkeleton file system breadcrumb",
+    )
+    text = must_replace(
+        text,
+        "    Ogre::ResourceGroupManager::getSingleton().destroyResourceGroup(\"SrcRG\");\n"
+        "    Ogre::ResourceGroupManager::getSingleton().destroyResourceGroup(\"DstRG\");\n"
+        "\n"
+        "    return true;\n",
+        "    Ogre::ResourceGroupManager::getSingleton().destroyResourceGroup(\"SrcRG\");\n"
+        "    Ogre::ResourceGroupManager::getSingleton().destroyResourceGroup(\"DstRG\");\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        '    RoR_IosStartupTick("SetUpConfigSkeleton: finished");\n'
+        "#endif\n"
+        "\n"
+        "    return true;\n",
+        "AppContext.cpp SetUpConfigSkeleton exit breadcrumb",
+    )
+
     write(path, text)
 
 
@@ -927,12 +978,16 @@ IOS_PLATFORM_MM = r'''// Rigs of Rods - Apple/iOS platform layer implementation.
 #import <CoreFoundation/CFRunLoop.h>
 
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <csignal>
 #include <exception>
 #include <string>
+#include <dlfcn.h>
+#include <signal.h>
+#include <sys/ucontext.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -1038,12 +1093,68 @@ static const char* ror_signal_name(int sig)
     }
 }
 
-static void ror_signal_handler(int sig)
+// Address the Mach-O header of the main executable is mapped at, recorded once
+// in RoR_IosInstallCrashHandlers().  The faulting PC minus this value is an
+// address in the same space as the symbols of the .app binary, so the crash
+// line can be resolved without the device: `nm -n RoR.app/RoR` or
+// `atos -o RoR.app/RoR -l 0`.  A PC outside the executable (a frame inside
+// libsystem, for example) is obvious from the offset, and the caller is then
+// named by the LR, which is always inside our own code.
+static uintptr_t g_exe_base = 0;
+
+// snprintf into a caller-supplied buffer, appended with write(2): %llx does not
+// allocate, which keeps this usable from a signal handler.
+static void ror_trace_hex(const char* prefix, unsigned long long value,
+                          const char* suffix)
+{
+    char buf[160];
+    const int n = snprintf(buf, sizeof(buf), "%s0x%llx%s", prefix, value, suffix);
+    if (n > 0)
+    {
+        ror_trace_write(buf);
+    }
+}
+
+static void ror_signal_handler(int sig, siginfo_t* info, void* uap)
 {
     ror_trace_open();
     ror_trace_write("\n[crash] ");
     ror_trace_write(ror_signal_name(sig));
+
+    // si_addr is the address that could not be accessed: 0x0 means a null
+    // pointer dereference (something was never initialised), anything else is a
+    // wild pointer (something was freed, corrupted or cast wrongly).
+    if (info != nullptr)
+    {
+        ror_trace_hex(" addr=", (unsigned long long)(uintptr_t)info->si_addr, "");
+    }
+
+#if defined(__arm64__) || defined(__aarch64__)
+    if (uap != nullptr)
+    {
+        const ucontext_t* uc = (const ucontext_t*)uap;
+        const unsigned long long pc = (unsigned long long)(uintptr_t)uc->uc_mcontext->__ss.__pc;
+        const unsigned long long lr = (unsigned long long)(uintptr_t)uc->uc_mcontext->__ss.__lr;
+        const unsigned long long fp = (unsigned long long)(uintptr_t)uc->uc_mcontext->__ss.__fp;
+        if (g_exe_base != 0)
+        {
+            ror_trace_hex(" pc=0x", pc, "");
+            ror_trace_hex("(+0x", pc - (unsigned long long)g_exe_base, ")");
+            ror_trace_hex(" lr=0x", lr, "");
+            ror_trace_hex("(+0x", lr - (unsigned long long)g_exe_base, ")");
+            ror_trace_hex(" fp=0x", fp, "");
+        }
+        else
+        {
+            ror_trace_hex(" pc=0x", pc, "");
+            ror_trace_hex(" lr=0x", lr, "");
+        }
+    }
+#endif
     ror_trace_write("\n");
+
+    // Put the default action back and re-raise, so the process still dies with
+    // the real signal and the system writes its own crash report.
     signal(sig, SIG_DFL);
     raise(sig);
 }
@@ -1084,12 +1195,51 @@ static void ror_terminate_handler(void)
 void RoR_IosInstallCrashHandlers(void)
 {
     ror_trace_open();
-    ror_trace_write("\n[trace] ----- crash handlers installed -----\n");
-    signal(SIGABRT, ror_signal_handler);
-    signal(SIGSEGV, ror_signal_handler);
-    signal(SIGBUS,  ror_signal_handler);
-    signal(SIGILL,  ror_signal_handler);
-    signal(SIGFPE,  ror_signal_handler);
+
+    // Remember where the executable was loaded.  iOS always uses ASLR, so the
+    // absolute addresses change on every launch and mean nothing on their own;
+    // everything below is therefore also printed relative to this base.
+    // &g_exe_base is a data address in the main executable, which sidesteps the
+    // function-pointer cast dladdr would otherwise need.
+    Dl_info dl_info;
+    if (dladdr((const void*)&g_exe_base, &dl_info) != 0)
+    {
+        g_exe_base = (uintptr_t)dl_info.dli_fbase;
+    }
+    {
+        char buf[160];
+        const int n = snprintf(buf, sizeof(buf),
+            "\n[trace] ----- crash handlers installed (exe base 0x%llx) -----\n",
+            (unsigned long long)g_exe_base);
+        if (n > 0)
+        {
+            ror_trace_write(buf);
+        }
+    }
+
+    // Give the handlers a stack of their own: if the crash is a stack overflow
+    // the normal stack is unusable, and without an alternate stack the handler
+    // itself faults and the reason is lost.
+    static char s_altstack[64 * 1024];
+    stack_t ss;
+    memset(&ss, 0, sizeof(ss));
+    ss.ss_sp = s_altstack;
+    ss.ss_size = sizeof(s_altstack);
+    sigaltstack(&ss, nullptr);
+
+    // sigaction rather than signal(), because only the former hands si_addr and
+    // the register context to the handler.
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = ror_signal_handler;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGABRT, &sa, nullptr);
+    sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGBUS,  &sa, nullptr);
+    sigaction(SIGILL,  &sa, nullptr);
+    sigaction(SIGFPE,  &sa, nullptr);
+
     std::set_terminate(ror_terminate_handler);
 }
 
@@ -1299,8 +1449,18 @@ def patch_main_cpp(ror):
          "resource directory found and accepted"),
         ("        Ogre::TextureManager::getSingleton().setDefaultNumMipmaps(5);\n",
          "OGRE is up and the render window was created"),
-        ("        Ogre::OverlaySystem* overlay_system = new Ogre::OverlaySystem(); //Overlay init\n",
+        # These two used to share a single breadcrumb, which could not say which
+        # of them died.  SetUpConfigSkeleton() is the first place RoR touches a
+        # Zip archive (skeleton.zip) and the OverlaySystem constructor is the
+        # first place the Overlay component comes up; a failure in either looked
+        # identical in the trace file.
+        ("        if (!App::GetAppContext()->SetUpConfigSkeleton())\n"
+         "        {\n"
+         "            return -1; // Error already displayed\n"
+         "        }\n",
          "config skeleton deployed from skeleton.zip"),
+        ("        Ogre::OverlaySystem* overlay_system = new Ogre::OverlaySystem(); //Overlay init\n",
+         "overlay system constructed (OverlayManager + FontManager up)"),
         ("        App::GetContentManager()->AddResourcePack(ContentManager::ResourcePack::SCRIPTS);\n",
          "environment textures created; resource packs registered"),
         ("        App::GetConsole()->regBuiltinCommands(); // Call after localization had been set up\n",
