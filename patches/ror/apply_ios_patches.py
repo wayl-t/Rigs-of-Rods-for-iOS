@@ -187,6 +187,32 @@ def patch_errorutils(ror):
     text = read(path)
     text = must_replace(
         text,
+        '#include "ErrorUtils.h"\n'
+        '#include "Utils.h"\n',
+        '#include "ErrorUtils.h"\n'
+        '#include "Utils.h"\n'
+        "#ifdef ROR_PLATFORM_IOS\n"
+        '#   include "ios_platform.h"\n'
+        "#endif\n",
+        "ErrorUtils.cpp iOS include",
+    )
+    # On iOS ShowMsgBox() has no dialog at all and only printf()s, which lands
+    # in the device log where we cannot see it.  Everything that reports an
+    # error therefore also goes into the trace file.
+    text = must_replace(
+        text,
+        "int ErrorUtils::ShowMsgBox(const std::string& title, const std::string& err, int type)\n"
+        "{\n",
+        "int ErrorUtils::ShowMsgBox(const std::string& title, const std::string& err, int type)\n"
+        "{\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Apple/iOS port: see below - there is no dialog on iOS.\n"
+        '    RoR_IosTrace("[error] %s: %s", title.c_str(), err.c_str());\n'
+        "#endif\n",
+        "ErrorUtils.cpp iOS error trace",
+    )
+    text = must_replace(
+        text,
         "#elif OGRE_PLATFORM == OGRE_PLATFORM_APPLE\n#define _L\n",
         "#elif OGRE_PLATFORM == OGRE_PLATFORM_APPLE || OGRE_PLATFORM == OGRE_PLATFORM_APPLE_IOS\n"
         "#define _L\n",
@@ -468,6 +494,57 @@ def patch_appcontext(ror):
         "    // rejects outright, so the bundle ships its data in `rorres` instead.\n"
         '    std::string process_dir = PathCombine(App::sys_process_dir->getStr(), "rorres");\n',
         "AppContext.cpp resource directory name",
+    )
+
+    # ---------------------------------------------------------------------
+    # Mirror OGRE's log into the crash-proof trace file
+    # ---------------------------------------------------------------------
+    # SetUpLogging() already hands the new log to the console.  On iOS the same
+    # messages also go to Documents/ror-trace.log, which ios_platform.mm writes
+    # with write(2) one line at a time.  OGRE's own log file is buffered, so
+    # when the app dies during startup its last lines - the interesting ones -
+    # never reach the disk.  The trace file is what the crash handlers append
+    # their reason to as well, so everything lands in one place.
+    text = must_replace(
+        text,
+        "#include <ctime>\n"
+        "\n"
+        "using namespace RoR;\n",
+        "#include <ctime>\n"
+        "\n"
+        "using namespace RoR;\n"
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "// Apple/iOS port: mirrors every OGRE log message into the crash-proof\n"
+        "// trace file written by ios_platform.mm.\n"
+        "class IosMirrorLogListener : public Ogre::LogListener\n"
+        "{\n"
+        "public:\n"
+        "    void messageLogged(const Ogre::String& message, Ogre::LogMessageLevel lml,\n"
+        "        bool maskDebug, const Ogre::String& logName, bool& skipThisMessage) override\n"
+        "    {\n"
+        "        (void)lml;\n"
+        "        (void)maskDebug;\n"
+        "        (void)logName;\n"
+        "        (void)skipThisMessage;\n"
+        '        RoR_IosTrace("%s", message.c_str());\n'
+        "    }\n"
+        "};\n"
+        "#endif // ROR_PLATFORM_IOS\n",
+        "AppContext.cpp iOS log mirror listener",
+    )
+    text = must_replace(
+        text,
+        "    rorlog->addListener(App::GetConsole());  // Allow console to intercept log messages\n"
+        "}\n",
+        "    rorlog->addListener(App::GetConsole());  // Allow console to intercept log messages\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Apple/iOS port: also mirror into Documents/ror-trace.log, which is\n"
+        "    // flushed line by line and therefore survives a crash.\n"
+        "    rorlog->addListener(new IosMirrorLogListener());\n"
+        "#endif\n"
+        "}\n",
+        "AppContext.cpp iOS log mirror registration",
     )
     write(path, text)
 
@@ -818,6 +895,24 @@ void RoR_IosPumpRunLoop(void);
 // its UIWindow from.  RoR is landscape-only, so width is the long side.
 void RoR_IosGetScreenSize(int* width, int* height);
 
+// Appends one line to <the app container>/Documents/ror-trace.log and hands it
+// to write(2) straight away, so the file is complete even if the process dies
+// on the very next instruction.  OGRE's own log file is buffered, and a crash
+// during startup therefore loses its tail - exactly the lines that say what
+// went wrong.  The app container's Documents folder is visible in the Files
+// app, because Info.plist sets UIFileSharingEnabled.
+void RoR_IosTrace(const char* format, ...);
+
+// Installs the SIGABRT/SIGSEGV/SIGBUS/SIGILL/SIGFPE and std::terminate handlers
+// that append the reason to that same file.  Call it as early as possible.
+void RoR_IosInstallCrashHandlers(void);
+
+// Same as RoR_IosTrace(), and then runs the main run loop once.  Call this at
+// each startup milestone: it records how far startup got, and keeps iOS's "app
+// not responding" watchdog happy while the slow parts run, because RoR does not
+// return to the run loop until its own frame loop starts.
+void RoR_IosStartupTick(const char* format, ...);
+
 #ifdef __cplusplus
 }
 #endif
@@ -830,6 +925,173 @@ IOS_PLATFORM_MM = r'''// Rigs of Rods - Apple/iOS platform layer implementation.
 
 #import <UIKit/UIKit.h>
 #import <CoreFoundation/CFRunLoop.h>
+
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <csignal>
+#include <exception>
+#include <string>
+#include <fcntl.h>
+#include <unistd.h>
+
+// ---------------------------------------------------------------------------
+// Crash-proof tracing
+// ---------------------------------------------------------------------------
+// Everything here writes to a raw descriptor with write(2), which is the only
+// way to get a line onto the disk from inside a signal handler - and it is also
+// what makes the file complete when the process dies before stdio would have
+// flushed.
+static int g_trace_fd = -1;
+
+static void ror_trace_open(void)
+{
+    if (g_trace_fd >= 0)
+    {
+        return;
+    }
+    const char* home = getenv("HOME");
+    if (home == nullptr)
+    {
+        return;
+    }
+    const std::string path = std::string(home) + "/Documents/ror-trace.log";
+    g_trace_fd = open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+}
+
+static void ror_trace_write(const char* text)
+{
+    if (g_trace_fd < 0)
+    {
+        return;
+    }
+    const ssize_t len = (ssize_t)strlen(text);
+    ssize_t done = 0;
+    while (done < len)
+    {
+        const ssize_t written = write(g_trace_fd, text + done, (size_t)(len - done));
+        if (written <= 0)
+        {
+            break;
+        }
+        done += written;
+    }
+}
+
+static void ror_trace_v(const char* format, va_list args)
+{
+    ror_trace_open();
+    if (g_trace_fd < 0)
+    {
+        return;
+    }
+
+    va_list args_copy;
+    va_copy(args_copy, args);
+    const int needed = vsnprintf(nullptr, 0, format, args);
+    if (needed > 0)
+    {
+        std::string buffer((size_t)needed + 1, '\0');
+        vsnprintf(&buffer[0], buffer.size(), format, args_copy);
+        ror_trace_write("[trace] ");
+        ror_trace_write(buffer.c_str());
+        ror_trace_write("\n");
+    }
+    va_end(args_copy);
+}
+
+void RoR_IosTrace(const char* format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    ror_trace_v(format, args);
+    va_end(args);
+}
+
+void RoR_IosStartupTick(const char* format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    ror_trace_v(format, args);
+    va_end(args);
+
+    // Startup can take a while - OGRE brings up the GLES2 device, compiles the
+    // shaders and the resource groups are indexed - and RoR never returns to
+    // the run loop until the frame loop below.  iOS kills a process whose main
+    // thread stays out of the run loop for too long ("app not responding",
+    // 0x8badf00d).  Servicing it once per startup phase costs nothing and
+    // removes that whole class of failure.
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, /*returnAfterSourceHandled=*/false);
+}
+
+static const char* ror_signal_name(int sig)
+{
+    switch (sig)
+    {
+        case SIGABRT: return "SIGABRT - abort(), typically an uncaught C++ exception";
+        case SIGSEGV: return "SIGSEGV - invalid memory access";
+        case SIGBUS:  return "SIGBUS - bad or misaligned address";
+        case SIGILL:  return "SIGILL - illegal instruction";
+        case SIGFPE:  return "SIGFPE - arithmetic fault";
+        default:      return "unrecognised signal";
+    }
+}
+
+static void ror_signal_handler(int sig)
+{
+    ror_trace_open();
+    ror_trace_write("\n[crash] ");
+    ror_trace_write(ror_signal_name(sig));
+    ror_trace_write("\n");
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void ror_terminate_handler(void)
+{
+    ror_trace_open();
+    ror_trace_write("\n[crash] std::terminate() called");
+    // The exception is normally still in flight here, so a bare throw can be
+    // caught and its message recorded.
+    try
+    {
+        throw;
+    }
+    catch (const std::exception& e)
+    {
+        ror_trace_write(" - std::exception: ");
+        ror_trace_write(e.what());
+    }
+    catch (const std::string& s)
+    {
+        ror_trace_write(" - std::string: ");
+        ror_trace_write(s.c_str());
+    }
+    catch (const char* s)
+    {
+        ror_trace_write(" - const char*: ");
+        ror_trace_write(s);
+    }
+    catch (...)
+    {
+        ror_trace_write(" - exception of an unknown type");
+    }
+    ror_trace_write("\n");
+    abort();
+}
+
+void RoR_IosInstallCrashHandlers(void)
+{
+    ror_trace_open();
+    ror_trace_write("\n[trace] ----- crash handlers installed -----\n");
+    signal(SIGABRT, ror_signal_handler);
+    signal(SIGSEGV, ror_signal_handler);
+    signal(SIGBUS,  ror_signal_handler);
+    signal(SIGILL,  ror_signal_handler);
+    signal(SIGFPE,  ror_signal_handler);
+    std::set_terminate(ror_terminate_handler);
+}
 
 void RoR_IosPumpRunLoop(void)
 {
@@ -905,6 +1167,11 @@ int main(int argc, char* argv[])
 {
     @autoreleasepool
     {
+        // First thing in the process: from here on every line of RoR's startup
+        // is mirrored into Documents/ror-trace.log and any crash is recorded
+        // with its reason (see ios_platform.mm).
+        RoR_IosInstallCrashHandlers();
+
         g_argc = argc;
         g_argv = argv;
         return UIApplicationMain(argc, argv, nil, NSStringFromClass([RoRAppDelegate class]));
@@ -1002,9 +1269,73 @@ def patch_main_cpp(ror):
         "            // Apple/iOS port: messagePump() does nothing on iOS, so\n"
         "            // service UIKit here or there are no touches at all.\n"
         "            RoR_IosPumpRunLoop();\n"
+        "            // Breadcrumb, so the trace file shows the app is alive and\n"
+        "            // rendering rather than stuck somewhere with no output.\n"
+        "            static unsigned long s_ios_frames = 0;\n"
+        "            ++s_ios_frames;\n"
+        "            if (s_ios_frames == 1 || (s_ios_frames % 600) == 0)\n"
+        "            {\n"
+        '                RoR_IosTrace("frame %lu completed", s_ios_frames);\n'
+        "            }\n"
         "#endif\n",
         "main.cpp pump the iOS run loop each frame",
     )
+
+    # ---------------------------------------------------------------------
+    # Crash-proof startup breadcrumbs
+    # ---------------------------------------------------------------------
+    # One line per phase, written straight to Documents/ror-trace.log by
+    # ios_platform.mm.  OGRE's own log is buffered and loses its tail on a hard
+    # crash, which is the only part that matters when startup dies - the last
+    # breadcrumb in the trace file names the phase that killed it.
+    breadcrumbs = (
+        ("        App::GetAppContext()->SetUpThreads();\n",
+         "RoRMain entered; main thread recorded"),
+        ("        App::GetAppContext()->SetUpLogging();\n",
+         "program paths resolved; OGRE log created"),
+        ("        App::GetConsole()->processCommandLine(argc, argv);\n",
+         "RoR.cfg and command line processed"),
+        ("        CreateFolder(App::sys_config_dir->getStr());\n",
+         "resource directory found and accepted"),
+        ("        Ogre::TextureManager::getSingleton().setDefaultNumMipmaps(5);\n",
+         "OGRE is up and the render window was created"),
+        ("        Ogre::OverlaySystem* overlay_system = new Ogre::OverlaySystem(); //Overlay init\n",
+         "config skeleton deployed from skeleton.zip"),
+        ("        App::GetContentManager()->AddResourcePack(ContentManager::ResourcePack::SCRIPTS);\n",
+         "environment textures created; resource packs registered"),
+        ("        App::GetConsole()->regBuiltinCommands(); // Call after localization had been set up\n",
+         "localisation set up"),
+        ("        App::GetContentManager()->InitContentManager();\n",
+         "content manager initialised"),
+        ("        App::GetGfxScene()->GetEnvMap().SetupEnvMap(); // Needs camera\n",
+         "scene, camera and environment map ready"),
+        ("        App::CreateGuiManager(); // Needs scene manager\n",
+         "GUI manager created"),
+        ("        App::GetDiscordRpc()->Init();\n"
+         "\n"
+         "        App::GetAppContext()->SetUpInput();\n",
+         "Discord RPC done; input engine ready"),
+        ("        App::GetGuiManager()->SetUpMenuWallpaper();\n",
+         "AngelScript ready; menu wallpaper set"),
+        ("        App::app_state->setVal((int)AppState::MAIN_MENU);\n"
+         "        App::GetGuiManager()->MenuWallpaper->show();\n",
+         "entering the main menu state"),
+        ("        auto start_time = std::chrono::high_resolution_clock::now();\n",
+         "complete; entering the frame loop"),
+    )
+    for anchor, label in breadcrumbs:
+        found = text.count(anchor)
+        if found != 1:
+            raise SystemExit(
+                "ERROR: main.cpp breadcrumb anchor found %d times, expected 1: %r"
+                % (found, anchor))
+        text = text.replace(
+            anchor,
+            anchor
+            + "#ifdef ROR_PLATFORM_IOS\n"
+            + '        RoR_IosStartupTick("startup: %s");\n' % label
+            + "#endif\n",
+        )
     write(path, text)
 
 

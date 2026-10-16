@@ -737,6 +737,17 @@ jobs:
           The ad-hoc signature was never the problem: an unsigned variant with
           resources/ is refused just the same.
 
+          If the game installs but crashes right after launching:
+
+          It now writes Documents/ror-trace.log - one line per startup phase,
+          plus every OGRE log line and, if it dies, the reason (SIGSEGV, or the
+          uncaught exception's message).  That file is flushed line by line with
+          write(2), so it is complete even when the process is killed mid-line.
+          Open it on the phone: Files app -> On My iPhone -> Rigs of Rods ->
+          ror-trace.log.  The last lines are the interesting ones.  The same
+          folder holds RigsOfRods/logs/RoR.log, which OGRE writes - but that one
+          is buffered and loses its tail on a crash, so prefer ror-trace.log.
+
           Hand the file itself to ESIGN / Sideloadly / SideStore - it is served
           as a plain file, nothing to unpack.  An .ipa is a zip whose root
           contains Payload/."
