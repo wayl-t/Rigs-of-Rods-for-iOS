@@ -1954,6 +1954,100 @@ clear_if_changed(ZZip_PREFIX_PATH
 молча отключает функциональность**, если зависимость не найдена. Значит мало
 проверять «собралось», надо проверять, что нужная опция сборки включена.
 
+### 7.24. Zip заработал. Причина падения на старте — вьюпорт без камеры (баг OGRE)
+
+Первая же сборка с починенным Zip (`ror-zipfix.ipa`, коммит `78fa9ff`) прошла
+дальше, чем все предыдущие:
+
+```
+ 28: ArchiveFactory for archive type Zip registered.          <- появилась
+209: Added resource location '.../rorres/skeleton.zip' of type 'Zip' to resource group 'SrcRG'
+210: SetUpConfigSkeleton: skeleton.zip opened as a Zip archive
+220: SetUpConfigSkeleton: finished
+```
+
+`SetUpConfigSkeleton()` теперь отрабатывает целиком, то есть `skeleton.zip`
+действительно открывается как Zip. Падение уехало в другой код — и теперь у
+него есть символизируемый след (обработчик сигнала печатает `si_addr`, `PC`,
+`LR` и `FP`, все — смещениями от базы исполняемого файла):
+
+```
+[crash] SIGSEGV - invalid memory access addr=0x130 pc=0x…(+0x5bcc68) lr=0x…(+0x513514)
+```
+
+Оба запуска одного и того же бинарника падают по **одинаковым** смещениям,
+то есть это воспроизводимо, а не гонка. По таблице символов (`ror_sym.py`):
+
+| Регистр | Смещение | Символ |
+|---|---|---|
+| `PC` | `+0x5bcc68` | `Ogre::Frustum::setAspectRatio(float) + 0x0` |
+| `LR` | `+0x513514` | `-[EAGL2View layoutSubviews] + 0xb4` |
+| `si_addr` | `0x130` | `NULL + offsetof(Frustum, mAspectRatio)` |
+
+Читается однозначно: `-[EAGL2View layoutSubviews]` вызывает
+`setAspectRatio()` на **нулевом** указателе. `PC` попал ровно в первое
+инструкцию `setAspectRatio`, а адрес сбоя `0x130` — это «ноль плюс поле
+структуры»: значит вызов уже развёрнут компилятором (не виртуальный, иначе
+сбой был бы на загрузке vtable), а `this` равен `NULL`.
+
+Почему камера нулевая — это две штатные строчки самого RoR:
+
+```cpp
+source/main/AppContext.cpp:432
+    // Create viewport (without camera)
+    m_viewport = m_render_window->addViewport(/*camera=*/nullptr);
+```
+
+RoR **намеренно** создаёт вьюпорт без камеры (чтобы сразу задать чёрный фон) и
+прицепляет камеру сильно позже:
+
+```cpp
+source/main/gfx/camera/CameraManager.cpp:123
+    App::GetAppContext()->GetViewport()->setCamera(m_camera);
+```
+
+А OGRE 1.11.6 в `RenderSystems/GLES2/src/EAGL/OgreEAGL2View.mm` проверяет
+**количество** вьюпортов, но не саму камеру:
+
+```objc
+if(window->getNumViewports() > 0)
+{
+    Ogre::Viewport *viewPort = window->getViewport(0);
+    viewPort->getCamera()->setAspectRatio((Real) width / (Real) height);  // камеры нет
+}
+```
+
+`layoutSubviews` вызывает UIKit на первом же проходе run loop. RoR же качает
+run loop на каждой стартовой засечке (`CFRunLoopRunInMode` в
+`RoR_IosStartupTick`), поэтому вызов прилетает именно в тот промежуток, когда
+вьюпорт уже есть, а камеры ещё нет. Отсюда и «странность» из первой версии
+следа: в одном запуске последней засечкой была `SetUpConfigSkeleton: finished`,
+в другом — `OGRE is up…`; место сбоя одно и то же, различается лишь то, на
+каком проходе run loop UIKit решил разложить вид.
+
+Косвенное подтверждение: `windowMovedOrResized()` (строка выше) отработал
+успешно — он камеру не трогает. Значит защиты требует только `setAspectRatio`.
+
+**Исправление** — в workflow зависимостей, сразу после клона OGRE: точечная
+замена единственной строки на проверку камеры:
+
+```objc
+if(viewPort != NULL && viewPort->getCamera() != NULL)
+{
+    viewPort->getCamera()->setAspectRatio((Real) width / (Real) height);
+}
+```
+
+Заодно поправлен косметический дефект обработчика: `ror_trace_hex()` сам
+дописывает `0x`, а префиксы передавали его ещё раз, из-за чего в следе
+печаталось `pc=0x0x…`, `lr=0x0x…`, `(+0x0x…)`.
+
+Побочный вывод: это уже третий случай одной и той же породы (§7.22 —
+`resources`, §7.23 — `OgreZip.cpp`, §7.24 — камера). iOS-путь OGRE и упаковка
+бандла рассчитаны на «идеального» потребителя; RoR таким не является, и
+каждое такое допущение приходится либо подпирать патчем, либо проверять
+явно.
+
 ---
 
 ## Уточнённая карта порта
