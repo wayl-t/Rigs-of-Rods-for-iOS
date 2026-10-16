@@ -579,16 +579,17 @@ jobs:
             rm -rf H1Stage H2Stage
             mkdir -p H1Stage/Payload/RoR.app/resources H2Stage/Payload/RoR.app/resources
             if [ -d "$APP_DIR/resources" ]; then
-              python3 -c "
-import os
-d=os.environ['APP_DIR']+'/resources'
-items=sorted([x for x in os.listdir(d) if not x.startswith('.')])
-mid=len(items)//2
-open('/tmp/h1.list','w').write('
-'.join(items[:mid]))
-open('/tmp/h2.list','w').write('
-'.join(items[mid:]))
-"
+              python3 << 'PY'
+              import os
+              d = os.path.join(os.environ['APP_DIR'], 'resources')
+              items = sorted([x for x in os.listdir(d) if not x.startswith('.')])
+              mid = len(items)//2
+              with open('/tmp/h1.list','w') as f:
+                  f.write('\n'.join(items[:mid]))
+              with open('/tmp/h2.list','w') as f:
+                  f.write('\n'.join(items[mid:]))
+              PY
+
               [ -f /tmp/h1.list ] && while IFS= read -r f; do [ -n "$f" ] && cp -R "$APP_DIR/resources/$f" H1Stage/Payload/RoR.app/resources/ 2>/dev/null; done < /tmp/h1.list
               [ -f /tmp/h2.list ] && while IFS= read -r f; do [ -n "$f" ] && cp -R "$APP_DIR/resources/$f" H2Stage/Payload/RoR.app/resources/ 2>/dev/null; done < /tmp/h2.list
             fi
