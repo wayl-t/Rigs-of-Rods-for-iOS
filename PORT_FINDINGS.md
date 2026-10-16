@@ -1592,9 +1592,27 @@ SHA-256, версия CodeDirectory `0x20400`, `flags=0x2` (adhoc), пять б�
 - в оба вызова `codesign` добавлено `--identifier $BUNDLE_ID` — подпись теперь
   несёт тот же идентификатор, что plist, независимо от того, что сбивает
   определение бандла внутри codesign;
-- комментарий в `RoR.entitlements` сокращён (блоб вернётся к размеру заглушки);
-- в лог добавлена диагностика: та же подпись на копиях с plist в XML, в бинаре
-  и с `--identifier` — она покажет, что именно сбивало codesign;
+- комментарий в `RoR.entitlements` сокращён: блоб XML-entitlements стал 919
+  байт против 1474 и против 372 у заглушки. Остаток — всё ещё текст
+  комментария, на подпись он не влияет, но длиннее заглушечного без пользы;
+- в лог добавлена диагностика: та же подпись на копиях бандла с plist в XML, в
+  бинаре и с `--identifier`. Результат (запуск `38826822306`):
+
+  ```
+  plist says: org.rigsofrods.ror-ios
+  xml    -> Identifier=org.rigsofrods.ror-ios
+  bin    -> Identifier=org.rigsofrods.ror-ios
+  forced -> Identifier=org.rigsofrods.ror-ios
+  ```
+
+  То есть на **урезанном** бандле (только бинарник, `Info.plist`, `PkgInfo`)
+  codesign определяет bundle id правильно в любом из трёх вариантов. Значит,
+  прежнее `RoR-<LC_UUID>` вызывал не формат plist и не отсутствие
+  `--identifier`, а что-то в полном бандле — в нём были ещё `resources/` и
+  `_CodeSignature/`. Причину это не снимает, но `--identifier` делает
+  результат детерминированным и совпадающим с заглушкой независимо от неё.
+  Проверено на выпущенном файле: `CodeDirectory identifier:
+  org.rigsofrods.ror-ios` у всех трёх `.ipa`;
 - добавлен третий, диагностический `.ipa` — `RoR-ios-tiny.ipa`: тот же
   `Info.plist`, тот же `PkgInfo`, тот же вызов `codesign` и та же сборка
   `Payload/` + zip, но исполняемый файл ~50 КБ вместо 18 МБ.
