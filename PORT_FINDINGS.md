@@ -2151,6 +2151,95 @@ OpenGL ES 2.0, где `#version 300 es` вообще не компилирует
 
 ---
 
+### 7.26. Краш на первом кадре ImGui: `kb->isKeyDown()` по нулевому OIS-клавиатуровому указателю
+
+После починки MyGUI (§7.25) приложение впервые дошло до главного меню:
+
+```
+[trace] startup: GUI manager created
+[trace] *** Loading OIS ***
+[trace] [RoR|Startup|Input] iOS: using OIS's iPhone multitouch backend
+[trace] [RoR|Startup|Input] iOS: multitouch device ready
+[trace] startup: AngelScript ready; menu wallpaper set
+[trace] startup: entering the main menu state
+[crash] SIGSEGV - invalid memory access addr=0x0 pc=...(+0xfe65c) lr=...(+0xfe658)
+```
+
+Пользователь видел **чёрный экран и почти мгновенный краш** — и это ровно то,
+что показывает лог: оболочка уже есть, но ни один кадр ещё не нарисован (цикл
+кадров не запускался), а первая же попытка отрисовать кадр убивает процесс.
+
+Строка `startup: complete; entering the frame loop` в логе отсутствует, то есть
+падение происходит **до** цикла. Между breadcrumb'ом и крашем в `main.cpp` стоит
+ровно один вызов:
+
+```cpp
+// Hack to properly init DearIMGUI integration - force rendering image
+App::GetGuiManager()->LoadingWindow.SetProgress(100, "Hack", /*renderFrame=*/true);
+```
+
+`SetProgress(..., renderFrame=true)` → `NewImGuiFrame()`:
+
+```cpp
+void GUIManager::NewImGuiFrame(float dt)
+{
+    ImGuiIO& io = ImGui::GetIO();
+    OIS::Keyboard* kb = App::GetInputEngine()->GetOisKeyboard();
+    io.KeyCtrl  = kb->isKeyDown(OIS::KC_LCONTROL);   // kb == nullptr на iOS
+```
+
+**Смещение указывает ровно туда.** Обработчик сигнала печатает адреса смещениями
+от базы бинарника, `ror_sym.py` их резолвит:
+
+```
+0xfe65c -> RoR::GUIManager::NewImGuiFrame(float), func_off=0x1000fe62c,
+           off_in_sym=0x30, sym_size=0xa8
+```
+
+Краш воспроизводим дважды подряд на **одинаковом** смещении, значит не гонка.
+`addr=0x0` (не `0x8` и не `0x1d`) — это загрузка виртуальной таблицы через
+`this == nullptr`: `isKeyDown` — чисто виртуальный метод в `OIS::Keyboard`, так
+что `kb->isKeyDown(...)` компилируется в `ldr x9, [x0]` с `x0 == 0`. `lr ==
+pc-4` как раз и означает, что предыдущей командой был `bl` (возврат из
+`GetInputEngine()`), а сразу после — разыменование.
+
+**Почему указатель нулевой.** Это *наш собственный дизайн*, задокументированный
+в `patch_inputengine_header`: бэкенд OIS для iPhone отдаёт только джойстик
+(акселерометр) и мультитач-устройство — клавиатуры и мыши там физически нет,
+`createInputObject(OISKeyboard)` бросает исключение, и `mKeyboard` остаётся
+`nullptr`.
+
+Практически вся остальная часть ввода на это уже была закрыта `patch_inputengine`:
+
+| место | защита |
+|---|---|
+| `Capture()` | `if (mMultiTouch) mMultiTouch->capture();` |
+| `windowResized()` | своя копия `mouseState` (вызывается из конструктора!) |
+| `SetKeyboardListener()` / `SetMouseListener()` | слушатель запоминается в члене |
+| `getMouseNormalizedScreenPos()` | своя копия `mouseState` |
+| `InputEngine::isKeyDown()` | `if (!mKeyboard) return false;` |
+
+Пропущен **единственный** вызывающий, который берёт голый `OIS::Keyboard*` мимо
+`InputEngine` — `GUIManager::NewImGuiFrame`. Он и оказался первым, кто им
+воспользовался, потому что ImGui-кадр запрашивается впервые именно здесь:
+во время старта `LoadingWindow::SetProgress()` вообще не вызывается (в логе нет
+ни одной строки `[RoR|PleaseWaitUI]`).
+
+**Исправление** — `patch_gui_manager()` в `patches/ror/apply_ios_patches.py`:
+три флага модификаторов читаются только если указатель ненулевой, иначе
+остаются `false` — клавиатуры нет, модификаторов нет. Никакого `#ifdef`: проверка
+бесплатна и одинакова для всех платформ. Якорь сверяется `valanchors.py` с
+чистым upstream (учитывая, что комментарий в оригинале имеет пять пробелов).
+
+**Вывод по процессу.** Пятый баг подряд одной породы, и опять он виден только на
+устройстве. Здесь CI не помочь — это не содержимое бандла, а нулевой указатель в
+рантайме. Что реально сократило итерацию: обработчик сигнала печатал `si_addr`,
+`pc`, `lr` и `fp` смещениями от базы, а бинарник не стрипается — то есть по
+одной строке из лога сразу понятно, в какой функции и на каком сдвиге упало.
+Этот механизм окупился дважды (§7.24 и §7.26).
+
+---
+
 ## Уточнённая карта порта
 
 | Компонент | Судьба | Состояние |

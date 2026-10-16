@@ -2106,6 +2106,69 @@ void main()
 """
 
 
+def patch_gui_manager(ror):
+    """GUIManager.cpp: do not read modifiers off a keyboard that is not there.
+
+    ``NewImGuiFrame`` is the one place in the port that reaches straight for
+    ``OIS::Keyboard*`` instead of going through ``InputEngine``, and on iOS
+    that pointer is deliberately null: OIS's iPhone backend hands out a
+    joystick and a multitouch device, nothing else (see
+    ``patch_inputengine_header``).  ``isKeyDown`` is pure virtual in
+    ``OIS::Keyboard``, so calling it through null is a vtable load from
+    address 0.
+
+    This is not a corner case.  main() asks for its very first ImGui frame
+    immediately after the ``startup: entering the main menu state``
+    breadcrumb, via the LoadingWindow "hack to properly init DearIMGUI"
+    call, so the app died with
+
+        [crash] SIGSEGV - invalid memory access addr=0x0
+                pc=...(+0xfe65c) lr=...(+0xfe658)
+        -> RoR::GUIManager::NewImGuiFrame(float) +0x30
+
+    before the frame loop ever started - twice, at the same offset, on
+    every launch.  Everything else in the input path was already guarded in
+    patch_inputengine; this one was outside InputEngine and missed.
+
+    Without a keyboard there are simply no modifier keys to report, so the
+    three flags stay false.  It is written as an unguarded null check rather
+    than an iOS ``#ifdef`` because the check is free either way and keeps the
+    function identical across platforms.
+    """
+    path = os.path.join(ror, "source", "main", "gui", "GUIManager.cpp")
+    text = read(path)
+
+    # NB: upstream indents that comment with five spaces.  Keep it byte-exact.
+    text = must_replace(
+        text,
+        "    ImGuiIO& io = ImGui::GetIO();\n"
+        "    OIS::Keyboard* kb = App::GetInputEngine()->GetOisKeyboard();\n"
+        "\n"
+        "     // Read keyboard modifiers inputs\n"
+        "    io.KeyCtrl = kb->isKeyDown(OIS::KC_LCONTROL);\n"
+        "    io.KeyShift = kb->isKeyDown(OIS::KC_LSHIFT);\n"
+        "    io.KeyAlt = kb->isKeyDown(OIS::KC_LMENU);\n"
+        "    io.KeySuper = false;\n",
+        "    ImGuiIO& io = ImGui::GetIO();\n"
+        "    OIS::Keyboard* kb = App::GetInputEngine()->GetOisKeyboard();\n"
+        "\n"
+        "    // Read keyboard modifiers inputs\n"
+        "    // Apple/iOS port: OIS's iPhone backend has no keyboard at all, so\n"
+        "    // kb is null there (patch_inputengine).  isKeyDown is pure virtual\n"
+        "    // in OIS::Keyboard, so calling it through null is a vtable load\n"
+        "    // from address 0 - and main() asks for the first ImGui frame right\n"
+        "    // after entering the main menu, which took the process down before\n"
+        "    // the frame loop started.  No keyboard, no modifier keys: false.\n"
+        "    io.KeyCtrl = (kb != nullptr) && kb->isKeyDown(OIS::KC_LCONTROL);\n"
+        "    io.KeyShift = (kb != nullptr) && kb->isKeyDown(OIS::KC_LSHIFT);\n"
+        "    io.KeyAlt = (kb != nullptr) && kb->isKeyDown(OIS::KC_LMENU);\n"
+        "    io.KeySuper = false;\n",
+        "GUIManager.cpp NewImGuiFrame null keyboard guard",
+    )
+
+    write(path, text)
+
+
 def patch_mygui_resources(ror):
     """Add the resources the GUI would otherwise fail to find.
 
@@ -2177,6 +2240,10 @@ def main():
     patch_game_settings_alc(args.ror_dir)
     patch_inputengine_header(args.ror_dir)
     patch_inputengine(args.ror_dir)
+    # NewImGuiFrame is not part of InputEngine and reads the OIS keyboard
+    # directly - the one such caller, and the first thing to dereference the
+    # null keyboard after the main menu comes up.
+    patch_gui_manager(args.ror_dir)
     # The runtime platform layer: the new iOS files themselves plus the two
     # entry-point/frame-loop changes in main.cpp that hand the process over to
     # UIKit.
