@@ -579,22 +579,11 @@ jobs:
             rm -rf H1Stage H2Stage
             mkdir -p H1Stage/Payload/RoR.app/resources H2Stage/Payload/RoR.app/resources
             if [ -d "$APP_DIR/resources" ]; then
-              python3 << 'PY'
-              import os
-              d = os.path.join(os.environ['APP_DIR'], 'resources')
-              items = sorted([x for x in os.listdir(d) if not x.startswith('.')])
-              mid = len(items)//2
-              with open('/tmp/h1.list','w') as f:
-                  f.write('\n'.join(items[:mid]))
-              with open('/tmp/h2.list','w') as f:
-                  f.write('\n'.join(items[mid:]))
-              PY
+              python3 -c "import os;d=os.path.join(os.environ['APP_DIR'],'resources');items=sorted([x for x in os.listdir(d) if not x.startswith('.')]);mid=len(items)//2;open('/tmp/h1.list','w').write(chr(10).join(items[:mid]));open('/tmp/h2.list','w').write(chr(10).join(items[mid:]));print('split',len(items))"
 
               [ -f /tmp/h1.list ] && while IFS= read -r f; do [ -n "$f" ] && cp -R "$APP_DIR/resources/$f" H1Stage/Payload/RoR.app/resources/ 2>/dev/null; done < /tmp/h1.list
               [ -f /tmp/h2.list ] && while IFS= read -r f; do [ -n "$f" ] && cp -R "$APP_DIR/resources/$f" H2Stage/Payload/RoR.app/resources/ 2>/dev/null; done < /tmp/h2.list
             fi
-            [ -e "$APP_DIR/resources/managed_materials" ] && cp -R "$APP_DIR/resources/managed_materials" H1Stage/Payload/RoR.app/resources/ 2>/dev/null
-            [ -e "$APP_DIR/resources/managed_materials" ] && cp -R "$APP_DIR/resources/managed_materials" H2Stage/Payload/RoR.app/resources/ 2>/dev/null
             for s in H1Stage H2Stage; do
               cp "$APP_DIR/RoR" "$s/Payload/RoR.app/RoR"
               cp "$APP_DIR/Info.plist" "$s/Payload/RoR.app/Info.plist"
@@ -604,8 +593,6 @@ jobs:
             (cd H1Stage && zip -qry ../RoR-ios-lite-h1.ipa Payload)
             (cd H2Stage && zip -qry ../RoR-ios-lite-h2.ipa Payload)
             ls -la RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa
-          fi
-
           fi
 
       - name: Summary
@@ -667,6 +654,8 @@ jobs:
             RoR-ios-lite.ipa
             RoR-ios-tiny.ipa
             RoR-ios-bin.ipa
+            RoR-ios-lite-h1.ipa
+            RoR-ios-lite-h2.ipa
           retention-days: 30
           if-no-files-found: warn
 
@@ -698,6 +687,10 @@ jobs:
           * RoR-ios-bin.ipa  - diagnostic (only on 'diag' tag). Real RoR binary,
                                no resources/. Tests whether the binary itself blocks
                                installation.
+          * RoR-ios-lite-h1.ipa / RoR-ios-lite-h2.ipa - diagnostic (only on 'diag'
+                               tag). The real binary plus one half each of the lite
+                               resource set. Whichever half fails to install holds the
+                               resource that breaks ESIGN; split that half again.
 
           Hand the file itself to ESIGN / Sideloadly / SideStore - it is served
           as a plain file, nothing to unpack.  An .ipa is a zip whose root
@@ -711,7 +704,7 @@ jobs:
           # Drop every asset we are not about to upload.
           ALLOWED="RoR-ios.ipa|RoR-ios-lite.ipa|RoR-ios-tiny.ipa"
           if [ "$TAG" = "diag" ]; then
-            ALLOWED="RoR-ios.ipa|RoR-ios-lite.ipa|RoR-ios-tiny.ipa|RoR-ios-bin.ipa"
+            ALLOWED="RoR-ios.ipa|RoR-ios-lite.ipa|RoR-ios-tiny.ipa|RoR-ios-bin.ipa|RoR-ios-lite-h1.ipa|RoR-ios-lite-h2.ipa"
           fi
           for a in $(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
                        --json assets --jq '.assets[].name'); do
@@ -728,8 +721,10 @@ jobs:
               gh release upload "$TAG" "$f" --clobber --repo "$GITHUB_REPOSITORY"
             fi
           done
-          if [ "$TAG" = "diag" ] && [ -f RoR-ios-bin.ipa ]; then
-            gh release upload "$TAG" RoR-ios-bin.ipa --clobber --repo "$GITHUB_REPOSITORY"
+          if [ "$TAG" = "diag" ]; then
+            for f in RoR-ios-bin.ipa RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa; do
+              [ -f "$f" ] && gh release upload "$TAG" "$f" --clobber --repo "$GITHUB_REPOSITORY"
+            done
           fi
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
             --title "$TITLE" --notes "$NOTES"
