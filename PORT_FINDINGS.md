@@ -1846,6 +1846,114 @@ tiny одинаков (platform=2, minos 13.0.0), проверено через 
 `rorres/rotest.txt` — тот же файл, каталог переименован) должен ставиться, а затем
 ставить настоящий `RoR-ios-lite.ipa` (ресурсы уже в `rorres/`) и запускать игру.
 
+### 7.23. Zip-архивы: `skeleton.zip` не открывался, потому что OGRE собрался без `OgreZip.cpp`
+
+Первая сборка, дошедшая до запуска на телефоне, упала сразу после
+`startup: OGRE is up and the render window was created`. В трассе нет ни строки
+`Added resource location ... of type 'Zip'`, зато есть
+
+```
+ 27: [trace] ArchiveFactory for archive type FileSystem registered.
+```
+
+и **нет** строки `ArchiveFactory for archive type Zip registered.` — то есть
+фабрики Zip-архивов в приложении не было вовсе.
+
+Причина — в самом OGRE (`Ogre/CMakeLists.txt:375`):
+
+```cmake
+cmake_dependent_option(OGRE_CONFIG_ENABLE_ZIP, TRUE, "ZZip_FOUND", FALSE)
+```
+
+Вся поддержка zip (`OgreMain/src/OgreZip.cpp`, `ZipArchiveFactory`) подключается
+**только если найден zziplib**. Не нашли — опция молча превращается в `FALSE`,
+файл не компилируется, а в `OgreBuildSettings.h` попадает
+
+```c
+#define OGRE_NO_ZIP_ARCHIVE 1
+```
+
+RoR же читает из zip ровно то, без чего не стартует: `skeleton.zip` (базовые
+конфиги) и далее `meshes.zip`, `textures.zip` и прочие архивы ресурсов. Поэтому
+приложение и падало.
+
+Проверка на выпущенном бинарнике (`Payload/RoR.app/RoR`):
+
+| Строка | Вхождений |
+|---|---|
+| `ZipArchiveFactory` | 0 |
+| `zzip_dir_open_ext_io` | 0 |
+| `Modification of zipped archives is not supported` | 0 |
+| `FileSystemArchiveFactory` | 11 |
+| `Cannot find an archive factory` | 1 |
+
+#### Первая попытка (не сработала): подсказать `FindZZip` значениями кэша
+
+Собрали zziplib сами и передали OGRE `-DCMAKE_PREFIX_PATH`, `-DZZIP_HOME`,
+`-DZZip_INCLUDE_DIR`, `-DZZip_LIBRARY_REL`. Прогон `38860350005` показал, что
+zziplib собрался и установился (`libzzip-0.a` → `lib/libzzip.a`,
+`include/zzip/*.h`), но OGRE всё равно написал в `ogre-configure.log`:
+
+```
+-- Looking for ZZip...
+-- ZZip_PREFIX_PATH changed.
+-- Checking for module 'zziplib'
+--   Package 'zziplib' not found
+-- Could not locate ZZip
+```
+
+Причина — в штатном `OGRE/CMake/Packages/FindZZip.cmake`:
+
+```cmake
+clear_if_changed(ZZip_PREFIX_PATH
+    ZZip_INCLUDE_DIR
+    ZZip_LIBRARY_REL
+    ...)
+```
+
+`clear_if_changed` сравнивает текущее `ZZip_PREFIX_PATH` с сохранённым в кэше
+`ZZip_PREFIX_PATH_LAST`. В свежем каталоге сборки сохранённого значения нет,
+поэтому **первый же** `configure` считает переменную изменившейся и стирает
+подсунутые `-DZZip_*`. Дальше `find_path`/`find_library` ищут только внутри
+путей кросс-компиляции и `$IOS_PREFIX` не видят.
+
+#### Что сработало: подменить `FindZZip.cmake`
+
+Правильный ответ — не подсказывать значения, а **заменить модуль поиска**: новый
+шаг workflow `Pin FindZZip to the zziplib in the SDK prefix` пишет
+`ogre/CMake/Packages/FindZZip.cmake` с тем, что OGRE реально читает
+(`ZZip_FOUND`, `ZZip_INCLUDE_DIRS`, `ZZip_LIBRARIES`), и предварительно
+проверяет, что `libzzip.a` и `include/zzip/zzip.h` на месте. Флаги
+`-DCMAKE_PREFIX_PATH` / `-DZZIP_HOME` / `-DZZip_*` из конфигурации OGRE убраны:
+они не только бесполезны, но и маскируют проблему.
+
+`include(CMake/Dependencies.cmake)` вызывается в `Ogre/CMakeLists.txt:301`, то
+есть **до** строки 375, поэтому `ZZip_FOUND TRUE` из подменённого модуля доводит
+`OGRE_CONFIG_ENABLE_ZIP` до `TRUE` и `OgreZip.cpp` попадает в сборку.
+
+#### Проверка
+
+Прогон `38860975606` — все шаги OGRE зелёные, включая
+`Assert OGRE has Zip archive support (OGRE_NO_ZIP_ARCHIVE 0)`. В скачанном
+`ios-sdk` (126 776 413 байт):
+
+| Проверка | Результат |
+|---|---|
+| `include/OGRE/OgreBuildSettings.h` → `#define OGRE_NO_ZIP_ARCHIVE 0` | есть |
+| `include/zzip/zzip.h` | есть |
+| `lib/libzzip.a` (и `libzzip-0.a`) | есть |
+| `libOgreMainStatic.a` → `ZipArchiveFactory` | 52 |
+| `libOgreMainStatic.a` → `Modification of zipped archives is not supported` | 1 |
+| `CMake/OgreTargets.cmake` → `INTERFACE_LINK_LIBRARIES` у `OgreMain` | `.../ios-sdk/lib/libzzip.a;$<LINK_ONLY:ZLIB::ZLIB>` |
+
+Последняя строка важна: RoR линкуется с **импортированной** целью `OgreMain`,
+поэтому путь к `libzzip.a` доезжает до линковки сам, а workflow затем
+переписывает абсолютные пути сборочной машины (`sed` по `*.cmake`).
+
+Побочный вывод: это ошибка того же класса, что и `resources` в §7.22 — **OGRE
+молча отключает функциональность**, если зависимость не найдена. Значит мало
+проверять «собралось», надо проверять, что нужная опция сборки включена.
+
 ---
 
 ## Уточнённая карта порта
@@ -1864,23 +1972,5 @@ tiny одинаков (platform=2, minos 13.0.0), проверено через 
 | Парсеры форматов | чистый C++, должны собраться как есть | **компилируется** |
 | `main.cpp`, `PlatformUtils` | заменить платформенной обвязкой iOS | готово (§7.12) |
 | Контент | упаковать в контейнер приложения | шаг готов (§7.13) |
-
-Это **порт**, а не переписывание — то есть именно то, что было нужно.
-
----
-
-## Уточнённая карта порта
-
-| Компонент | Судьба |
-|---|---|
-| Отрисовка (OGRE 1.11.6) | оставить, включить штатный iOS-путь GLES2/EAGL |
-| OIS (ввод) | собрать самим с iPhone-бэкендом; события касаний → события RoR |
-| MyGUI (интерфейс) | оставить, подать в него события касаний |
-| PagedGeometry | собираем сами (сборочная система не для iOS), ставим в префикс |
-| Caelum | отключаем (`#ifdef USE_CAELUM`), небо рисуем средствами OGRE |
-| Физика | чистый C++, должна собраться как есть |
-| Парсеры форматов | чистый C++, должны собраться как есть |
-| `main.cpp`, `PlatformUtils` | заменить платформенной обвязкой iOS |
-| Контент | упаковать в контейнер приложения |
 
 Это **порт**, а не переписывание — то есть именно то, что было нужно.
