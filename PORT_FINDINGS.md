@@ -2240,6 +2240,108 @@ pc-4` как раз и означает, что предыдущей коман�
 
 ---
 
+### 7.27. GLES2 не имеет фиксированного конвейера, а 240 из 273 материалов RoR написаны без шейдеров
+
+Гард клавиатуры (§7.26) отработал: краша нет, и впервые дошли до **реальной
+отрисовки**. Более того, шейдеры MyGUI из §7.25 компилируются именно так, как
+задумано:
+
+```
+[trace] Vertex Program:MyGUI_VP.glsles Fragment Program:MyGUI_FP.glsles
+[trace] GLSL compiling: MyGUI_VP.glsles
+```
+
+(предупреждения про «no matching vertex attributes» для `blendWeights`/`uv*` —
+безобидные: OGRE пытается привязать стандартные атрибуты, которых у шейдера
+MyGUI нет). То есть исправление §7.25 подтверждено от начала до конца.
+
+Дальше первый же настоящий кадр упёрся в потолок всей графики:
+
+```
+[fatal] RoRMain caught an Ogre::Exception and is returning:
+[trace] InvalidStateException: RenderSystem does not support FixedFunction, but technique
+        of 'rigsofrods/WallpaperMat' has no Vertex Shader. Use the RTSS or write custom shaders.
+        in SceneManager::_setPass at OgreSceneManager.cpp (line 913)
+```
+
+Опять чёрный экран без краша: `RoRMain` ловит исключение и возвращает 0.
+
+**Почему это не локальная проблема.** Я выгрузил чистое апстримное дерево на
+закреплённом SHA и посчитал материалы, у которых нет ни одного
+`vertex_program_ref`: **240 из 273**. Это весь `OgreCore.material` (шрифты
+`Core/OgreText`, панели оверлеев, профайлер), почти весь `ror.material`
+(приборные панели, стрелки, маячки, колёса, флейры, вода), paged-трава и
+деревья, все частицы, caelum, cubemaps, `managed/mesh_standard/*` и прочее.
+Рукописные шейдеры для такого количества — не вариант, а модный контент
+привозит материалы, которые мы вообще не можем патчить.
+
+**Решение — RTShader System, как и советует сам текст ошибки.** RTSS читает
+фиксированное описание материала (текстурные юниты, блендинг, alpha rejection,
+туман) и на лету строит из него настоящие GLSL ES-программы.
+
+Что пришлось выяснить, прежде чем трогать это (всё это в OGRE 1.11.6):
+
+| Факт | Источник |
+|---|---|
+| В OGRE 1.11.6 есть **GLSL ES writer** — `OgreShaderGLSLESProgramWriter.cpp`, пишет `#version <native>` | репозиторий OGRE |
+| Библиотеку функций он берёт из **`.glsl`** (`cacheDependencyFunctions` → `libName + ".glsl"`), а не `.glsles` | тот же файл |
+| RoR уже пакует эти файлы: `resources/rtshader` → группа `RtShaderRG`, и имена функций совпадают с теми, что генератор порождает (`FFP_Transform`, `FFP_SampleTexture`, `FFP_Modulate`…) | локальное дерево |
+| `OgreRTShaderSystem` уже собран и линкуется (`find_package(OGRE COMPONENTS … RTShaderSystem)`) | `cmake/DependenciesConfig.cmake` |
+| RTSS **сам** произвольные материалы не конвертирует — только через `createShaderBasedTechnique()` или блок `rtshader_system` в скрипте | `OgreShaderGenerator.cpp` |
+| `Ogre::OverlaySystem` (1.11) **не владеет** SceneManager — оверлеи рисует тот менеджер, на который он подписан как RenderQueueListener | `OgreOverlaySystem.h` |
+
+**Ключевое свойство, на котором построен весь риск-менеджмент.**
+`Material::getBestTechnique()` (OgreMaterial.cpp:357): если у материала нет
+техники в активной схеме, OGRE сначала спрашивает слушателя
+`MaterialManager::Listener::handleSchemeNotFound`, и **если тот вернул NULL —
+откатывается на технику по умолчанию**. То есть переключение активной схемы на
+`NGOS` физически не может сломать материалы, у которых шейдеры уже есть (MyGUI,
+ImGui, шейдеры машин, ландшафт, небо): `createShaderBasedTechnique()` для
+программируемого исходника возвращает `false`, мы возвращаем `nullptr`, и OGRE
+рисует материал как прежде. Конвертируются **только** материалы без шейдеров.
+
+Ещё два порядковых ограничения, которые надо соблюсти, иначе ничего не
+заработает молча:
+
+1. RTSS должен быть инициализирован **после** создания RenderSystem, но
+   **до** инициализации групп ресурсов (он подписывается на их события) и
+   **до** создания viewport — viewport при создании копирует активную схему
+   материала, и если там окажется `General`, RTSS никогда не провалидирует
+   свою схему. У нас вставка стоит сразу после `Root::initialise()`, а окно и
+   viewport создаются в конце `SetUpRendering()`.
+2. Каждый SceneManager надо отдельно зарегистрировать
+   (`addSceneManager`), иначе для него нет ни валидации схемы, ни построения
+   шейдеров. В RoR SceneManager один — `GfxScene::Init()`, и он же рисует
+   оверлеи (main.cpp подписывает на него `OverlaySystem`), так что хватает
+   одной точки.
+
+**Что сделано** — `patch_rtshader()` в `apply_ios_patches.py`:
+
+* `AppContext.cpp` — класс `IosFixedFunctionMaterialListener` (только для схемы
+  `NGOS`, с защитой от повторного входа, потому что построение техники может
+  снова спросить о материале) и включение RTSS сразу после
+  `Root::initialise()`;
+* `ios_platform.h` — объявление `RoR::Ios::RtssRegisterSceneManager`;
+* `GfxScene.cpp` — регистрация SceneManager.
+
+Построение техники принудительно запускается сразу
+(`invalidateMaterial` + `validateScheme`): `preFindVisibleObjects` для этого
+кадра уже прошёл, и без принуждения первый кадр отрисовался бы пустым.
+Каждая конвертация пишется в лог устройства —
+`[rtss] generating shaders for fixed-function material '...'`, — так что по
+trace видно, что именно и сколько было построено.
+
+`verify_ipa.py` теперь дополнительно требует в бинарнике строки
+`RTShader System up, active material scheme` и в `rorres/rtshader.zip` — сам
+`FFPLib_Transform.glsl`: без библиотеки генератор падает в момент генерации,
+а не при сборке.
+
+Ожидаем в trace: `[rtss] RTShader System up, active material scheme 'NGOS'`,
+затем до двухсот с лишним строк `generating shaders…`, и главное — **отрисованные
+обои главного меню**.
+
+---
+
 ## Уточнённая карта порта
 
 | Компонент | Судьба | Состояние |

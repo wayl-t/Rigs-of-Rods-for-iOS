@@ -18,6 +18,13 @@ the fact that the build was green:
     onto a black screen without crashing.  Desktop never sees it: there OGRE
     reports RSC_FIXED_FUNCTION and the shader path is skipped.
 
+  * the executable must actually carry the RTShader System bootstrap, and
+    ``rorres/rtshader.zip`` must carry the ``FFPLib_*.glsl`` library it
+    parses: GLES2 has no fixed function, and 240 of RoR's 273 materials are
+    written without shaders, so without the RTSS the first thing the app
+    renders - the main menu wallpaper - throws out of ``RoRMain`` with
+    "RenderSystem does not support FixedFunction" (PORT_FINDINGS 7.27).
+
 Usage:
     python3 patches/verify_ipa.py RoR-ios.ipa
 """
@@ -93,6 +100,50 @@ def main(argv):
                     "a linked program cannot do: %r" % versions)
             print("  ok      rorres/mygui.zip: %s (%s)"
                   % (", ".join(MYGUI_SHADERS), versions[MYGUI_SHADERS[0]]))
+
+    # ------------------------------------------------------------------ #
+    # 4. The RTShader System must be compiled in and have its media.      #
+    # ------------------------------------------------------------------ #
+    # 240 of RoR's 273 materials are written without shaders, and GLES2 has
+    # no fixed function, so without the RTSS the very first thing the app
+    # renders - the main menu wallpaper - throws out of RoRMain with
+    #   "RenderSystem does not support FixedFunction, but technique of
+    #    'rigsofrods/WallpaperMat' has no Vertex Shader. Use the RTSS or
+    #    write custom shaders."
+    # which the main loop's catch turns into yet another silent black screen.
+    exe = [n for n in names
+           if n.startswith("Payload/") and n.split("/")[-1] == "RoR"]
+    if exe:
+        binary = ipa.read(exe[0])
+        markers = (b"RTShader System up, active material scheme",
+                   b"generating shaders for fixed-function material",
+                   b"RTShader System FAILED to initialise")
+        missing = [m for m in markers if m not in binary]
+        if missing:
+            bad.append(
+                "the executable carries no %s - the RTShader System bootstrap "
+                "(patch_rtshader) is not in this build, so every "
+                "fixed-function material will throw from SceneManager::_setPass"
+                % " / ".join(m.decode() for m in missing))
+        else:
+            print("  ok      executable: RTShader System bootstrap present")
+
+    # The generator reads the FFP function library out of this pack when it
+    # builds a shader, with ResourceGroupManager::openResource() - any group
+    # will do, but the files have to exist.
+    rtsh = [n for n in names if n.endswith("/rorres/rtshader.zip")]
+    if not rtsh:
+        bad.append("rorres/rtshader.zip is missing - the RTShader System "
+                   "cannot find FFPLib_*.glsl and shader generation fails")
+    else:
+        inner = zipfile.ZipFile(io.BytesIO(ipa.read(rtsh[0])))
+        libs = [n for n in inner.namelist() if n.endswith(".glsl")]
+        if not any(n.endswith("FFPLib_Transform.glsl") for n in libs):
+            bad.append("rorres/rtshader.zip has no FFPLib_Transform.glsl - "
+                       "the RTShader System parses it to build every shader")
+        else:
+            print("  ok      rorres/rtshader.zip: %d GLSL FFP library files"
+                  % len(libs))
 
     for line in bad:
         print("  MISSING " + line)

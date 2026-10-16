@@ -2106,6 +2106,228 @@ void main()
 """
 
 
+def patch_rtshader(ror):
+    """Let OGRE's RTShader System generate the shaders GLES2 insists on.
+
+    GLES2 has no fixed-function pipeline and OGRE does not paper over that:
+    ``SceneManager::_setPass`` throws
+
+        InvalidStateException: RenderSystem does not support FixedFunction, but
+        technique of 'rigsofrods/WallpaperMat' has no Vertex Shader. Use the
+        RTSS or write custom shaders.
+
+    the moment anything renders a material written without shaders.  This is
+    not a corner case: **240 of RoR's 273 materials** are fixed-function,
+    including all of ``OgreCore.material`` (fonts, overlay panels, the
+    profiler), most of ``ror.material``, the paged grass and trees and every
+    particle system.  Hand written shaders are out of the question at that
+    scale, and user content brings materials we can never patch.
+
+    The RTSS is OGRE's own answer to this: it reads a material's
+    fixed-function description (texture units, blending, alpha rejection,
+    fog, scene blending) and builds real GLSL ES programs from it at run time.
+    Everything needed is already in place - OGRE 1.11 ships a GLSL ES writer
+    (``OgreShaderGLSLESProgramWriter``), it parses the FFP library out of
+    ``.glsl`` files, and RoR already ships that library in
+    ``resources/rtshader`` (pack ``RtShaderRG``) and links
+    ``OgreRTShaderSystem`` (``find_package(OGRE COMPONENTS ... RTShaderSystem)``).
+
+    Only fixed-function materials are converted.  ``createShaderBasedTechnique``
+    refuses a material whose source technique is programmable, we then return
+    NULL from the scheme listener, and OGRE falls back to the material's own
+    technique - so switching the active scheme cannot regress anything that
+    already renders (MyGUI, ImGui, the vehicle/terrain shaders).
+    """
+    # ---------------- AppContext.cpp: the listener, and turning the RTSS on -----
+    path = os.path.join(ror, "source", "main", "AppContext.cpp")
+    text = read(path)
+
+    text = must_replace(
+        text,
+        "#include <iomanip>\n"
+        "#include <sstream>\n"
+        "#include <string>\n"
+        "#include <ctime>\n",
+        "#include <iomanip>\n"
+        "#include <sstream>\n"
+        "#include <string>\n"
+        "#include <ctime>\n"
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "#   include <RTShaderSystem/OgreRTShaderSystem.h>\n"
+        "#endif\n",
+        "AppContext.cpp: include the RTShader System (iOS only)",
+    )
+
+    text = must_replace(
+        text,
+        "        RoR_IosTrace(\"%s\", message.c_str());\n"
+        "    }\n"
+        "};\n"
+        "#endif // ROR_PLATFORM_IOS\n",
+        "        RoR_IosTrace(\"%s\", message.c_str());\n"
+        "    }\n"
+        "};\n"
+        "#endif // ROR_PLATFORM_IOS\n"
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "// Apple/iOS port: hand RTSS the materials that have no shaders, on demand.\n"
+        "//\n"
+        "// OGRE asks this listener once per draw when the material has no technique\n"
+        "// in the active scheme ('NGOS').  A fixed-function material gets a\n"
+        "// generated shader technique; anything else is left to OGRE's own\n"
+        "// fallback, which is the material's default technique.\n"
+        "class IosFixedFunctionMaterialListener : public Ogre::MaterialManager::Listener\n"
+        "{\n"
+        "public:\n"
+        "    Ogre::Technique* handleSchemeNotFound(unsigned short schemeIndex,\n"
+        "            const Ogre::String& schemeName, Ogre::Material* material,\n"
+        "            unsigned short lodIndex, const Ogre::Renderable* rend) override\n"
+        "    {\n"
+        "        (void)schemeIndex;\n"
+        "        (void)lodIndex;\n"
+        "        (void)rend;\n"
+        "\n"
+        "        if (mBusy) // generation must not re-enter this listener\n"
+        "            return nullptr;\n"
+        "\n"
+        "        Ogre::RTShader::ShaderGenerator& gen = Ogre::RTShader::ShaderGenerator::getSingleton();\n"
+        "\n"
+        "        if (!gen.createShaderBasedTechnique(*material,\n"
+        "                    Ogre::MaterialManager::DEFAULT_SCHEME_NAME, schemeName))\n"
+        "        {\n"
+        "            return nullptr; // Not fixed-function - use the material as it is.\n"
+        "        }\n"
+        "\n"
+        "        RoR_IosTrace(\"[rtss] generating shaders for fixed-function material '%s'\",\n"
+        "            material->getName().c_str());\n"
+        "\n"
+        "        // The generated technique is normally built on the next\n"
+        "        // preFindVisibleObjects(), which already ran for this frame, so\n"
+        "        // build it now rather than draw nothing for one frame.\n"
+        "        mBusy = true;\n"
+        "        gen.invalidateMaterial(schemeName, material->getName(), material->getGroup());\n"
+        "        gen.validateScheme(schemeName);\n"
+        "        mBusy = false;\n"
+        "\n"
+        "        for (Ogre::Technique* tech : material->getTechniques())\n"
+        "        {\n"
+        "            if (tech->getSchemeName() == schemeName)\n"
+        "                return tech;\n"
+        "        }\n"
+        "        return nullptr;\n"
+        "    }\n"
+        "\n"
+        "private:\n"
+        "    bool mBusy = false;\n"
+        "};\n"
+        "\n"
+        "void RoR::Ios::RtssRegisterSceneManager(Ogre::SceneManager* scene_manager)\n"
+        "{\n"
+        "    // Without this, RTSS never validates its scheme for this scene manager\n"
+        "    // and the generated shaders are never built.  Called once per scene\n"
+        "    // manager; RoR has a single one (GfxScene) which also renders overlays.\n"
+        "    if (Ogre::RTShader::ShaderGenerator::getSingletonPtr() != nullptr)\n"
+        "    {\n"
+        "        Ogre::RTShader::ShaderGenerator::getSingleton().addSceneManager(scene_manager);\n"
+        "    }\n"
+        "}\n"
+        "#endif // ROR_PLATFORM_IOS\n",
+        "AppContext.cpp: fixed-function material listener + scene manager hook",
+    )
+
+    text = must_replace(
+        text,
+        "    m_ogre_root->initialise(/*createWindow=*/false);\n",
+        "    m_ogre_root->initialise(/*createWindow=*/false);\n"
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Apple/iOS: turn the RTShader System on before any material is parsed\n"
+        "    // or any viewport exists - the viewport copies the active material\n"
+        "    // scheme when it is created, and RTSS has to be watching the resource\n"
+        "    // groups when they are initialised (it parses 'rtshader/FFPLib_*.glsl'\n"
+        "    // out of them later, when it generates a shader).\n"
+        "    if (Ogre::RTShader::ShaderGenerator::initialize())\n"
+        "    {\n"
+        "        Ogre::MaterialManager::getSingleton().addListener(\n"
+        "            new IosFixedFunctionMaterialListener(),\n"
+        "            Ogre::RTShader::ShaderGenerator::DEFAULT_SCHEME_NAME);\n"
+        "        Ogre::MaterialManager::getSingleton().setActiveScheme(\n"
+        "            Ogre::RTShader::ShaderGenerator::DEFAULT_SCHEME_NAME);\n"
+        "        RoR_IosTrace(\"[rtss] RTShader System up, active material scheme '%s'\",\n"
+        "            Ogre::RTShader::ShaderGenerator::DEFAULT_SCHEME_NAME.c_str());\n"
+        "    }\n"
+        "    else\n"
+        "    {\n"
+        "        RoR_IosTrace(\"[rtss] RTShader System FAILED to initialise - \"\n"
+        "            \"materials without shaders will not render\");\n"
+        "    }\n"
+        "#endif\n",
+        "AppContext.cpp: enable the RTShader System on iOS",
+    )
+    write(path, text)
+
+    # ---------------- ios_platform.h: declare the hook ------------------------
+    path = os.path.join(ror, "source", "main", "ios", "ios_platform.h")
+    text = read(path)
+    text = must_replace(
+        text,
+        "#ifdef __cplusplus\n"
+        "}\n"
+        "#endif\n"
+        "\n"
+        "#endif // ROR_IOS_PLATFORM_H\n",
+        "#ifdef __cplusplus\n"
+        "}\n"
+        "\n"
+        "namespace Ogre { class SceneManager; }\n"
+        "\n"
+        "namespace RoR\n"
+        "{\n"
+        "namespace Ios\n"
+        "{\n"
+        "    // Registers a scene manager with OGRE's RTShader System (AppContext.cpp)\n"
+        "    // so that the shaders it generates for fixed-function materials are\n"
+        "    // built for it too.  No-op when the RTSS is not running.\n"
+        "    void RtssRegisterSceneManager(Ogre::SceneManager* scene_manager);\n"
+        "}\n"
+        "}\n"
+        "#endif // __cplusplus\n"
+        "\n"
+        "#endif // ROR_IOS_PLATFORM_H\n",
+        "ios_platform.h: declare RoR::Ios::RtssRegisterSceneManager",
+    )
+    write(path, text)
+
+    # ---------------- GfxScene.cpp: register RoR's scene manager ---------------
+    path = os.path.join(ror, "source", "main", "gfx", "GfxScene.cpp")
+    text = read(path)
+    text = must_replace(
+        text,
+        "#include \"AppContext.h\"\n",
+        "#include \"AppContext.h\"\n"
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "#   include \"ios_platform.h\"\n"
+        "#endif\n",
+        "GfxScene.cpp: include ios_platform.h",
+    )
+    text = must_replace(
+        text,
+        "    ROR_ASSERT(!m_scene_manager);\n"
+        "    m_scene_manager = App::GetAppContext()->GetOgreRoot()->createSceneManager();\n",
+        "    ROR_ASSERT(!m_scene_manager);\n"
+        "    m_scene_manager = App::GetAppContext()->GetOgreRoot()->createSceneManager();\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Apple/iOS: this scene manager draws the world *and* the overlays,\n"
+        "    // so RTSS needs it to build the shaders it generates for them.\n"
+        "    RoR::Ios::RtssRegisterSceneManager(m_scene_manager);\n"
+        "#endif\n",
+        "GfxScene.cpp: register the scene manager with the RTSS",
+    )
+    write(path, text)
+
+
 def patch_gui_manager(ror):
     """GUIManager.cpp: do not read modifiers off a keyboard that is not there.
 
@@ -2244,6 +2466,11 @@ def main():
     # directly - the one such caller, and the first thing to dereference the
     # null keyboard after the main menu comes up.
     patch_gui_manager(args.ror_dir)
+    # GLES2 has no fixed-function pipeline; RoR's materials assume one.  This
+    # turns on OGRE's RTShader System and hands it every scene manager, which
+    # is what turns "RenderSystem does not support FixedFunction" from a fatal
+    # startup error into generated shaders.
+    patch_rtshader(args.ror_dir)
     # The runtime platform layer: the new iOS files themselves plus the two
     # entry-point/frame-loop changes in main.cpp that hand the process over to
     # UIKit.
