@@ -663,6 +663,45 @@ jobs:
             rm -rf UnsLiteStage/Payload/RoR.app/_CodeSignature
             (cd UnsLiteStage && zip -qry ../RoR-ios-liteu.ipa Payload)
             ls -la RoR-ios-res0u.ipa RoR-ios-res0c.ipa RoR-ios-file0.ipa RoR-ios-liteu.ipa
+
+            # Boundary batch.  file0 installs (the extra file sits at the app
+            # root), while every variant that carries a sub-directory - signed
+            # or not - does not.  These five separate three questions: is it
+            # the directory entry itself, the file inside it, or its name?
+            #   binu   - bin's payload shipped unsigned; the control for
+            #            whether an unsigned bundle installs at all
+            #   d0     - bin + an EMPTY resources/ directory (no file inside)
+            #   zzz0   - bin + zzz/rotest.txt (an arbitrary directory name)
+            #   lproj0 - bin + Base.lproj/rotest.txt (a name iOS already
+            #            treats as a resource container)
+            #   flat0  - bin + skeleton.zip at the bundle root, so no directory
+            #            exists at all.  If this installs, flattening the
+            #            resources next to the executable is the way forward.
+            rm -rf BinuStage D0Stage Zzz0Stage Lproj0Stage Flat0Stage
+            for s in BinuStage D0Stage Zzz0Stage Lproj0Stage Flat0Stage; do
+              mkdir -p "$s/Payload/RoR.app"
+              cp "$APP_DIR/RoR" "$s/Payload/RoR.app/RoR"
+              cp "$APP_DIR/Info.plist" "$s/Payload/RoR.app/Info.plist"
+              cp "$APP_DIR/PkgInfo" "$s/Payload/RoR.app/PkgInfo"
+            done
+            mkdir -p D0Stage/Payload/RoR.app/resources
+            mkdir -p Zzz0Stage/Payload/RoR.app/zzz
+            mkdir -p Lproj0Stage/Payload/RoR.app/Base.lproj
+            printf 'ror\n' > Zzz0Stage/Payload/RoR.app/zzz/rotest.txt
+            printf 'ror\n' > Lproj0Stage/Payload/RoR.app/Base.lproj/rotest.txt
+            cp LiteStage/Payload/RoR.app/resources/skeleton.zip Flat0Stage/Payload/RoR.app/skeleton.zip
+            if command -v adhoc_sign >/dev/null 2>&1; then
+              adhoc_sign "D0Stage/Payload/RoR.app" || true
+              adhoc_sign "Zzz0Stage/Payload/RoR.app" || true
+              adhoc_sign "Lproj0Stage/Payload/RoR.app" || true
+              adhoc_sign "Flat0Stage/Payload/RoR.app" || true
+            fi
+            (cd D0Stage && zip -qry ../RoR-ios-d0.ipa Payload)
+            (cd Zzz0Stage && zip -qry ../RoR-ios-zzz0.ipa Payload)
+            (cd Lproj0Stage && zip -qry ../RoR-ios-lproj0.ipa Payload)
+            (cd Flat0Stage && zip -qry ../RoR-ios-flat0.ipa Payload)
+            (cd BinuStage && zip -qry ../RoR-ios-binu.ipa Payload)
+            ls -la RoR-ios-d0.ipa RoR-ios-zzz0.ipa RoR-ios-lproj0.ipa RoR-ios-flat0.ipa RoR-ios-binu.ipa
             ls -la RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa
           fi
 
@@ -781,12 +820,19 @@ jobs:
                                with one extra file at the app root (file0), in
                                Resources/ spelled with a capital R (res0c), or
                                in resources/ but shipped with NO pre-made
-                               ad-hoc signature (res0u).
+                               ad-hoc signature (res0u).  Measured: only file0
+                               installs, so the signature is not the cause.
           * RoR-ios-liteu.ipa - diagnostic (only on 'diag' tag). The whole
-                               lite app, shipped with no pre-made signature.
-                               If the three signed one-file variants fail but
-                               this installs, our ad-hoc signature is what
-                               breaks the install.
+                               lite app with no pre-made signature.  Measured:
+                               fails, which removes the signature as a cause.
+          * RoR-ios-binu.ipa / RoR-ios-d0.ipa / RoR-ios-zzz0.ipa /
+            RoR-ios-lproj0.ipa / RoR-ios-flat0.ipa - diagnostic (only on
+                               'diag' tag). bin's payload shipped unsigned
+                               (binu, control), plus an empty resources/
+                               directory (d0), an arbitrary zzz/ directory
+                               (zzz0), a Base.lproj/ directory (lproj0), and
+                               skeleton.zip at the bundle root with no
+                               directory at all (flat0).
 
           Hand the file itself to ESIGN / Sideloadly / SideStore - it is served
           as a plain file, nothing to unpack.  An .ipa is a zip whose root
@@ -818,7 +864,7 @@ jobs:
             fi
           done
           if [ "$TAG" = "diag" ]; then
-            for f in RoR-ios-bin.ipa RoR-ios-res0.ipa RoR-ios-res1.ipa RoR-ios-res0u.ipa RoR-ios-res0c.ipa RoR-ios-file0.ipa RoR-ios-liteu.ipa RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa RoR-ios-tinyres.ipa; do
+            for f in RoR-ios-bin.ipa RoR-ios-res0.ipa RoR-ios-res1.ipa RoR-ios-res0u.ipa RoR-ios-res0c.ipa RoR-ios-file0.ipa RoR-ios-liteu.ipa RoR-ios-binu.ipa RoR-ios-d0.ipa RoR-ios-zzz0.ipa RoR-ios-lproj0.ipa RoR-ios-flat0.ipa RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa RoR-ios-tinyres.ipa; do
               [ -f "$f" ] && gh release upload "$TAG" "$f" --clobber --repo "$GITHUB_REPOSITORY"
             done
           fi
@@ -836,7 +882,7 @@ jobs:
           if it differs by even one byte, download the file again.
 
           "
-          for f in RoR-ios.ipa RoR-ios-lite.ipa RoR-ios-tiny.ipa RoR-ios-bin.ipa RoR-ios-res0.ipa RoR-ios-res1.ipa RoR-ios-res0u.ipa RoR-ios-res0c.ipa RoR-ios-file0.ipa RoR-ios-liteu.ipa RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa RoR-ios-tinyres.ipa; do
+          for f in RoR-ios.ipa RoR-ios-lite.ipa RoR-ios-tiny.ipa RoR-ios-bin.ipa RoR-ios-res0.ipa RoR-ios-res1.ipa RoR-ios-res0u.ipa RoR-ios-res0c.ipa RoR-ios-file0.ipa RoR-ios-liteu.ipa RoR-ios-binu.ipa RoR-ios-d0.ipa RoR-ios-zzz0.ipa RoR-ios-lproj0.ipa RoR-ios-flat0.ipa RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa RoR-ios-tinyres.ipa; do
             if [ -f "$f" ]; then
               CHECK="${CHECK}$(printf '  %-22s %10d   sha256:%s' "$f" "$(wc -c < "$f" | tr -d ' ')" "$(shasum -a 256 "$f" | cut -d' ' -f1)")
           "
