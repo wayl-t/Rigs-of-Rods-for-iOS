@@ -579,10 +579,10 @@ jobs:
             rm -rf H1Stage H2Stage
             mkdir -p H1Stage/Payload/RoR.app/resources H2Stage/Payload/RoR.app/resources
             if [ -d LiteStage/Payload/RoR.app/resources ]; then
-              python3 -c "import os;d='LiteStage/Payload/RoR.app/resources';items=sorted([x for x in os.listdir(d) if not x.startswith('.')]);mid=len(items)//2;open('h1.list','w').write(chr(10).join(items[:mid]));open('h2.list','w').write(chr(10).join(items[mid:]));print('split',len(items),'h1',mid,'h2',len(items)-mid)"
-              echo "h1 half:"; cat h1.list; echo "h2 half:"; cat h2.list
-              while IFS= read -r f; do [ -n "$f" ] && cp -R "LiteStage/Payload/RoR.app/resources/$f" H1Stage/Payload/RoR.app/resources/ 2>/dev/null; done < h1.list
-              while IFS= read -r f; do [ -n "$f" ] && cp -R "LiteStage/Payload/RoR.app/resources/$f" H2Stage/Payload/RoR.app/resources/ 2>/dev/null; done < h2.list
+              python3 -c "import os;d='LiteStage/Payload/RoR.app/resources';items=sorted([x for x in os.listdir(d) if not x.startswith('.')]);mid=len(items)//2;open('h1.list','w').write(chr(10).join(items[:mid])+chr(10));open('h2.list','w').write(chr(10).join(items[mid:])+chr(10));print('split',len(items),'h1',mid,'h2',len(items)-mid)"
+              echo "h1 half ($(wc -l < h1.list) entries):"; cat h1.list; echo "h2 half ($(wc -l < h2.list) entries):"; cat h2.list
+              while IFS= read -r f; do f="${f%$'\r'}"; [ -n "$f" ] && cp -R "LiteStage/Payload/RoR.app/resources/$f" H1Stage/Payload/RoR.app/resources/ 2>/dev/null; done < h1.list
+              while IFS= read -r f; do f="${f%$'\r'}"; [ -n "$f" ] && cp -R "LiteStage/Payload/RoR.app/resources/$f" H2Stage/Payload/RoR.app/resources/ 2>/dev/null; done < h2.list
             fi
             for s in H1Stage H2Stage; do
               cp "$APP_DIR/RoR" "$s/Payload/RoR.app/RoR"
