@@ -497,21 +497,26 @@ jobs:
           echo "IPA size: $(du -h RoR-ios.ipa | cut -f1)"
 
           # ------------------------------------------------------------------ #
-          # A deliberately small second IPA, for diagnosis only.               #
+          # A smaller second IPA, for diagnosis only.                          #
           #                                                                    #
           # The full bundle is ~112 MB, almost all of it resource archives.    #
           # When iOS answers an install with the generic "Unable to Install"   #
-          # it is usually either disk space / the installer choking on the     #
-          # size, or a signature problem.  A ~10 MB build of the same app with #
-          # the same Info.plist and the same signing tells those apart in a    #
-          # single install attempt: if the small one lands, it was about size. #
-          # The kept archives are the small ones plus the two the engine needs #
-          # to get as far as drawing anything (skeleton, OgreCore).            #
+          # it is usually either the installer choking on the size or a        #
+          # signature problem.  A smaller build of the same app with the same  #
+          # Info.plist and the same signing tells those apart in a single      #
+          # install attempt: if the small one lands, it was about size.        #
+          #                                                                    #
+          # This has to stay a *deny* list.  ContentManager::AddResourcePack() #
+          # throws std::runtime_error when a pack archive is missing, and main #
+          # calls it during startup for WALLPAPERS, FLAGS, FONTS, ICONS,       #
+          # OGRE_CORE, SCRIPTS and then MYGUI + DASHBOARDS.  An allow-list     #
+          # which forgets one of those yields an app that cannot even reach    #
+          # the first drawn frame, which is useless as a launch diagnostic -   #
+          # the previous allow-list did exactly that (wallpapers.zip and       #
+          # dashboards.zip were missing).  Only archives which nothing touches #
+          # before a terrain or a vehicle is loaded may be listed below.       #
           # ------------------------------------------------------------------ #
-          KEEP="OgreCore.zip mygui.zip skeleton.zip materials.zip overlays.zip
-                scripts.zip fonts.zip rtshader.zip managed_materials.zip
-                cubemaps.zip famicons.zip icons.zip flags.zip airfoils.zip
-                beamobjects.zip particles.zip paged.zip"
+          DROP="meshes.zip textures.zip sounds.zip caelum.zip SkyX.zip hydrax.zip"
           rm -rf LiteStage RoR-ios-lite.ipa
           mkdir -p LiteStage/Payload
           cp -R "$APP_DIR" LiteStage/Payload/RoR.app
@@ -519,14 +524,12 @@ jobs:
             for z in LiteStage/Payload/RoR.app/rorres/*.zip; do
               [ -e "$z" ] || continue
               b="$(basename "$z")"
-              keep=0
-              for k in $KEEP; do
-                [ "$b" = "$k" ] && keep=1
+              for k in $DROP; do
+                if [ "$b" = "$k" ]; then
+                  echo "lite: dropping $b ($(du -h "$z" | cut -f1))"
+                  rm -f "$z"
+                fi
               done
-              if [ "$keep" -eq 0 ]; then
-                echo "lite: dropping $b ($(du -h "$z" | cut -f1))"
-                rm -f "$z"
-              fi
             done
           fi
           # Trimming the bundle invalidated the signature above, so sign again
@@ -707,7 +710,12 @@ jobs:
 
           * RoR-ios.ipa      - the full game, ~112 MB. Ships its data in
                                RoR.app/rorres/ (not resources/ - see below).
-          * RoR-ios-lite.ipa - the same app with a trimmed resource set, ~18 MB.
+          * RoR-ios-lite.ipa - the same app with the content-only archives
+                               dropped (meshes/textures/sounds/caelum/SkyX/
+                               hydrax), ~40 MB.  Every archive the startup path
+                               loads is kept, so it launches exactly like the
+                               full build - this is what makes it a usable
+                               launch diagnostic.
           * RoR-ios-tiny.ipa - NOT the game. Shares Info.plist/signature/packaging
                                with the game. Installs and launches (green screen).
           * RoR-ios-bin.ipa  - diagnostic (only on 'diag' tag). Real RoR binary,
