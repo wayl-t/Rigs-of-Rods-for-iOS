@@ -210,6 +210,65 @@ jobs:
       - name: Get OGRE 1.11.6
         run: git clone --depth 1 --branch v1.11.6 https://github.com/OGRECave/ogre.git ogre
 
+      - name: "Patch OGRE: EAGL2View::layoutSubviews must survive a camera-less viewport"
+        run: |
+          # UIKit calls -[EAGL2View layoutSubviews] on the first pass of the
+          # run loop.  RoR pumps the run loop during startup (every iOS
+          # breadcrumb in patches/ror/apply_ios_patches.py calls
+          # CFRunLoopRunInMode), and at that moment RoR's only viewport exists
+          # but still has no camera:
+          #
+          #   source/main/AppContext.cpp:432
+          #       // Create viewport (without camera)
+          #       m_viewport = m_render_window->addViewport(/*camera=*/nullptr);
+          #
+          #   ... much later, after the whole startup sequence ...
+          #
+          #   source/main/gfx/camera/CameraManager.cpp:123
+          #       App::GetAppContext()->GetViewport()->setCamera(m_camera);
+          #
+          # OGRE 1.11.6 guards the viewport COUNT but never the camera:
+          #
+          #   if(window->getNumViewports() > 0)
+          #   {
+          #       Ogre::Viewport *viewPort = window->getViewport(0);
+          #       viewPort->getCamera()->setAspectRatio(...);   // NULL here
+          #   }
+          #
+          # The device trace of ror-zipfix.ipa pins this exactly (both launches
+          # of the same binary crash at identical offsets):
+          #
+          #   pc   = Ogre::Frustum::setAspectRatio(float) + 0x0
+          #   lr   = -[EAGL2View layoutSubviews] + 0xb4
+          #   addr = 0x130        (== NULL + offsetof(Frustum, mAspectRatio))
+          #
+          # i.e. a devirtualised call on a NULL Ogre::Camera.  Guard it.
+          f=ogre/RenderSystems/GLES2/src/EAGL/OgreEAGL2View.mm
+          python3 - "$f" <<'PY'
+          import sys
+          p = sys.argv[1]
+          d = open(p, "r", encoding="utf-8", errors="replace").read()
+
+          old = '            viewPort->getCamera()->setAspectRatio((Real) width / (Real) height);\n'
+
+          new = '            // Apple/iOS port: -[EAGL2View layoutSubviews] runs on the\n' \
+                '            // first run-loop pass, which can be before RoR attaches a\n' \
+                '            // camera to its viewport (AppContext.cpp adds the viewport\n' \
+                '            // with a null camera, CameraManager attaches it later), so\n' \
+                '            // getCamera() can legitimately be NULL here.\n' \
+                '            if(viewPort != NULL && viewPort->getCamera() != NULL)\n' \
+                '            {\n' \
+                '                viewPort->getCamera()->setAspectRatio((Real) width / (Real) height);\n' \
+                '            }\n'
+
+          assert old in d, "OgreEAGL2View layoutSubviews anchor missing"
+          d = d.replace(old, new, 1)
+          open(p, "w", encoding="utf-8").write(d)
+          print("patched")
+          PY
+          grep -n 'getCamera() != NULL' "$f"
+          sed -n '70,92p' "$f"
+
       - name: Pin FindZZip to the zziplib in the SDK prefix
         run: |
           # OGRE's stock CMake/Packages/FindZZip.cmake cannot see our zziplib.

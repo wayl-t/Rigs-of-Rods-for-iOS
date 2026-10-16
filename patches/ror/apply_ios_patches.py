@@ -1138,16 +1138,16 @@ static void ror_signal_handler(int sig, siginfo_t* info, void* uap)
         const unsigned long long fp = (unsigned long long)(uintptr_t)uc->uc_mcontext->__ss.__fp;
         if (g_exe_base != 0)
         {
-            ror_trace_hex(" pc=0x", pc, "");
-            ror_trace_hex("(+0x", pc - (unsigned long long)g_exe_base, ")");
-            ror_trace_hex(" lr=0x", lr, "");
-            ror_trace_hex("(+0x", lr - (unsigned long long)g_exe_base, ")");
-            ror_trace_hex(" fp=0x", fp, "");
+            ror_trace_hex(" pc=", pc, "");
+            ror_trace_hex("(+", pc - (unsigned long long)g_exe_base, ")");
+            ror_trace_hex(" lr=", lr, "");
+            ror_trace_hex("(+", lr - (unsigned long long)g_exe_base, ")");
+            ror_trace_hex(" fp=", fp, "");
         }
         else
         {
-            ror_trace_hex(" pc=0x", pc, "");
-            ror_trace_hex(" lr=0x", lr, "");
+            ror_trace_hex(" pc=", pc, "");
+            ror_trace_hex(" lr=", lr, "");
         }
     }
 #endif
