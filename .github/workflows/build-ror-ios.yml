@@ -626,6 +626,43 @@ jobs:
             (cd Res0Stage && zip -qry ../RoR-ios-res0.ipa Payload)
             (cd Res1Stage && zip -qry ../RoR-ios-res1.ipa Payload)
             ls -la RoR-ios-res0.ipa RoR-ios-res1.ipa
+
+            # Four narrow variants, all on top of bin's payload (the one that
+            # installs and runs), to pin down what one extra file actually
+            # changes:
+            #   file0   - the extra file sits at the app root; no new directory
+            #   res0c   - the extra file sits in Resources/ (capital R), the
+            #             only spelling codesign's resource rules seal
+            #   res0u   - identical to res0 but shipped WITHOUT a pre-made
+            #             ad-hoc signature.  iOS cannot install an ad-hoc
+            #             signature anyway, so the sideloader re-signs either
+            #             way.  If this installs, the bug is our signature
+            #             rather than the resources.
+            #   liteu   - the whole lite app with no pre-made signature.
+            rm -rf Res0uStage Res0cStage File0Stage
+            for s in Res0uStage Res0cStage File0Stage; do
+              mkdir -p "$s/Payload/RoR.app"
+              cp "$APP_DIR/RoR" "$s/Payload/RoR.app/RoR"
+              cp "$APP_DIR/Info.plist" "$s/Payload/RoR.app/Info.plist"
+              cp "$APP_DIR/PkgInfo" "$s/Payload/RoR.app/PkgInfo"
+            done
+            mkdir -p Res0uStage/Payload/RoR.app/resources Res0cStage/Payload/RoR.app/Resources
+            printf 'ror\n' > Res0uStage/Payload/RoR.app/resources/rotest.txt
+            printf 'ror\n' > Res0cStage/Payload/RoR.app/Resources/rotest.txt
+            printf 'ror\n' > File0Stage/Payload/RoR.app/rotest.txt
+            if command -v adhoc_sign >/dev/null 2>&1; then
+              adhoc_sign "Res0cStage/Payload/RoR.app" || true
+              adhoc_sign "File0Stage/Payload/RoR.app" || true
+            fi
+            (cd Res0uStage && zip -qry ../RoR-ios-res0u.ipa Payload)
+            (cd Res0cStage && zip -qry ../RoR-ios-res0c.ipa Payload)
+            (cd File0Stage && zip -qry ../RoR-ios-file0.ipa Payload)
+            rm -rf UnsLiteStage
+            mkdir -p UnsLiteStage/Payload
+            cp -R LiteStage/Payload/RoR.app UnsLiteStage/Payload/RoR.app
+            rm -rf UnsLiteStage/Payload/RoR.app/_CodeSignature
+            (cd UnsLiteStage && zip -qry ../RoR-ios-liteu.ipa Payload)
+            ls -la RoR-ios-res0u.ipa RoR-ios-res0c.ipa RoR-ios-file0.ipa RoR-ios-liteu.ipa
             ls -la RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa
           fi
 
@@ -739,6 +776,17 @@ jobs:
                                single smallest resource zip (res1). Same size as
                                bin, so this separates 'resources/ breaks the
                                install' from 'size breaks the install'.
+          * RoR-ios-file0.ipa / RoR-ios-res0c.ipa / RoR-ios-res0u.ipa -
+                               diagnostic (only on 'diag' tag). bin's payload
+                               with one extra file at the app root (file0), in
+                               Resources/ spelled with a capital R (res0c), or
+                               in resources/ but shipped with NO pre-made
+                               ad-hoc signature (res0u).
+          * RoR-ios-liteu.ipa - diagnostic (only on 'diag' tag). The whole
+                               lite app, shipped with no pre-made signature.
+                               If the three signed one-file variants fail but
+                               this installs, our ad-hoc signature is what
+                               breaks the install.
 
           Hand the file itself to ESIGN / Sideloadly / SideStore - it is served
           as a plain file, nothing to unpack.  An .ipa is a zip whose root
@@ -770,7 +818,7 @@ jobs:
             fi
           done
           if [ "$TAG" = "diag" ]; then
-            for f in RoR-ios-bin.ipa RoR-ios-res0.ipa RoR-ios-res1.ipa RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa RoR-ios-tinyres.ipa; do
+            for f in RoR-ios-bin.ipa RoR-ios-res0.ipa RoR-ios-res1.ipa RoR-ios-res0u.ipa RoR-ios-res0c.ipa RoR-ios-file0.ipa RoR-ios-liteu.ipa RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa RoR-ios-tinyres.ipa; do
               [ -f "$f" ] && gh release upload "$TAG" "$f" --clobber --repo "$GITHUB_REPOSITORY"
             done
           fi
@@ -788,7 +836,7 @@ jobs:
           if it differs by even one byte, download the file again.
 
           "
-          for f in RoR-ios.ipa RoR-ios-lite.ipa RoR-ios-tiny.ipa RoR-ios-bin.ipa RoR-ios-res0.ipa RoR-ios-res1.ipa RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa RoR-ios-tinyres.ipa; do
+          for f in RoR-ios.ipa RoR-ios-lite.ipa RoR-ios-tiny.ipa RoR-ios-bin.ipa RoR-ios-res0.ipa RoR-ios-res1.ipa RoR-ios-res0u.ipa RoR-ios-res0c.ipa RoR-ios-file0.ipa RoR-ios-liteu.ipa RoR-ios-lite-h1.ipa RoR-ios-lite-h2.ipa RoR-ios-tinyres.ipa; do
             if [ -f "$f" ]; then
               CHECK="${CHECK}$(printf '  %-22s %10d   sha256:%s' "$f" "$(wc -c < "$f" | tr -d ' ')" "$(shasum -a 256 "$f" | cut -d' ' -f1)")
           "
