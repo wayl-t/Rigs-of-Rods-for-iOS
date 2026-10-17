@@ -947,6 +947,14 @@ void RoR_IosPumpRunLoop(void);
 // its UIWindow from.  RoR is landscape-only, so width is the long side.
 void RoR_IosGetScreenSize(int* width, int* height);
 
+// Appends a one-line-per-view dump of the key UIWindow's view hierarchy to
+// ror-trace.log: each view's class, frame, hidden flag and
+// userInteractionEnabled.  Purely diagnostic.  It answers the question that
+// "taps do nothing" always raises - whether OIS's touch delegate view exists
+// at all, how much of the screen it actually covers, and whether some other
+// view sits on top of it and swallows the touches.
+void RoR_IosDumpViewHierarchy(void);
+
 // Appends one line to <the app container>/Documents/ror-trace.log and hands it
 // to write(2) straight away, so the file is complete even if the process dies
 // on the very next instruction.  OGRE's own log file is buffered, and a crash
@@ -985,6 +993,7 @@ IOS_PLATFORM_MM = r'''// Rigs of Rods - Apple/iOS platform layer implementation.
 
 #import <UIKit/UIKit.h>
 #import <CoreFoundation/CFRunLoop.h>
+#import <objc/runtime.h>
 
 #include <cstdarg>
 #include <cstdint>
@@ -1331,6 +1340,43 @@ void RoR_IosGetScreenSize(int* width, int* height)
     const int short_side = a > b ? b : a;
     if (width)  *width  = long_side;
     if (height) *height = short_side;
+}
+
+void RoR_IosDumpViewHierarchy(void)
+{
+    UIApplication* app = [UIApplication sharedApplication];
+    UIWindow* win = nil;
+    for (UIWindow* w in [app windows])
+    {
+        if ([w isKeyWindow]) { win = w; break; }
+    }
+    if (win == nil && [[app windows] count] > 0)
+    {
+        win = [[app windows] objectAtIndex:0];
+    }
+    if (win == nil)
+    {
+        RoR_IosTrace("[RoR|Input] view hierarchy: no UIWindow yet");
+        return;
+    }
+
+    RoR_IosTrace("[RoR|Input] window frame=(%.0f,%.0f,%.0f,%.0f) subviews=%d",
+                 (double)win.frame.origin.x, (double)win.frame.origin.y,
+                 (double)win.frame.size.width, (double)win.frame.size.height,
+                 (int)[[win subviews] count]);
+
+    for (UIView* v in [win subviews])
+    {
+        // class_getName() needs <objc/runtime.h> and gives the plain class
+        // name, which is what tells OGRE's EAGL2View and OIS's InputDelegate
+        // apart in the dump.
+        RoR_IosTrace("[RoR|Input]   subview %s frame=(%.0f,%.0f,%.0f,%.0f) hidden=%d interact=%d firstResponder=%d",
+                     class_getName([v class]),
+                     (double)v.frame.origin.x, (double)v.frame.origin.y,
+                     (double)v.frame.size.width, (double)v.frame.size.height,
+                     (int)v.hidden, (int)v.userInteractionEnabled,
+                     (int)[v isFirstResponder]);
+    }
 }
 '''
 
@@ -1736,6 +1782,23 @@ def patch_inputengine(ror):
     path = os.path.join(ror, "source", "main", "utils", "InputEngine.cpp")
     text = read(path)
 
+    # The iOS block calls RoR_IosDumpViewHierarchy(), which lives in the
+    # platform layer.  main.cpp includes the same header the same way.
+    text = must_replace(
+        text,
+        '#include "InputEngine.h"\n'
+        "\n"
+        '#include "Actor.h"\n',
+        '#include "InputEngine.h"\n'
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        '#   include "ios_platform.h"\n'
+        "#endif\n"
+        "\n"
+        '#include "Actor.h"\n',
+        "InputEngine.cpp ios_platform.h include",
+    )
+
     # Cleanup: the declarators are fine, but the _L macro and friends are not
     # the issue here - only the OIS dereferences are.
     text = must_replace(
@@ -1853,6 +1916,10 @@ def patch_inputengine(ror):
         "        mMultiTouch = static_cast<OIS::MultiTouch*>(mInputManager->createInputObject(OISMultiTouch, true));\n"
         "        mMultiTouch->setEventCallback(this);\n"
         '        LOG("[RoR|Startup|Input] iOS: multitouch device ready");\n'
+        "        // One-line-per-view dump of the window OIS just put its touch\n"
+        "        // delegate into, so a later \"taps do nothing\" report can be\n"
+        "        // answered from the log instead of guessed at.\n"
+        "        RoR_IosDumpViewHierarchy();\n"
         "    }\n"
         "    catch (OIS::Exception& ex)\n"
         "    {\n"
@@ -2592,6 +2659,33 @@ def patch_gui_manager(ror):
         "    io.KeyAlt = (kb != nullptr) && kb->isKeyDown(OIS::KC_LMENU);\n"
         "    io.KeySuper = false;\n",
         "GUIManager.cpp NewImGuiFrame null keyboard guard",
+    )
+
+    # One-shot "is the menu even on screen" diagnostic.  A user report of
+    # "taps do nothing, I only see the wallpaper" has two very different
+    # causes - the ImGui canvas being empty/uninitialized, or the main menu
+    # widget simply not being marked visible - and the device log can tell
+    # them apart in a single line.  Logged on the first frame that actually
+    # has a viewport (DisplaySize is zero until then) and only once, because
+    # repeating it every frame would drown ror-trace.log.
+    text = must_replace(
+        text,
+        "    io.KeySuper = false;\n"
+        "\n"
+        "    // Call IMGUI\n",
+        "    io.KeySuper = false;\n"
+        "\n"
+        "    static bool s_ios_menu_diag_done = false;\n"
+        "    if (!s_ios_menu_diag_done && io.DisplaySize.x > 0.0f)\n"
+        "    {\n"
+        "        s_ios_menu_diag_done = true;\n"
+        "        LOG(std::string(\"[RoR|GUI] ImGui DisplaySize=(\")\n"
+        "            + TOSTRING((int)io.DisplaySize.x) + \",\" + TOSTRING((int)io.DisplaySize.y)\n"
+        "            + \") main_menu_visible=\" + (this->GameMainMenu.IsVisible() ? \"yes\" : \"no\"));\n"
+        "    }\n"
+        "\n"
+        "    // Call IMGUI\n",
+        "GUIManager.cpp NewImGuiFrame one-shot menu diagnostic",
     )
 
     write(path, text)
