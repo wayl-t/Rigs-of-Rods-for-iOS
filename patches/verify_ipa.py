@@ -316,6 +316,67 @@ def main(argv):
         else:
             print("  ok      executable: touch -> mouse -> ImGui bridge present")
 
+    # ------------------------------------------------------------------ #
+    # 7. There must be something to load: the base content.                #
+    # ------------------------------------------------------------------ #
+    # Rigs of Rods ships no built-in terrain.  Its only content is the
+    # `content` submodule (RigsOfRods/content), which CMake packs one zip per
+    # mod folder into bin/content when ROR_CREATE_CONTENT_FOLDER is ON, and
+    # which the packaging step copies to RoR.app/content.  RoR then mounts
+    # that directory itself:
+    #
+    #   ContentManager.cpp:295
+    #     addResourceLocation(<process_dir>/content, "FileSystem", RGN_CONTENT)
+    #   CacheSystem.cpp:173 -> ParseZipArchives(RGN_CONTENT)
+    #     findResourceFileInfo(RGN_CONTENT, "*.zip") -> ParseSingleZip()
+    #       addResourceLocation(<the zip>, "Zip", RGN_TEMP)
+    #
+    # and ListAllUserContent() fills the terrain/vehicle lists from
+    # RGN_CONTENT by extension (.terrn2 .truck .trailer .otc .os ...).
+    #
+    # Without this the app reaches the main menu and then offers an empty
+    # terrain list - nothing to load, nothing to drive, nothing to test.  That
+    # failure is invisible to the compiler, so it is checked here.
+    #
+    # The textures in these zips are DXT-compressed .dds, which the device
+    # cannot sample directly (RoR.log: "Texture Compression: yes" but
+    # "- DXT: no", and GL_EXTENSIONS has no S3TC - only GL_IMG/pvrtc).  That is
+    # not a problem: OgreDDSCodec::decode() sees
+    # !RSC_TEXTURE_COMPRESSION_DXT and decompresses DXT1/3/5 to
+    # PF_BYTE_RGB(A) in software (OgreDDSCodec.cpp:836-890), so the .dds stay
+    # as they are and no material reference has to be rewritten.
+    top_dirs = {n.split("/")[2] for n in names
+                if n.startswith("Payload/") and len(n.split("/")) > 2}
+    if "content" not in top_dirs:
+        bad.append(
+            "the bundle has no top-level content/ directory - RoR would start "
+            "with an empty terrain list and no vehicle to load (nothing to test "
+            "past the main menu); the content submodule was probably not "
+            "checked out or the CMake flag is still OFF")
+    else:
+        print("  ok      bundle: content/ present")
+        want = {"simple2-terrain.zip": ".terrn2",
+                "agora.zip": ".truck",
+                "dafsemi.zip": ".truck"}
+        for zipname, ext in sorted(want.items()):
+            hit = [n for n in names if n.endswith("/content/" + zipname)]
+            if not hit:
+                bad.append("content/%s is missing - RoR's cache mounts every "
+                           "zip in RGN_CONTENT, so this mod would simply not "
+                           "exist in the game" % zipname)
+                continue
+            inner = zipfile.ZipFile(io.BytesIO(ipa.read(hit[0])))
+            members = inner.namelist()
+            found = [m for m in members if m.endswith(ext)]
+            if not found:
+                bad.append("content/%s carries no %s - the mod would be listed "
+                           "as 'no usable content' on the device"
+                           % (zipname, ext))
+            else:
+                print("  ok      content/%-20s %3d entries, %d x %s  (%s)"
+                      % (zipname, len(members), len(found), ext,
+                         ", ".join(sorted(found)[:3])))
+
     for line in bad:
         print("  MISSING " + line)
         print("::error::" + line)

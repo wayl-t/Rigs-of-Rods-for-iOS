@@ -172,6 +172,30 @@ jobs:
           git -C ror checkout -q FETCH_HEAD
           git -C ror log -1 --format='RoR source: %H %ci %s'
 
+          # The base content is a *submodule* (content -> RigsOfRods/content):
+          # the Simple2 terrain and the two trucks.  Fetching the superproject
+          # with --depth 1 does not touch it, and without it the game starts
+          # with an empty terrain list - there is literally nothing to load,
+          # so the port could not be tested past the main menu.
+          #
+          # `HEAD:content` is the commit the pinned RoR revision records, so
+          # the content can never drift from the code it was tested with, and
+          # the URL comes from .gitmodules rather than being spelled out here.
+          #
+          # Fetching a bare SHA works on GitHub (the superproject is fetched
+          # exactly the same way a few lines up).  No history is needed: the
+          # depth-1 fetch brings the commit and its whole tree, which is what
+          # CMake zips.
+          CONTENT_URL="$(git -C ror config -f .gitmodules --get submodule.content.url)"
+          CONTENT_COMMIT="$(git -C ror rev-parse HEAD:content)"
+          echo "content submodule: $CONTENT_URL @ $CONTENT_COMMIT"
+          git init ror/content
+          git -C ror/content fetch --depth 1 "$CONTENT_URL" "$CONTENT_COMMIT"
+          git -C ror/content checkout -q FETCH_HEAD
+          echo "----- content/ -----"
+          ls -la ror/content
+          find ror/content -name '*.terrn2' -o -name '*.truck' | sort
+
       - name: Patch RoR for the Apple/iOS port
         run: |
           python3 patches/ror/apply_ios_patches.py ror \
@@ -245,7 +269,7 @@ jobs:
             -DOPENAL_LIBRARY="$IOS_PREFIX/lib/libopenal.a" \
             -DOPENAL_INCLUDE_DIR="$IOS_PREFIX/include" \
             -DCMAKE_EXE_LINKER_FLAGS="-L$IOS_PREFIX/lib -L$IOS_PREFIX/lib/Release -L$IOS_PREFIX/lib/Release/OGRE" \
-            -DROR_CREATE_CONTENT_FOLDER=OFF \
+            -DROR_CREATE_CONTENT_FOLDER=ON \
             -DROR_OIS_INCLUDE_DIR="$IOS_PREFIX/include/OIS" \
             -DROR_OIS_LIBRARY="$IOS_PREFIX/lib/libOIS.a" \
             2>&1 | tee logs/ror-configure.log
@@ -311,7 +335,24 @@ jobs:
             echo "WARNING: ror/build/bin/resources is missing - RoR will refuse to start"
           fi
           if [ -d ror/build/bin/content ]; then
+            rm -rf "$APP_DIR/content"
             cp -R ror/build/bin/content "$APP_DIR/content"
+            echo "----- bundled content (content/) -----"
+            ls -la "$APP_DIR/content"
+            # The terrain and vehicle files live *inside* these zips:
+            # CacheSystem::ParseZipArchives() mounts every *.zip it finds in
+            # RGN_CONTENT as a Zip resource location, which is what fills the
+            # terrain list (ContentManager::ListAllUserContent).  A zip that
+            # lost its .terrn2 is a hard failure in verify_ipa.py section 7;
+            # these counts are here only to make the build log readable.
+            for z in "$APP_DIR"/content/*.zip; do
+              [ -e "$z" ] || continue
+              n_terr="$(unzip -l "$z" 2>/dev/null | grep -c '\.terrn2' || true)"
+              n_truck="$(unzip -l "$z" 2>/dev/null | grep -c '\.truck' || true)"
+              echo "content zip: $(basename "$z") $(stat -f%z "$z") bytes (terrn2=$n_terr truck=$n_truck)"
+            done
+          else
+            echo "::warning::ror/build/bin/content is missing - the app starts with no terrain and no vehicle"
           fi
           # plugins.cfg is deliberately NOT copied: on iOS the OGRE plugins are
           # static and registered through OgreBites::StaticPluginLoader, so RoR
