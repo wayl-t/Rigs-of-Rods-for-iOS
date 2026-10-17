@@ -1436,6 +1436,13 @@ int RoR_IosMakeTouchViewCoverWindow(void)
         UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     touch_view.userInteractionEnabled = YES;
     touch_view.multipleTouchEnabled = YES;
+    // OIS's delegate draws nothing, but UIView defaults to opaque = YES, and an
+    // opaque view that never draws is allowed to hand UIKit an undefined
+    // backdrop.  It has always been the *last* subview before now (so the GL
+    // view was drawn over it); moving it to the front would expose that.  Make
+    // it explicitly transparent first, then bring it forward.
+    touch_view.opaque = NO;
+    touch_view.backgroundColor = [UIColor clearColor];
     // The delegate is transparent and reads nothing but touch locations, so
     // putting it in front of OGRE's view changes only who receives touches -
     // and that is the whole point.
