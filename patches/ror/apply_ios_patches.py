@@ -955,6 +955,23 @@ void RoR_IosGetScreenSize(int* width, int* height);
 // view sits on top of it and swallows the touches.
 void RoR_IosDumpViewHierarchy(void);
 
+// Makes OIS's iPhone touch delegate cover the whole window.
+//
+// OIS sizes that delegate from [[UIScreen mainScreen] applicationFrame], which
+// is the *portrait* frame - 390x844 on an iPhone - and then adds it as a
+// subview of OGRE's *landscape* UIWindow (844x390).  The delegate therefore
+// only covers the left 390 points of the screen, and a tap on the right half
+// is never delivered to RoR at all.  It also leaves the delegate under
+// whatever else the window has added since (OGRE's view controller view), in
+// which case nothing is delivered anywhere.
+//
+// OIS reads touch coordinates with [touch locationInView:thatView], i.e. in
+// the delegate's own coordinate space; its frame origin is (0,0), so resizing
+// it to the window bounds does not move a single reported coordinate - it
+// only widens the area that reports them.  Returns true if an iOS
+// "InputDelegate" view was found and resized.
+int RoR_IosMakeTouchViewCoverWindow(void);
+
 // Appends one line to <the app container>/Documents/ror-trace.log and hands it
 // to write(2) straight away, so the file is complete even if the process dies
 // on the very next instruction.  OGRE's own log file is buffered, and a crash
@@ -1377,6 +1394,59 @@ void RoR_IosDumpViewHierarchy(void)
                      (int)v.hidden, (int)v.userInteractionEnabled,
                      (int)[v isFirstResponder]);
     }
+}
+
+int RoR_IosMakeTouchViewCoverWindow(void)
+{
+    UIApplication* app = [UIApplication sharedApplication];
+    UIWindow* win = nil;
+    for (UIWindow* w in [app windows])
+    {
+        if ([w isKeyWindow]) { win = w; break; }
+    }
+    if (win == nil && [[app windows] count] > 0)
+    {
+        win = [[app windows] objectAtIndex:0];
+    }
+    if (win == nil)
+    {
+        RoR_IosTrace("[RoR|Input] touch view: no UIWindow yet, left as is");
+        return 0;
+    }
+
+    UIView* touch_view = nil;
+    for (UIView* v in [win subviews])
+    {
+        const char* name = class_getName([v class]);
+        if (name != nullptr && strcmp(name, "InputDelegate") == 0)
+        {
+            touch_view = v;
+            break;
+        }
+    }
+    if (touch_view == nil)
+    {
+        RoR_IosTrace("[RoR|Input] touch view: no InputDelegate subview found, left as is");
+        return 0;
+    }
+
+    const CGRect old_frame = touch_view.frame;
+    touch_view.frame = win.bounds;
+    touch_view.autoresizingMask =
+        UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    touch_view.userInteractionEnabled = YES;
+    touch_view.multipleTouchEnabled = YES;
+    // The delegate is transparent and reads nothing but touch locations, so
+    // putting it in front of OGRE's view changes only who receives touches -
+    // and that is the whole point.
+    [win bringSubviewToFront:touch_view];
+
+    RoR_IosTrace("[RoR|Input] touch view: InputDelegate (%.0f,%.0f,%.0f,%.0f) -> (%.0f,%.0f,%.0f,%.0f), brought to front",
+                 (double)old_frame.origin.x, (double)old_frame.origin.y,
+                 (double)old_frame.size.width, (double)old_frame.size.height,
+                 (double)touch_view.frame.origin.x, (double)touch_view.frame.origin.y,
+                 (double)touch_view.frame.size.width, (double)touch_view.frame.size.height);
+    return 1;
 }
 '''
 
@@ -1918,8 +1988,17 @@ def patch_inputengine(ror):
         '        LOG("[RoR|Startup|Input] iOS: multitouch device ready");\n'
         "        // One-line-per-view dump of the window OIS just put its touch\n"
         "        // delegate into, so a later \"taps do nothing\" report can be\n"
-        "        // answered from the log instead of guessed at.\n"
+        "        // answered from the log instead of guessed at.  The dump runs\n"
+        "        // BEFORE the fix below, so the log always shows the real frame\n"
+        "        // OIS chose, not the corrected one.\n"
         "        RoR_IosDumpViewHierarchy();\n"
+        "        // OIS sizes its delegate from the *portrait* screen frame and\n"
+        "        // puts it in OGRE's *landscape* window, so the delegate only\n"
+        "        // covers part of the screen - and sits under OGRE's own view.\n"
+        "        // Stretch it over the window and bring it to the front; see\n"
+        "        // RoR_IosMakeTouchViewCoverWindow() for why this cannot move a\n"
+        "        // reported touch coordinate.\n"
+        "        RoR_IosMakeTouchViewCoverWindow();\n"
         "    }\n"
         "    catch (OIS::Exception& ex)\n"
         "    {\n"
