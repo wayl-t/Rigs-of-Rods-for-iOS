@@ -118,7 +118,14 @@ def main(argv):
         markers = (b"RTShader System up, active material scheme",
                    b"generating shaders for fixed-function material",
                    b"RTShader System FAILED to initialise",
-                   b"ShaderGenerator::initialize() threw")
+                   b"ShaderGenerator::initialize() threw",
+                   # The listener must use validateMaterial() (not
+                   # invalidateMaterial()+validateScheme()) and must rebuild the
+                   # supported-technique list when the technique build left the
+                   # material needing a compile - otherwise Material::
+                   # getBestTechnique() returns NULL and the ImGui overlay
+                   # dereferences it.  See PORT_FINDINGS 7.30.
+                   b"needed a recompile after the technique build")
         missing = [m for m in markers if m not in binary]
         if missing:
             bad.append(
