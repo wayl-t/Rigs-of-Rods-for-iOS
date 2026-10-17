@@ -2557,6 +2557,113 @@ def patch_gui_manager(ror):
     write(path, text)
 
 
+def patch_fetchicon(ror):
+    """GUIUtils.cpp: fetch an icon from the resource group that actually has it.
+
+    ``FetchIcon()`` is how every ImGui panel gets a small PNG - the vehicle
+    dashboard, the survey map, the repository selector, the multiplayer flags
+    and the main menu's "Cache updated" notice all go through it.  Upstream asks
+    for all of them in the group ``"FlagsRG"``, but that group only holds
+    ``resources/flags`` (the country flags).  The UI icons live in
+    ``resources/icons`` (``IconsRG``), and two names - ``control_pause.png`` /
+    ``control_play.png``, drawn by the multiplayer actor list - exist only in
+    ``resources/famicons`` (``FamiconsRG``).
+
+    The wrong group cannot be recovered from further down either:
+    ``Texture::readImage()`` opens the image with ::
+
+        ResourceGroupManager::getSingleton().openResource(name, mGroup, this);
+
+    which is the overload that hard-codes ``searchGroupsIfNotFound = false``
+    (``OgreResourceGroupManager.h``), so OGRE searches that one group and
+    nothing else, throws ``FileNotFoundException``, and the old code swallowed
+    it and returned an empty ``Ogre::TexturePtr`` while all ~30 callers do
+    ``tex->getHandle()`` with no null check.  (OGRE's RTShader library lookups
+    do *not* hit this, because they ask in ``DEFAULT_RESOURCE_GROUP_NAME``,
+    which ``openResourceImpl`` searches across all groups regardless.)
+
+    On device this fired on every fresh install: the first launch has no
+    ``mods.cache``, rebuilds it, and the main menu then draws its notice box::
+
+        [trace] FileNotFoundException: Cannot locate resource accept.png
+                in resource group FlagsRG.  (OgreResourceGroupManager.cpp 706)
+        [crash] SIGSEGV - invalid memory access addr=0x0 pc=...(+0x1aef60)
+                -> RoR::GUI::GameMainMenu::DrawNoticeBox() +0x2f4
+
+    The second launch reads a valid cache, never draws the notice, and runs
+    fine - exactly the "crashes once, then works" pattern the tester reported.
+
+    So: let OGRE name the group that owns the file (``resourceExistsInAnyGroup``
+    inspects the mounted archives and does not depend on the group we pass in),
+    and if the icon exists nowhere, hand back OGRE's warning texture instead of
+    a null pointer.  ``main()`` has already dimmed that texture to a single
+    unobtrusive pixel unless ``App::diag_warning_texture`` is on, so a missing
+    icon is invisible in normal play and shows the yellow warning stripes while
+    diagnosing.
+    """
+    path = os.path.join(ror, "source", "main", "gui", "GUIUtils.cpp")
+    text = read(path)
+
+    text = must_replace(
+        text,
+        '#include "imgui_internal.h" // ImTextCharFromUtf8\n'
+        "#include <regex>\n"
+        "#include <stdio.h> // sscanf\n",
+        '#include "imgui_internal.h" // ImTextCharFromUtf8\n'
+        "#include <OgreResourceGroupManager.h> // resourceExistsInAnyGroup()\n"
+        "#include <regex>\n"
+        "#include <stdio.h> // sscanf\n",
+        "GUIUtils.cpp OgreResourceGroupManager include",
+    )
+
+    text = must_replace(
+        text,
+        "        Ogre::TexturePtr tex = Ogre::static_pointer_cast<Ogre::Texture>(\n"
+        '            Ogre::TextureManager::getSingleton().createOrRetrieve(name, "FlagsRG").first);\n',
+        "        // Apple/iOS port: upstream asks for every icon in the group \"FlagsRG\",\n"
+        "        // but that group only holds resources/flags (the country flags).  The UI\n"
+        "        // icons live in resources/icons (\"IconsRG\"), and control_pause.png /\n"
+        "        // control_play.png exist only in resources/famicons (\"FamiconsRG\").  The\n"
+        "        // group is not recoverable downstream: Texture::readImage() opens the\n"
+        "        // image with openResource(name, mGroup, this) - the overload that passes\n"
+        "        // searchGroupsIfNotFound=false - so a wrong group throws instead of being\n"
+        "        // looked up elsewhere.  Ask OGRE which mounted group has the file; that\n"
+        "        // search walks the archives and ignores the group name we pass in.\n"
+        "        Ogre::ResourceGroupManager& rgm = Ogre::ResourceGroupManager::getSingleton();\n"
+        "        std::string group = \"IconsRG\";\n"
+        "        if (rgm.resourceExistsInAnyGroup(name))\n"
+        "        {\n"
+        "            group = rgm.findGroupContainingResource(name);\n"
+        "        }\n"
+        "        else\n"
+        "        {\n"
+        "            RoR::Log((std::string(\"[RoR|FetchIcon] no resource group contains '\") + name\n"
+        "                + \"', using the warning texture\").c_str());\n"
+        "        }\n"
+        "\n"
+        "        Ogre::TexturePtr tex = Ogre::static_pointer_cast<Ogre::Texture>(\n"
+        "            Ogre::TextureManager::getSingleton().createOrRetrieve(name, group).first);\n",
+        "GUIUtils.cpp FetchIcon group lookup",
+    )
+
+    text = must_replace(
+        text,
+        "        return Ogre::TexturePtr(); // null\n",
+        "        // Apple/iOS port: an empty TexturePtr here is a null dereference in\n"
+        "        // every caller - they all do tex->getHandle() unconditionally (that is\n"
+        "        // precisely how GameMainMenu::DrawNoticeBox() took the process down on\n"
+        "        // the first launch).  Hand back OGRE's own warning texture instead: a\n"
+        "        // real handle, always.  If even that fails, let the exception fly - RoR\n"
+        "        // handles a thrown exception, it does not handle a null handle.\n"
+        "        RoR::Log((std::string(\"[RoR|FetchIcon] could not load icon '\") + name\n"
+        "            + \"', using the warning texture\").c_str());\n"
+        "        return Ogre::TextureManager::getSingleton()._getWarningTexture();\n",
+        "GUIUtils.cpp FetchIcon null return",
+    )
+
+    write(path, text)
+
+
 def patch_mygui_resources(ror):
     """Add the resources the GUI would otherwise fail to find.
 
@@ -2720,6 +2827,11 @@ def main():
     # directly - the one such caller, and the first thing to dereference the
     # null keyboard after the main menu comes up.
     patch_gui_manager(args.ror_dir)
+    # Same class of bug one level up: FetchIcon() asks for every icon in the
+    # group that only holds the country flags, and the icons live elsewhere.
+    # It only bites on the first launch after a mod-cache rebuild, which is
+    # exactly when the main menu draws its "Cache updated" notice box.
+    patch_fetchicon(args.ror_dir)
     # The runtime platform layer: the new iOS files themselves plus the two
     # entry-point/frame-loop changes in main.cpp that hand the process over to
     # UIKit.

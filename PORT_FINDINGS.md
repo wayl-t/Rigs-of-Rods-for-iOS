@@ -2629,6 +2629,119 @@ SDK-префикс намеренно не ставится (`build-ios-deps.yml
 движка» распространяется не только на скомпилированные библиотеки, но и на
 `.glsl`-данные, которые эти библиотеки читают во время работы.
 
+### 7.32. `FetchIcon()` возвращал нулевой `TexturePtr`: падение при **первом** запуске
+
+Отчёт тестера выглядел противоречиво: «первый раз упало, второй раз работает».
+Именно так и оказалось. В свежем логе (trace A, строки 640–713):
+
+```
+frame 1 completed
+Creating resource group Cache
+FileNotFoundException: Cannot locate resource mods.cache in resource group Cache.
+[RoR|ModCache] Performing rebuild ...
+File 'mods.cache' written OK
+Destroying resource group Content
+FileNotFoundException: Cannot locate resource accept.png in resource group FlagsRG.
+[crash] SIGSEGV - invalid memory access addr=0x0 pc=...+0x1aef60
+```
+
+Последняя строка символизируется как
+`RoR::GUI::GameMainMenu::DrawNoticeBox() +0x2f4` — то есть падение ровно там,
+где рисуется окно «Cache updated» (trace A: 713). Второй запуск (trace B,
+строки 714–1388) читает валидный `mods.cache`, `CacheUpdatedNotice()` не
+вызывается, `DrawNoticeBox()` не рисуется — и всё чисто. Отсюда и «второй раз
+работает».
+
+Причина — в `RoR::FetchIcon()` (`GUIUtils.cpp:372`), через который идёт **вся**
+мелкая графика ImGui: иконки приборной панели, кнопки селектора репозитория,
+кнопки мыши карты, флаги в мультиплеере и иконка в окне «Cache updated».
+Upstream жёстко просит все их в группе `"FlagsRG"`:
+
+```cpp
+Ogre::TexturePtr tex = Ogre::static_pointer_cast<Ogre::Texture>(
+    Ogre::TextureManager::getSingleton().createOrRetrieve(name, "FlagsRG").first);
+...
+catch (...) { return Ogre::TexturePtr(); }   // null
+```
+
+А `FlagsRG` — это `resources/flags.zip`, то есть **флаги стран**. Иконки лежат
+в `resources/icons.zip` (`IconsRG`), а `control_pause.png` /
+`control_play.png` (их рисует список акторов в мультиплеере) — только в
+`resources/famicons.zip` (`FamiconsRG`). `rorres/icons.zip` в бандле есть, и
+`IconsRG` смонтирована (trace: 247–253), `accept.png` в архиве лежит в корне
+— и всё равно «Cannot locate resource … in resource group FlagsRG».
+
+**Почему «поискать в других группах» не спасает.** У OGRE два разных
+`openResource` (OgreResourceGroupManager.h):
+
+```cpp
+// поиск по всем группам — для групп «General»/DEFAULT и явного флага
+DataStreamPtr openResource(const String& resourceName, const String& groupName,
+                           bool searchGroupsIfNotFound = true, ...) const;
+
+// БЕЗ поиска по другим группам — этот вызывается загрузкой текстуры
+DataStreamPtr openResource(const String& resourceName, const String& groupName,
+                           Resource* resourceBeingLoaded, bool throwOnFailure = true) const
+{ return openResourceImpl(resourceName, groupName, /*searchGroupsIfNotFound=*/false, ...); }
+```
+
+`Texture::readImage()` (OgreTexture.cpp) открывает файл картинки именно вторым:
+`openResource(name, mGroup, this)`. То есть ищется **ровно одна** группа
+`mGroup` = `"FlagsRG"`, а не «FlagsRG, а если нет — где-нибудь ещё». Поэтому
+`createOrRetrieve(name, "FlagsRG")` — это не «подсказка», а приговор: файла
+там нет → `FileNotFoundException` → `catch (...)` → **нулевой** `TexturePtr`
+→ `tex->getHandle()` во всех ~30 местах вызова без проверки → SIGSEGV по
+адресу 0.
+
+Заодно это объясняет, почему до сих пор **работали** RTSS-библиотеки: писатель
+просит их через `openResource(libName + ".glsl")` **в группе по умолчанию**
+(`General`), а для неё `openResourceImpl` всё равно ищет по всем группам:
+
+```cpp
+if (pArch == NULL && (searchGroupsIfNotFound ||
+    groupName == AUTODETECT_RESOURCE_GROUP_NAME || grp->inGlobalPool ||
+    (!OGRE_RESOURCEMANAGER_STRICT && groupName == DEFAULT_RESOURCE_GROUP_NAME)))
+```
+
+Так что `FFPLib_Transform.glsl`, смонтированный в `RtShaderRG`, находился из
+`General` (§7.29) — а `accept.png` из `FlagsRG` не находился никогда.
+
+**Исправление** (`patch_fetchicon`, GUIUtils.cpp): не угадывать группу, а
+спросить у OGRE, в какой смонтированной группе файл лежит, и грузить уже из
+неё (`resourceExistsInAnyGroup()` просматривает архивы и не зависит от того,
+что мы передали):
+
+```cpp
+Ogre::ResourceGroupManager& rgm = Ogre::ResourceGroupManager::getSingleton();
+std::string group = "IconsRG";
+if (rgm.resourceExistsInAnyGroup(name))
+    group = rgm.findGroupContainingResource(name);
+
+Ogre::TexturePtr tex = ...createOrRetrieve(name, group).first;
+```
+
+И главное: из `catch (...)` больше не возвращается null. Вместо него —
+предупреждающая текстура самого OGRE (`TextureManager::_getWarningTexture()`),
+а `main()` уже затемнил её до одного незаметного пикселя (при
+`diag_warning_texture = true` будет жёлтая «предупреждающая» заливка). Null
+здесь недопустим: он гарантированно превращается в падение, а исключение выше
+по стеку RoR обрабатывает — поэтому «лучше бросить, чем вернуть null».
+Пропущенная иконка теперь ещё и пишется в лог (`[RoR|FetchIcon] …`), так что
+её не бывает «молча невидимой».
+
+`verify_ipa.py` получил раздел 5: в бинарнике должна быть строка
+`[RoR|FetchIcon]`, а в `rorres/icons.zip`, `famicons.zip` и `flags.zip` — те
+имена, которые `FetchIcon()` реально просит (в том числе `accept.png` в
+icons и `control_pause.png`/`control_play.png` в famicons). Проверка раздела
+5 на **старом** IPA падает ровно на маркере и не на чём больше — то есть
+существующие проверки не задеты.
+
+**Урок.** Ненулевой результат везде, где вызывающий делает `->` без проверки,
+должен быть инвариантом функции, а не пожеланием. И второе: OGRE умеет искать
+файл по всем группам, но загрузка текстуры этим правом не пользуется —
+поэтому «группа по умолчанию ищется везде» не повод передавать в
+`createOrRetrieve()` наугад.
+
 ---
 
 ## Уточнённая карта порта

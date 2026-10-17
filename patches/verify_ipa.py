@@ -218,6 +218,69 @@ def main(argv):
         else:
             print("  ok      rorres/OgreCore.zip: all five StdQuad_vp.glsles present")
 
+    # ------------------------------------------------------------------ #
+    # 5. FetchIcon() must be able to find the images it is asked for.      #
+    # ------------------------------------------------------------------ #
+    # FetchIcon() (GUIUtils.cpp) is the one entry point for every small PNG
+    # the ImGui panels draw - the vehicle dashboard, the survey map, the
+    # repository selector, the multiplayer flags and the main menu's notice
+    # box.  Upstream asks for all of them in the group "FlagsRG" (that is
+    # resources/flags.zip, the country flags) and returns an *empty*
+    # Ogre::TexturePtr when the lookup throws, while all ~30 callers do
+    # tex->getHandle() with no null check.
+    #
+    # OGRE cannot paper over the wrong group either: Texture::readImage()
+    # opens the image with openResource(name, mGroup, this), the overload that
+    # passes searchGroupsIfNotFound=false, so only that single group is ever
+    # searched.  On the first launch after a mod-cache rebuild the main menu
+    # draws its "Cache updated" notice box, which asks for accept.png - an
+    # icon, not a flag - and the app died on every fresh install with
+    #
+    #   FileNotFoundException: Cannot locate resource accept.png in resource
+    #       group FlagsRG.                       (OgreResourceGroupManager.cpp)
+    #   [crash] SIGSEGV addr=0x0
+    #       -> RoR::GUI::GameMainMenu::DrawNoticeBox() +0x2f4
+    #
+    # while the second launch, reading a valid cache, never draws the notice
+    # and runs fine.  patch_fetchicon() makes FetchIcon() ask OGRE which
+    # mounted group owns the file and hand back the warning texture instead of
+    # null; these assertions keep both halves of that from regressing.
+    if exe:
+        marker = b"[RoR|FetchIcon]"
+        if marker not in binary:
+            bad.append(
+                "the executable carries no %r - patch_fetchicon() is not in "
+                "this build, so FetchIcon() still asks for every image in "
+                "FlagsRG and returns a null texture on a miss, and the first "
+                "launch after a mod-cache rebuild crashes in "
+                "GameMainMenu::DrawNoticeBox()" % marker.decode())
+        else:
+            print("  ok      executable: FetchIcon() group fallback present")
+
+    # The names FetchIcon() is asked for, and the packs they live in.  Two of
+    # them - control_pause.png / control_play.png, drawn by the multiplayer
+    # actor list - are in neither icons.zip nor flags.zip but in famicons.zip,
+    # and the multiplayer flag names resolve out of flags.zip.
+    def _pack(name):
+        hit = [n for n in names if n.endswith("/rorres/%s" % name)]
+        return zipfile.ZipFile(io.BytesIO(ipa.read(hit[0]))) if hit else None
+
+    for pack, want in (("icons.zip", ("accept.png", "error.png", "cancel.png")),
+                       ("famicons.zip", ("control_pause.png", "control_play.png")),
+                       ("flags.zip", ("de.png", "us.png"))):
+        inner = _pack(pack)
+        if inner is None:
+            bad.append("rorres/%s is missing - FetchIcon() asks for images "
+                       "from it" % pack)
+            continue
+        have = set(inner.namelist())
+        absent = [w for w in want if w not in have]
+        if absent:
+            bad.append("rorres/%s is missing %s - FetchIcon() asks for it"
+                       % (pack, ", ".join(absent)))
+        else:
+            print("  ok      rorres/%s: %s" % (pack, ", ".join(want)))
+
     for line in bad:
         print("  MISSING " + line)
         print("::error::" + line)
