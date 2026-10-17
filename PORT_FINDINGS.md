@@ -2578,6 +2578,33 @@ Error: Cached function not found SGX_Light_Point_DiffuseSpecular
 | `FFP_SampleTexture` | отсутствует | есть |
 | `FFP_Assign`, `FFP_Construct` | есть | удалены (безвредно) |
 
+Отдельно важно, что набор RoR ещё и **неполный**. Генератор подтягивает
+библиотеку по имени, которое суб-рендер-стейт объявляет через
+`Program::addDependency()`, а затем писатель открывает
+`<имя>.glsl` (OgreShaderGLSLESProgramWriter.cpp:388–390,
+`ResourceGroupManager::openResource(libName + ".glsl")`). Имена, нужные 1.11.6:
+
+| константа | файл | есть у RoR? |
+|---|---|---|
+| `FFP_LIB_ALPHA_TEST` | `FFPLib_AlphaTest.glsl` | **нет** |
+| `FFP_LIB_COMMON` | `FFPLib_Common.glsl` | да |
+| `FFP_LIB_FOG` | `FFPLib_Fog.glsl` | да |
+| `FFP_LIB_TEXTURING` | `FFPLib_Texturing.glsl` | да |
+| `FFP_LIB_TRANSFORM` | `FFPLib_Transform.glsl` | да |
+| `SGX_LIB_DUAL_QUATERNION` | `SGXLib_DualQuaternion.glsl` | **нет** |
+| `SGX_LIB_INTEGRATEDPSSM` | `SGXLib_IntegratedPSSM.glsl` | да |
+| `SGX_LIB_LAYEREDBLENDING` | `SGXLib_LayeredBlending.glsl` | **нет** |
+| `SGX_LIB_NORMALMAPLIGHTING` | `SGXLib_NormalMapLighting.glsl` | да |
+| `SGX_LIB_PERPIXELLIGHTING` | `SGXLib_PerPixelLighting.glsl` | да |
+| `SGX_LIB_TEXTURE_ATLAS` | `SGXLib_TextureAtlas.glsl` | **нет** |
+| — | `SGXLib_TriplanarTexturing.glsl` | **нет** |
+
+Пяти файлов просто нет, а `openResource` при отсутствии бросает
+`FileNotFoundException` — то есть материал с `alpha_rejection` (`FFPAlphaTest`)
+на GLES2 упал бы, как только RTSS стал бы собирать для него шейдер. Так что
+подмена набора на 1.11.6 — не только про сигнатуры, но и про полноту; по этой
+же причине бессмысленно «дописывать» в старый набор отдельные функции.
+
 На устройстве в этот раз упали только `SGX_FetchNormal` и
 `SGX_Light_Point_DiffuseSpecular` (то есть путь normal-map/per-pixel-lighting,
 который использует материал меню), а `FFP_Transform` выжил случайно: нужный
