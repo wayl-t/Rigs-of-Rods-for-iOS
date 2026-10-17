@@ -281,6 +281,41 @@ def main(argv):
         else:
             print("  ok      rorres/%s: %s" % (pack, ", ".join(want)))
 
+    # ------------------------------------------------------------------ #
+    # 6. Touch must reach ImGui, not only the camera.                      #
+    # ------------------------------------------------------------------ #
+    # OIS's iPhone backend has no mouse and no keyboard: it offers only the
+    # accelerometer and OISMultiTouch (iPhoneInputManager::freeDeviceList), so
+    # RoR's own try/catch leaves InputEngine::mMouse and mKeyboard null, and
+    # InputEngine is made a OIS::MultiTouchListener that translates a touch
+    # into the mouse events RoR already handles.
+    #
+    # The translation has one non-obvious requirement.  ImGui learns the
+    # pointer position *only* from a move event:
+    #
+    #   InputEngine touchMoved -> mMouseListener->mouseMoved()
+    #     -> AppContext::mouseMoved()          (AppContext.cpp:80, sole caller)
+    #       -> OgreImGui::InjectMouseMoved()   -> io.MousePos
+    #
+    # and OIS's iPhone backend sends touchesBegan *without* a preceding
+    # touchesMoved (its _touchBegan emits MT_Pressed alone,
+    # src/iphone/iPhoneMultiTouch.mm).  While the position was published only
+    # for MT_Moved, io.MousePos kept its initial (-FLT_MAX,-FLT_MAX), ImGui
+    # never hovered a widget, and a plain tap did nothing: the touch was
+    # offered to the camera instead of the menu behind it.  IosHandleTouch now
+    # publishes the position for every action - with a zeroed delta, so a press
+    # is not read as a flick - before dispatching the button.
+    if exe:
+        marker = b"[RoR|Input] first touch arrived"
+        if marker not in binary:
+            bad.append(
+                "the executable carries no %r - the touch translation in "
+                "InputEngine.cpp is not in this build, so a tap cannot hover "
+                "an ImGui widget and the menus do not respond to touch"
+                % marker.decode())
+        else:
+            print("  ok      executable: touch -> mouse -> ImGui bridge present")
+
     for line in bad:
         print("  MISSING " + line)
         print("::error::" + line)
