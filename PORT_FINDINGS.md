@@ -2457,6 +2457,153 @@ IPA» (`verify_ipa.py`) ничего не гарантирует, пока па�
 
 ---
 
+### 7.30. Перегенерация техники на каждый запрос схемы обнуляла `mSupportedTechniques`, и оверлей ImGui падал на NULL-технике
+
+После §7.29 FFP-библиотека нашлась (ошибки `FFPLib_Transform.glsl` ушли),
+обои меню сгенерировались — и следом SIGSEGV. Символизированный trace
+(`ror_sym.py`):
+
+```
+[crash] SIGSEGV addr=0x0 pc=0x101288f8c(+0x708f8c) lr=0x100cea16c(+0x16a16c)
+pc -> Ogre::Technique::getPass(unsigned short) const +0x0   (this == nullptr)
+lr -> Ogre::ImGuiOverlay::ImGUIRenderable::preRender +0x78
+```
+
+Падение — в `OgreImGuiOverlay.cpp:184`:
+
+```cpp
+mMaterial->getBestTechnique()->getPass(0)->getTextureUnitState(0)
+```
+
+`getBestTechnique()` вернул `NULL`. Почему — видно из исходников OGRE 1.11.6
+и нашего первого варианта слушателя схемы (§7.28). Слушатель вызывал
+`gen.invalidateMaterial(...)` + `gen.validateScheme(...)`:
+
+* `SGScheme::invalidate(name, group)` **безусловно** ставит
+  `setBuildDestinationTechnique(true)` и `mOutOfDate = true`
+  (OgreShaderGenerator.cpp:2068–2087);
+* `SGScheme::validate()` → `buildTargetRenderState()`, и так как при повторной
+  сборке `mDstTechnique != NULL`, выполняется `mat->removeTechnique(i)`
+  (строка 1708);
+* `Material::removeTechnique()` делает `mSupportedTechniques.clear();
+  clearBestTechniqueList(); mCompilationRequired = true;`
+  (OgreMaterial.cpp:419);
+* `Material::getBestTechnique()` возвращает `NULL` уже на строке 359
+  (OgreMaterial.cpp) — **до** того, как спросит слушателя, поэтому «пусть
+  слушатель даст технику» не срабатывает.
+
+Заметим: `createShaderBasedTechnique()` возвращает `true` **и тогда, когда
+отображение уже существует** (OgreShaderGenerator.cpp:772), поэтому повторный
+вызов не создавал ничего нового — он лишь заново запускал пересборку.
+
+Исправление — канонический путь, ровно то, что делает собственный слушатель
+OGRE `SGTechniqueResolverListener::handleSchemeNotFound`
+(Components/Bites/src/OgreSGTechniqueResolverListener.cpp):
+
+```cpp
+gen.validateMaterial(schemeName, material->getName(), material->getGroup());
+```
+
+Он строит технику только если она нужна, и список не чистит. Плюс страховка на
+случай, когда материал всё-таки остался «грязным»:
+
+```cpp
+if (material->getCompilationRequired())
+    material->compile(true);
+```
+
+`Material::compile(bool)` — публичный (OgreMaterial.h:321), а
+`getCompilationRequired()` — OgreMaterial.h:673. Компиляция здесь дешёвая:
+`Technique::_compile` делает только `checkGPURules` + `checkHardwareSupport` +
+`clearIlluminationPasses` и **не** вызывает `Pass::_compile`, то есть ни одного
+GPU-шейдера не создаёт.
+
+Шлюз `verify_ipa.py` теперь проверяет и отсутствие старых вызовов
+(`invalidateMaterial`, `validateScheme`), и наличие нового, и наличие
+trace-литерала `needed a recompile after the technique build` — чтобы «фикс без
+подтверждения в бинарнике» больше не проходил.
+
+**Урок.** `invalidate*`/`validateScheme()` из слушателя схемы — неправильный
+инструмент: это «материал изменился, перестрой всё», а слушателю нужно «дай
+технику для этой схемы». Особенно коварно то, что первый вызов отрабатывает
+нормально, а падает второй: `createShaderBasedTechnique` сообщает об успехе и
+когда ничего не делает, поэтому ошибка проявляется не там, где написана.
+
+---
+
+### 7.31. RoR везёт библиотеку функций RTSS 2009 года, а линкуется генератор OGRE 1.11.6
+
+Сразу перед первой генерацией материала trace показывает девять строк
+(new-trace.log, 601–609):
+
+```
+Error: Cached function not found SGX_FetchNormal
+Error: Cached function not found SGX_Light_Point_DiffuseSpecular
+...
+```
+
+Затем — первая генерация (`generating shaders for fixed-function material
+'rigsofrods/WallpaperMat'`, дважды, строки 610–611), `ImGui/material`
+(628–629) и падение из §7.30 (строка 648).
+
+Библиотека функций RTSS — это **данные**, жёстко привязанные к версии
+генератора: суб-рендер-стейты (`OgreShaderFFPTransform`, `…FFPLighting`,
+`OgreShaderExNormalMapLighting` и т. д.) вызывают функции `FFP_*`/`SGX_*` с
+фиксированными типами параметров, а `OgreShaderGLSLESProgramWriter` сопоставляет
+эти вызовы с сигнатурами, разобранными из `resources/rtshader/*.glsl`, через
+`FunctionInvocation::operator==` — а он сравнивает имя функции, тип возврата,
+число операндов и у каждого операнда семантику и **тип**
+(OgreShaderFunctionAtom.cpp:282 → `FunctionInvocationCompare`).
+
+Совпадения нет → тело функции не попадает в шейдер, а в лог идёт
+`Cached function not found` (OgreShaderGLSLESProgramWriter.cpp:193). При этом
+**вызов и forward-объявление всё равно пишутся**, то есть сгенерированный
+шейдер вызывает функцию, которой нет → программа не линкуется (или, что хуже,
+работает мусором).
+
+Причина: RoR в `resources/rtshader/*.glsl` везёт набор 2009 года — в шапках
+`Copyright (c) 2000-2009` и первая строка `#version 120` (парсер её пропускает,
+вреда нет). Линкуется же OGRE **1.11.6** (`Copyright (c) 2000-2014`):
+
+| функция | RoR (2009) | OGRE 1.11.6 |
+|---|---|---|
+| `SGX_FetchNormal` | `out vec3 vOut` | `out vec3` **и** `out vec4` |
+| `SGX_Light_Directional_Diffuse` | `in vec3 vTSNormal` | `in vec4 vTSNormal` |
+| `SGX_Light_Point_DiffuseSpecular` | `in vec3 vTSNormal` | `in vec4 vTSNormal` |
+| `SGX_Light_Spot_DiffuseSpecular` | `in vec3 vTSNormal` | `in vec4 vTSNormal` |
+| `FFP_Transform` | только `mat4/vec4/vec4` | + `mat4/vec3`, `mat3/vec3`, `mat3x4/vec3` |
+| `FFP_Normalize` | отсутствует | есть |
+| `FFP_DerivePointSize` | отсутствует | есть |
+| `FFP_PixelFog_PositionDepth` | отсутствует | есть |
+| `FFP_SampleTexture` | отсутствует | есть |
+| `FFP_Assign`, `FFP_Construct` | есть | удалены (безвредно) |
+
+На устройстве в этот раз упали только `SGX_FetchNormal` и
+`SGX_Light_Point_DiffuseSpecular` (то есть путь normal-map/per-pixel-lighting,
+который использует материал меню), а `FFP_Transform` выжил случайно: нужный
+генератору вариант `(mat4, vec4, vec4)` есть в обоих наборах. Остальные
+расхождения выстрелят на других материалах.
+
+Исправление: подменить библиотеку на собственный набор OGRE 1.11.6
+(`Samples/Media/RTShaderLib/GLSL/*`, 13 файлов), положенный байт-в-байт в
+`patches/ror/rtshader_glsl/`; `patch_rtshader_media` копирует их поверх
+`resources/rtshader/`, не трогая собственные файлы RoR
+(`SampleLib_ReflectionMap.glsl`, `RTShaderSystem.material`). Медиа OGRE в
+SDK-префикс намеренно не ставится (`build-ios-deps.yml`,
+`OGRE_BUILD_SAMPLES=FALSE`), поэтому «взять готовое из установленного OGRE»
+нельзя — вендоринг остаётся единственным способом держать генератор и
+библиотеку в паре. Депы клонируют ровно тег `v1.11.6`, и `valanchors.py`
+сверяет все 13 вендоренных файлов именно с этим тегом, так что обновление OGRE
+не сможет молча их рассинхронизировать. `verify_ipa.py` теперь распаковывает
+`rorres/rtshader.zip` внутри готового IPA и проверяет, что подписи — от 1.11.6.
+
+**Урок.** «Cached function not found» — не косметика: тело функции не попадает
+в шейдер, а вызов попадает. И правило «медиа должно совпадать с версией
+движка» распространяется не только на скомпилированные библиотеки, но и на
+`.glsl`-данные, которые эти библиотеки читают во время работы.
+
+---
+
 ## Уточнённая карта порта
 
 | Компонент | Судьба | Состояние |

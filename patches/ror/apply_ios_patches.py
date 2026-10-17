@@ -2592,6 +2592,94 @@ def patch_mygui_resources(ror):
                   "FlagsRG will still fail to resolve ror.png")
 
 
+# The RTSS function library is *data*, and it is version locked to the library
+# that generates the shaders: the sub-render-states call FFP_*/SGX_* functions
+# with hard coded parameter types, and OgreShaderGLSLESProgramWriter matches
+# those calls against the signatures it parses out of these files with
+# FunctionInvocation::operator==, which compares the function name, the return
+# type, the operand count and every operand's semantic and *type*.
+#
+# RoR ships an RTSS library from 2009 (see the copyright headers in
+# resources/rtshader/*.glsl: "Copyright (c) 2000-2009"), i.e. the OGRE 1.6/1.7
+# set, while this port links OGRE 1.11.6's OgreRTShaderSystem.  The signatures
+# no longer agree, and the mismatch is not academic:
+#
+#   RoR 2009                    OGRE 1.11.6 (what the generator calls)
+#   SGX_FetchNormal(... out vec3 vOut)        out vec4 vOut
+#   SGX_Light_*_*(in vec3 vTSNormal, ...)     in vec4 vTSNormal
+#   FFP_Transform(mat4, vec4, out vec4)       + mat3/vec3 and mat4/vec3 overloads
+#   FFP_Normalize                             absent from the 2009 file
+#   FFP_DerivePointSize                       absent
+#   FFP_PixelFog_PositionDepth                absent
+#   FFP_SampleTexture                         absent
+#
+# A failed comparison means the function body is never emitted ("Error: Cached
+# function not found SGX_FetchNormal" - seen 9x on device while entering the
+# main menu), yet the call and its forward declaration are still written, so the
+# generated shader references an undefined function and does not link.
+#
+# So the 2009 library has to go.  These files are OGRE v1.11.6's own
+# Samples/Media/RTShaderLib/GLSL/*, vendored byte for byte (the deps workflow
+# clones exactly that tag - build-ios-deps.yml "Get OGRE 1.11.6").  OGRE's media
+# is deliberately not installed into the SDK prefix (OGRE_BUILD_SAMPLES=FALSE),
+# so copying them from our repo is the only way to keep generation and library
+# in step.  SampleLib_ReflectionMap.glsl and RTShaderSystem.material are RoR's
+# own and are left alone.
+RTSHADER_GLSL_LIBS = (
+    "FFPLib_AlphaTest.glsl",
+    "FFPLib_Common.glsl",
+    "FFPLib_Fog.glsl",
+    "FFPLib_Lighting.glsl",
+    "FFPLib_Texturing.glsl",
+    "FFPLib_Transform.glsl",
+    "SGXLib_DualQuaternion.glsl",
+    "SGXLib_IntegratedPSSM.glsl",
+    "SGXLib_LayeredBlending.glsl",
+    "SGXLib_NormalMapLighting.glsl",
+    "SGXLib_PerPixelLighting.glsl",
+    "SGXLib_TextureAtlas.glsl",
+    "SGXLib_TriplanarTexturing.glsl",
+)
+
+
+def patch_rtshader_media(ror):
+    """Replace RoR's 2009 RTSS GLSL library with the OGRE 1.11.6 one.
+
+    See RTSHADER_GLSL_LIBS for why this is not optional.  CMake's
+    zip_folder_resources packs resources/rtshader into rorres/rtshader.zip, so
+    overwriting the files here is enough; verify_ipa.py then re-reads that zip
+    inside the finished IPA and checks the signatures really are 1.11.6's.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    src_dir = os.path.join(here, "rtshader_glsl")
+    dst_dir = os.path.join(ror, "resources", "rtshader")
+
+    if not os.path.isdir(src_dir):
+        sys.exit("ERROR: the vendored RTSS library is missing: %s" % src_dir)
+    if not os.path.isdir(dst_dir):
+        sys.exit("ERROR: resources/rtshader is missing from the RoR checkout")
+
+    replaced = 0
+    for name in RTSHADER_GLSL_LIBS:
+        src = os.path.join(src_dir, name)
+        if not os.path.isfile(src):
+            sys.exit("ERROR: vendored RTSS library file missing: %s" % src)
+        shutil.copyfile(src, os.path.join(dst_dir, name))
+        replaced += 1
+
+    # Say what was wrong, not just what was copied: this is the kind of fix that
+    # silently regresses if someone drops the vendored directory.
+    stale = os.path.join(dst_dir, "SGXLib_NormalMapLighting.glsl")
+    text = read(stale)
+    if "out vec4 vOut" not in text or "in vec4 vTSNormal" not in text:
+        sys.exit("ERROR: resources/rtshader/SGXLib_NormalMapLighting.glsl is "
+                 "not the OGRE 1.11.6 version (SGX_FetchNormal must write "
+                 "out vec4 and SGX_Light_* must take in vec4 vTSNormal)")
+
+    print("  replaced %d RTSS library files in resources/rtshader with the "
+          "OGRE 1.11.6 (v1.11.6) set" % replaced)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("ror_dir")
@@ -2652,6 +2740,11 @@ def main():
     # needs and that simply are not there under the name it asks for.
     # See patch_mygui_resources() for the reasoning.
     patch_mygui_resources(args.ror_dir)
+    # Also data, and also version locked: RoR's resources/rtshader is the 2009
+    # RTSS function library, which no longer answers the calls OGRE 1.11.6's
+    # sub-render-states make ("Error: Cached function not found SGX_*" on
+    # device).  See patch_rtshader_media().
+    patch_rtshader_media(args.ror_dir)
 
     print("applied Apple/iOS patches to %s" % args.ror_dir)
     if args.ois_include:

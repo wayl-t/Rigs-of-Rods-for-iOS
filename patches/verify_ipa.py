@@ -139,6 +139,18 @@ def main(argv):
     # The generator reads the FFP function library out of this pack when it
     # builds a shader, with ResourceGroupManager::openResource() - any group
     # will do, but the files have to exist.
+    #
+    # Existing is not enough: the library is version locked to the RTSS that
+    # generates the shaders.  RoR ships the 2009 (OGRE 1.6/1.7) set while this
+    # port links OGRE 1.11.6, and the sub-render-states call e.g.
+    # SGX_FetchNormal with an out vec4 and SGX_Light_* with in vec4 vTSNormal.
+    # OgreShaderGLSLESProgramWriter matches those calls against the signatures
+    # parsed out of these files (FunctionInvocation::operator== compares name,
+    # return type, operand count and every operand's semantic and type), so the
+    # 2009 signatures are simply not found - "Error: Cached function not found
+    # SGX_FetchNormal" - and the emitted shader calls a function it never
+    # defines.  patch_rtshader_media() installs OGRE 1.11.6's own library; these
+    # assertions are what keep that from silently regressing.
     rtsh = [n for n in names if n.endswith("/rorres/rtshader.zip")]
     if not rtsh:
         bad.append("rorres/rtshader.zip is missing - the RTShader System "
@@ -150,8 +162,40 @@ def main(argv):
             bad.append("rorres/rtshader.zip has no FFPLib_Transform.glsl - "
                        "the RTShader System parses it to build every shader")
         else:
-            print("  ok      rorres/rtshader.zip: %d GLSL FFP library files"
-                  % len(libs))
+            def _lib(suffix):
+                hit = [n for n in libs if n.endswith(suffix)]
+                return inner.read(hit[0]).decode("utf-8", "replace") if hit else ""
+
+            def _norm(text):
+                return " ".join(text.split())
+
+            # Signatures the 1.11.6 generator calls and the 2009 file lacks /
+            # declares with different types.
+            normalmap = _norm(_lib("SGXLib_NormalMapLighting.glsl"))
+            common = _lib("FFPLib_Common.glsl")
+            fog = _lib("FFPLib_Fog.glsl")
+            wrong = []
+            if "void SGX_FetchNormal(in sampler2D s, in vec2 uv, out vec4 vOut)" \
+                    not in normalmap:
+                wrong.append("SGX_FetchNormal(in sampler2D, in vec2, out vec4)")
+            if "void SGX_Light_Point_DiffuseSpecular( in vec4 vTSNormal," \
+                    not in normalmap:
+                wrong.append("SGX_Light_*(in vec4 vTSNormal)")
+            if "FFP_Normalize" not in common:
+                wrong.append("FFP_Normalize")
+            if "FFP_PixelFog_PositionDepth" not in fog:
+                wrong.append("FFP_PixelFog_PositionDepth")
+            if wrong:
+                bad.append(
+                    "rorres/rtshader.zip carries the pre-1.11 RTShader System "
+                    "library: %s not declared the way OGRE 1.11.6's "
+                    "sub-render-states call it, so the generated shaders "
+                    "reference undefined functions ('Error: Cached function "
+                    "not found').  patch_rtshader_media() must install "
+                    "patches/ror/rtshader_glsl/." % ", ".join(wrong))
+            else:
+                print("  ok      rorres/rtshader.zip: %d GLSL FFP library files,"
+                      " signatures match OGRE 1.11.6" % len(libs))
 
     # OGRE's StdQuad_vp.program asks for four GLSL ES sources that upstream
     # never wrote (nothing selects a GLSLES delegate on desktop).  Without
