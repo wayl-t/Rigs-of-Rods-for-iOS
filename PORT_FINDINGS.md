@@ -2353,6 +2353,59 @@ CI упал. Вывод: порядок вызовов в `main()` и поряд
 
 ---
 
+### 7.28. RTSS падал при инициализации: GLES2 регистрирует язык `glsles` только при создании первого окна
+
+Первый прогон с RTSS (§7.27) дошёл до `[rtss]`-строк ровно ноль раз —
+вместо них trace (`ror-trace (5).log`) показывает дважды и затем в
+`[fatal]`:
+
+```
+InternalErrorException: ShaderGenerator creation error: None of the profiles
+is supported. in ShaderGenerator::ShaderGenerator at OgreShaderGenerator.cpp
+(line 87)
+```
+
+**Причина — ленивая capability-цепочка GLES2.** Конструктор
+`ShaderGenerator` выбирает язык шейдеров через
+`HighLevelGpuProgramManager::isLanguageSupported("glsles")` и бросает
+исключение, если не поддержан ни один (OgreShaderGenerator.cpp:65–88). А
+фабрику `glsles` GLES2-рендерсистема регистрирует **только при создании
+первого render window** — внутри
+`GLES2RenderSystem::createRenderWindow → initialiseFromRenderSystemCapabilities`
+(OgreGLES2RenderSystem.cpp:543–544). Наш bootstrap стоял сразу после
+`Root::initialise(/*createWindow=*/false)`, а окно RoR создаёт заметно позже
+(`AppContext::SetUpConfig` → `createRenderWindow`), поэтому на момент вызова
+в менеджере не было ни одной языковой фабрики — и RTSS честно сообщил, что
+"profiles unsupported".
+
+**Исправление.** Блок перенесён: теперь он стоит между
+`m_render_window = Root::createRenderWindow(...)` и
+`m_viewport = m_render_window->addViewport(...)` — обе границы жёсткие:
+раньше нет фабрики `glsles`, позже схема должна быть активна до первого
+вьюпорта и до первого рендера материалов. Порядок с инициализацией
+ресурсных групп свободен, это проверено по исходникам OGRE 1.11.6:
+`FFPRenderStateBuilder::initialize()` только регистрирует фабрики
+под-состояний, а сама FFP-библиотека `FFPLib_*.glsl` читается лениво —
+`GLSLESProgramWriter::cacheDependencyFunctions` открывает её в момент
+записи шейдера, то есть при первой генерации, задолго до которой
+группы ресурсов уже инициализированы.
+
+Дополнительно `ShaderGenerator::initialize()` обёрнут в try/catch с
+`RoR_IosTrace("[rtss] ShaderGenerator::initialize() threw: %s")`: сбой
+инициализации теперь виден в trace по имени исключения, а не только через
+общий перехват в `RoRMain`. `verify_ipa.py` требует и этот новый маркер в
+бинарнике.
+
+**Урок (дополнение к §7.27).** «Порядок инициализации OGRE» — это не только
+порядок вызовов в `main()` приложения: capability-цепочки рендерсистемы
+ленивы (языки, шейдерные профили и фабрики high-level программ появляются
+при создании первого окна), и любой компонент, спрашивающий
+`HighLevelGpuProgramManager`/`GpuProgramManager` до этого момента, получает
+пустой ответ. Единственный надёжный якорь для RTSS-старта — сразу после
+первого `createRenderWindow`.
+
+---
+
 ## Уточнённая карта порта
 
 | Компонент | Судьба | Состояние |

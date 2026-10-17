@@ -117,7 +117,8 @@ def main(argv):
         binary = ipa.read(exe[0])
         markers = (b"RTShader System up, active material scheme",
                    b"generating shaders for fixed-function material",
-                   b"RTShader System FAILED to initialise")
+                   b"RTShader System FAILED to initialise",
+                   b"ShaderGenerator::initialize() threw")
         missing = [m for m in markers if m not in binary]
         if missing:
             bad.append(

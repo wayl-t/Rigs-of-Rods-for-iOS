@@ -2238,16 +2238,40 @@ def patch_rtshader(ror):
 
     text = must_replace(
         text,
-        "    m_ogre_root->initialise(/*createWindow=*/false);\n",
-        "    m_ogre_root->initialise(/*createWindow=*/false);\n"
+        "    this->SetRenderWindowIcon(m_render_window);\n"
+        "    m_render_window->setActive(true);\n"
+        "\n"
+        "    // Create viewport (without camera)\n",
+        "    this->SetRenderWindowIcon(m_render_window);\n"
+        "    m_render_window->setActive(true);\n"
         "\n"
         "#ifdef ROR_PLATFORM_IOS\n"
-        "    // Apple/iOS: turn the RTShader System on before any material is parsed\n"
-        "    // or any viewport exists - the viewport copies the active material\n"
-        "    // scheme when it is created, and RTSS has to be watching the resource\n"
-        "    // groups when they are initialised (it parses 'rtshader/FFPLib_*.glsl'\n"
-        "    // out of them later, when it generates a shader).\n"
-        "    if (Ogre::RTShader::ShaderGenerator::initialize())\n"
+        "    // Apple/iOS: turn the RTShader System on here, between the render\n"
+        "    // window and the first viewport.  Two hard constraints fix this spot:\n"
+        "    //\n"
+        "    //  * The GLES2 render system registers its GLSL ES high-level program\n"
+        "    //    factory only when the FIRST RENDER WINDOW is created\n"
+        "    //    (GLES2RenderSystem::createRenderWindow ->\n"
+        "    //    initialiseFromRenderSystemCapabilities, OgreGLES2RenderSystem.cpp),\n"
+        "    //    and ShaderGenerator picks its shader language from\n"
+        "    //    HighLevelGpuProgramManager.  Initialising the RTSS any earlier\n"
+        "    //    aborts with InternalErrorException 'None of the profiles is\n"
+        "    //    supported' - reproduced on device before this block moved here.\n"
+        "    //  * The scheme must be active before the viewport exists and before\n"
+        "    //    any material is parsed or rendered.  The RTSS FFP library\n"
+        "    //    ('rtshader/FFPLib_*.glsl' in RtShaderRG) is read lazily, when the\n"
+        "    //    first shader is generated, so resource-group init order is free.\n"
+        "    bool rtss_ok = false;\n"
+        "    try\n"
+        "    {\n"
+        "        rtss_ok = Ogre::RTShader::ShaderGenerator::initialize();\n"
+        "    }\n"
+        "    catch (const Ogre::Exception& ex)\n"
+        "    {\n"
+        "        RoR_IosTrace(\"[rtss] ShaderGenerator::initialize() threw: %s\",\n"
+        "            ex.getFullDescription().c_str());\n"
+        "    }\n"
+        "    if (rtss_ok)\n"
         "    {\n"
         "        Ogre::MaterialManager::getSingleton().addListener(\n"
         "            new IosFixedFunctionMaterialListener(),\n"
@@ -2262,7 +2286,9 @@ def patch_rtshader(ror):
         "        RoR_IosTrace(\"[rtss] RTShader System FAILED to initialise - \"\n"
         "            \"materials without shaders will not render\");\n"
         "    }\n"
-        "#endif\n",
+        "#endif\n"
+        "\n"
+        "    // Create viewport (without camera)\n",
         "AppContext.cpp: enable the RTShader System on iOS",
     )
     write(path, text)
