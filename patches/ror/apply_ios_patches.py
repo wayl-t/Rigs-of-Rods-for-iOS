@@ -2466,16 +2466,18 @@ def main():
     # directly - the one such caller, and the first thing to dereference the
     # null keyboard after the main menu comes up.
     patch_gui_manager(args.ror_dir)
-    # GLES2 has no fixed-function pipeline; RoR's materials assume one.  This
-    # turns on OGRE's RTShader System and hands it every scene manager, which
-    # is what turns "RenderSystem does not support FixedFunction" from a fatal
-    # startup error into generated shaders.
-    patch_rtshader(args.ror_dir)
     # The runtime platform layer: the new iOS files themselves plus the two
     # entry-point/frame-loop changes in main.cpp that hand the process over to
     # UIKit.
     patch_ios_platform(args.ror_dir)
     patch_main_cpp(args.ror_dir)
+    # GLES2 has no fixed-function pipeline; RoR's materials assume one.  This
+    # turns on OGRE's RTShader System and hands it every scene manager, which
+    # is what turns "RenderSystem does not support FixedFunction" from a fatal
+    # startup error into generated shaders.  Must come after patch_ios_platform
+    # - it declares its scene-manager hook in ios_platform.h, which only exists
+    # from that point on.
+    patch_rtshader(args.ror_dir)
     # Resources rather than code, but the same class of problem: files the GUI
     # needs and that simply are not there under the name it asks for.
     # See patch_mygui_resources() for the reasoning.
