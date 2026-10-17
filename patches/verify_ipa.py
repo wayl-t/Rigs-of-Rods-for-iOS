@@ -145,6 +145,27 @@ def main(argv):
             print("  ok      rorres/rtshader.zip: %d GLSL FFP library files"
                   % len(libs))
 
+    # OGRE's StdQuad_vp.program asks for four GLSL ES sources that upstream
+    # never wrote (nothing selects a GLSLES delegate on desktop).  Without
+    # them every run logs FileNotFoundException + InvalidParametersException.
+    ogrecore = [n for n in names if n.endswith("/rorres/OgreCore.zip")]
+    if not ogrecore:
+        bad.append("rorres/OgreCore.zip is missing")
+    else:
+        inner = zipfile.ZipFile(io.BytesIO(ipa.read(ogrecore[0])))
+        have = set(inner.namelist())
+        want = ("StdQuad_Tex2_vp.glsles", "StdQuad_Tex2a_vp.glsles",
+                "StdQuad_Tex3_vp.glsles", "StdQuad_Tex4_vp.glsles")
+        absent = [w for w in want if w not in have]
+        if absent:
+            bad.append(
+                "rorres/OgreCore.zip is missing %s - StdQuad_vp.program "
+                "references them and OGRE reports FileNotFoundException + "
+                "'Named constants have not been initialised' on every run"
+                % ", ".join(absent))
+        else:
+            print("  ok      rorres/OgreCore.zip: all five StdQuad_vp.glsles present")
+
     for line in bad:
         print("  MISSING " + line)
         print("::error::" + line)

@@ -2328,6 +2328,89 @@ def patch_rtshader(ror):
     write(path, text)
 
 
+def patch_ogrecore_stdquad_glsles(ror):
+    """Write the four GLSL ES sources `StdQuad_vp.program` asks for but nobody wrote.
+
+    ``resources/OgreCore/StdQuad_vp.program`` defines a ``glsles`` variant for
+    five vertex programs and a ``unified`` program delegating to it, but the
+    repo only ever contained ``StdQuad_vp.glsles`` - OGRE's own media never had
+    the other four, because nothing on desktop ever resolves a GLSL ES
+    delegate.  iOS does, and every run since the first one ends with
+
+        FileNotFoundException: StdQuad_Tex2_vp.glsles in resource group OgreCoreRG
+        InvalidParametersException: Named constants have not been initialised
+
+    in the trace: the script parser follows the ``unified`` program to its
+    GLSLES delegate, the delegate's source file is not there, so it fails to
+    load and the ``default_params`` block cannot be applied to it.
+
+    Nothing references these programs, so this is not a bug - but it is two
+    scary-looking errors in *every* trace from here on, and false alarms are
+    expensive when a file off the device is the only window into the app
+    (§7.25 was the same class of problem: the file simply was not there under
+    the name the build asked for).
+
+    The files are the ``StdQuad_Tex2_vp`` / ``StdQuad_Tex2a_vp`` /
+    ``StdQuad_Tex3_vp`` / ``StdQuad_Tex4_vp`` entry points of ``StdQuad_vp.cg``
+    translated to GLSL ES 1.00, in the shape of the ``StdQuad_vp.glsles`` that
+    is already shipped.  The quad geometry and the uv derivation are identical
+    in all five; they differ only in how many texture coordinates they hand to
+    the fragment stage.
+    """
+    directory = os.path.join(ror, "resources", "OgreCore")
+    os.makedirs(directory, exist_ok=True)
+
+    # Shared preamble, identical to the existing StdQuad_vp.glsles.
+    head = (
+        "#version 100\n"
+        "\n"
+        "precision mediump int;\n"
+        "precision mediump float;\n"
+        "\n"
+        "uniform mat4 worldViewProj;\n"
+        "attribute vec4 vertex;\n"
+    )
+    # The uv every variant derives from the position, from StdQuad_vp.cg:
+    #   inPos = sign(inPos.xy); uv0 = (vec2(inPos.x, -inPos.y) + 1) / 2
+    body = (
+        "\n"
+        "void main()\n"
+        "{\n"
+        "    gl_Position = worldViewProj * vertex;\n"
+        "\n"
+        "    vec2 inPos = sign(vertex.xy);\n"
+        "\n"
+        "    uv0 = (vec2(inPos.x, -inPos.y) + 1.0) / 2.0;\n"
+        "%s"
+        "}\n"
+    )
+
+    variants = [
+        # file, varying declarations, extra uv assignments
+        ("StdQuad_Tex2_vp.glsles",
+         "varying vec2 uv0;\nvarying vec2 uv1;\n",
+         "    uv1 = uv0;\n"),
+        # Tex2a is the odd one out: uv1 comes straight from the sign-normalised
+        # position instead of following uv0.
+        ("StdQuad_Tex2a_vp.glsles",
+         "varying vec2 uv0;\nvarying vec2 uv1;\n",
+         "    uv1 = inPos;\n"),
+        ("StdQuad_Tex3_vp.glsles",
+         "varying vec2 uv0;\nvarying vec2 uv1;\nvarying vec2 uv2;\n",
+         "    uv1 = uv0;\n    uv2 = uv0;\n"),
+        ("StdQuad_Tex4_vp.glsles",
+         "varying vec2 uv0;\nvarying vec2 uv1;\nvarying vec2 uv2;\n"
+         "varying vec2 uv3;\n",
+         "    uv1 = uv0;\n    uv2 = uv0;\n    uv3 = uv0;\n"),
+    ]
+
+    for name, varyings, extra in variants:
+        path = os.path.join(directory, name)
+        write(path, head + varyings + body % extra)
+        print("    wrote resources/OgreCore/%s (%d bytes)"
+              % (name, os.path.getsize(path)))
+
+
 def patch_gui_manager(ror):
     """GUIManager.cpp: do not read modifiers off a keyboard that is not there.
 
@@ -2478,6 +2561,10 @@ def main():
     # - it declares its scene-manager hook in ios_platform.h, which only exists
     # from that point on.
     patch_rtshader(args.ror_dir)
+    # Same class as patch_mygui_resources() but one layer down: OGRE's own
+    # StdQuad_vp.program names four GLSL ES sources that were never written.
+    # See patch_ogrecore_stdquad_glsles() for why they are worth writing.
+    patch_ogrecore_stdquad_glsles(args.ror_dir)
     # Resources rather than code, but the same class of problem: files the GUI
     # needs and that simply are not there under the name it asks for.
     # See patch_mygui_resources() for the reasoning.
