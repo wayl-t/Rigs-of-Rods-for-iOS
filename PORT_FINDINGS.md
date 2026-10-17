@@ -2406,6 +2406,57 @@ is supported. in ShaderGenerator::ShaderGenerator at OgreShaderGenerator.cpp
 
 ---
 
+### 7.29. RTSS поднялся, но FFP-библиотека не смонтирована: upstream объявляет пак `RtShaderRG` и никогда его не добавляет
+
+После исправления §7.28 trace (`ror-trace.log`, 598 строк) показывает первый
+настоящий прогресс:
+
+```
+[rtss] RTShader System up, active material scheme 'ShaderGeneratorDefaultScheme'
+...
+[rtss] generating shaders for fixed-function material 'rigsofrods/WallpaperMat'
+FileNotFoundException: Cannot locate resource FFPLib_Transform.glsl in
+        resource group General. in ResourceGroupManager::openResource
+```
+
+Bootstrap работает, слушатель схемы сработал при первом материале обоев —
+но сама библиотека функций не найдена **ни в одной** ресурсной группе
+(`openResource` с `searchGroupsIfNotFound` ищет глобально, см.
+OgreResourceGroupManager.cpp:678–691).
+
+Причина — мёртвый код upstream. `ContentManager.cpp:89` объявляет пак:
+
+```cpp
+DECLARE_RESOURCE_PACK( RTSHADER, "rtshader", "RtShaderRG");
+```
+
+но **ни одного** `AddResourcePack(ResourcePack::RTSHADER)` в коде RoR нет,
+и переменная `gfx_enable_rtshaders` («Use RTShader System», по умолчанию
+`false`) тоже никем не читается. На десктопе это не заметно: там FFP-библиотека
+попадает в «General» из установленного медиа OGRE, и RTSS находит её случайно.
+В нашем IPA медиа OGRE не устанавливается — только `rorres/rtshader.zip`
+(упакованный из `resources/rtshader`), и до патча его никто не монтировал.
+
+Исправление: `patch_rtshader` добавляет в `ContentManager::InitContentManager`
+(сразу после паков `MYGUI`/`DASHBOARDS`) вызов
+`this->AddResourcePack(ResourcePack::RTSHADER);`. Штатный `AddResourcePack`
+умеет и zip (`FileExists(dir + ".zip")` → `addResourceLocation(..., "Zip")`)
+и каталог, сразу инициализирует группу и пишет в лог привычную строку
+`Loading resource pack "rtshader" to group "RtShaderRG" (ZIP archive)` —
+по ней на устройстве и проверим. Порядок корректен: RTSS инициализирован
+раньше (AppContext, после создания окна), поэтому
+`SGScriptTranslatorManager` уже зарегистрирован, когда группа парсит
+`RTShaderSystem.material` из пака; сама FFP-библиотека читается ещё позже,
+при первой генерации.
+
+**Урок.** Объявление ресурса в upstream не означает его использование:
+прежде чем опираться на чужой пайплайн, поищите место, где ресурс реально
+подключается — здесь его просто не существовало, и проверка «zip есть в
+IPA» (`verify_ipa.py`) ничего не гарантирует, пока пак не смонтирован
+в ресурсную группу.
+
+---
+
 ## Уточнённая карта порта
 
 | Компонент | Судьба | Состояние |

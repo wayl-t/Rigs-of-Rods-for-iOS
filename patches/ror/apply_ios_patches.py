@@ -2126,11 +2126,15 @@ def patch_rtshader(ror):
     The RTSS is OGRE's own answer to this: it reads a material's
     fixed-function description (texture units, blending, alpha rejection,
     fog, scene blending) and builds real GLSL ES programs from it at run time.
-    Everything needed is already in place - OGRE 1.11 ships a GLSL ES writer
-    (``OgreShaderGLSLESProgramWriter``), it parses the FFP library out of
-    ``.glsl`` files, and RoR already ships that library in
-    ``resources/rtshader`` (pack ``RtShaderRG``) and links
-    ``OgreRTShaderSystem`` (``find_package(OGRE COMPONENTS ... RTShaderSystem)``).
+    Most of what is needed is already in place - OGRE 1.11 ships a GLSL ES
+    writer (``OgreShaderGLSLESProgramWriter``), it parses the FFP library out
+    of ``.glsl`` files, and RoR ships that library in ``resources/rtshader``
+    (pack ``RtShaderRG``) and links ``OgreRTShaderSystem``
+    (``find_package(OGRE COMPONENTS ... RTShaderSystem)``).  Two things were
+    missing and are added here: the pack is never mounted (upstream declares
+    it and never calls ``AddResourcePack`` for it - on desktop the library
+    happens to come from OGRE's own installed media), and the RTSS bootstrap
+    itself (see the AppContext section for its strict placement rules).
 
     Only fixed-function materials are converted.  ``createShaderBasedTechnique``
     refuses a material whose source technique is programmable, we then return
@@ -2350,6 +2354,30 @@ def patch_rtshader(ror):
         "    RoR::Ios::RtssRegisterSceneManager(m_scene_manager);\n"
         "#endif\n",
         "GfxScene.cpp: register the scene manager with the RTSS",
+    )
+    write(path, text)
+
+    # ---------------- ContentManager.cpp: mount the FFP library pack ---------
+    path = os.path.join(ror, "source", "main", "resources", "ContentManager.cpp")
+    text = read(path)
+    text = must_replace(
+        text,
+        "    this->AddResourcePack(ResourcePack::MYGUI);\n"
+        "    this->AddResourcePack(ResourcePack::DASHBOARDS);\n",
+        "    this->AddResourcePack(ResourcePack::MYGUI);\n"
+        "    this->AddResourcePack(ResourcePack::DASHBOARDS);\n"
+        "\n"
+        "    // Apple/iOS: upstream declares the RTShader System's FFP function\n"
+        "    // library pack ('resources/rtshader' -> group RtShaderRG) but never\n"
+        "    // mounts it - the cvar 'gfx_enable_rtshaders' is dead code as well.\n"
+        "    // GLES2 has no fixed-function pipeline, so the iOS port runs the\n"
+        "    // RTSS from AppContext and shader generation needs the pack's\n"
+        "    // 'FFPLib_*.glsl'; without them the first generated shader dies with\n"
+        "    // 'FileNotFoundException: Cannot locate resource FFPLib_Transform.glsl'\n"
+        "    // (seen on device).  AddResourcePack() mounts and initialises the\n"
+        "    // group in one step, well before the first frame.\n"
+        "    this->AddResourcePack(ResourcePack::RTSHADER);\n",
+        "ContentManager.cpp: mount the RTShader System FFP library pack",
     )
     write(path, text)
 
