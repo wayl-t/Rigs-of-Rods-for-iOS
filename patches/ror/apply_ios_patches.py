@@ -2516,6 +2516,54 @@ def patch_rtshader(ror):
         "        }\n"
         "        mBusy = false;\n"
         "\n"
+        "        // Apple/iOS: one-time dump of the generated GLSL ES for a cubemap\n"
+        "        // material - the skybox.  On device the sky renders black even though\n"
+        "        // the cubemap loads (the six cloudy_noon faces) and the shader\n"
+        "        // compiles (no 'Cached function not found'), so the exact generated\n"
+        "        // source is what separates a bad sampler/varying declaration from a\n"
+        "        // texture-binding problem on GLES2.\n"
+        "        if (!mLoggedCube)\n"
+        "        {\n"
+        "            for (Ogre::Technique* tech : material->getTechniques())\n"
+        "            {\n"
+        "                if (tech->getSchemeName() != schemeName)\n"
+        "                    continue;\n"
+        "                bool cube = false;\n"
+        "                for (unsigned short p = 0; p < tech->getNumPasses(); ++p)\n"
+        "                {\n"
+        "                    Ogre::Pass* pass = tech->getPass(p);\n"
+        "                    for (unsigned short t = 0; t < pass->getNumTextureUnitStates(); ++t)\n"
+        "                    {\n"
+        "                        if (pass->getTextureUnitState(t)->getTextureType() ==\n"
+        "                                Ogre::TEX_TYPE_CUBE_MAP)\n"
+        "                        {\n"
+        "                            cube = true;\n"
+        "                        }\n"
+        "                    }\n"
+        "                }\n"
+        "                if (!cube)\n"
+        "                    continue;\n"
+        "                mLoggedCube = true;\n"
+        "                for (unsigned short p = 0; p < tech->getNumPasses(); ++p)\n"
+        "                {\n"
+        "                    Ogre::Pass* pass = tech->getPass(p);\n"
+        "                    if (!pass->getVertexProgram().isNull())\n"
+        "                    {\n"
+        "                        RoR_IosTrace(\"[rtss][cube] '%s' VS:\\n%s\",\n"
+        "                            material->getName().c_str(),\n"
+        "                            pass->getVertexProgram()->getSource().c_str());\n"
+        "                    }\n"
+        "                    if (!pass->getFragmentProgram().isNull())\n"
+        "                    {\n"
+        "                        RoR_IosTrace(\"[rtss][cube] '%s' FS:\\n%s\",\n"
+        "                            material->getName().c_str(),\n"
+        "                            pass->getFragmentProgram()->getSource().c_str());\n"
+        "                    }\n"
+        "                }\n"
+        "                break;\n"
+        "            }\n"
+        "        }\n"
+        "\n"
         "        for (Ogre::Technique* tech : material->getTechniques())\n"
         "        {\n"
         "            if (tech->getSchemeName() == schemeName)\n"
@@ -2526,6 +2574,7 @@ def patch_rtshader(ror):
         "\n"
         "private:\n"
         "    bool mBusy = false;\n"
+        "    bool mLoggedCube = false; // skybox shader diagnostic, dumped once\n"
         "};\n"
         "\n"
         "void RoR::Ios::RtssRegisterSceneManager(Ogre::SceneManager* scene_manager)\n"
@@ -3657,6 +3706,136 @@ def patch_terrain_stock_generator(ror):
     write(path, text)
 
 
+def patch_terrain_sky_light(ror):
+    """Terrain.cpp: create the main light even when Caelum is absent (iOS).
+
+    Why this exists (device evidence, rtss15, RoR (3).log)
+    ------------------------------------------------------
+    RoR's default sky mode is ``GfxSkyMode::CAELUM`` (CVar "SightRange"
+    sibling "gfx_sight_mode" defaults to "1" == CAELUM).  ``Terrain::
+    initLight()`` then does::
+
+        if (mode == CAELUM) {
+        #ifdef USE_CAELUM
+            m_main_light = m_sky_manager->GetSkyMainLight();
+        #endif
+        }
+        else if (mode == SKYX) { ... }
+        else { // "screw caelum, we will roll our own light"
+            m_main_light = createLight(...); ... }
+
+    On iOS ``USE_CAELUM`` is **not** defined - Caelum is a conan dependency
+    the iOS build never provides (``ROR_USE_CAELUM`` is not set anywhere and
+    the deps workflow does not build Caelum, so ``Caelum::Caelum`` is absent,
+    ``CaelumSystem`` is missing from the binary, and SkyManager.cpp compiles
+    to nothing).  The CAELUM branch is therefore *empty* at compile time, so
+    whenever the sky mode is CAELUM the ``m_main_light`` assignment never
+    runs and it stays ``nullptr``: the whole scene ends up with **no
+    directional light at all** and is lit only by ambient.  Desktop never
+    hits this because desktop always defines USE_CAELUM.
+
+    ``Terrain::initSkySubSystem()`` already guards its Caelum branch with
+    ``#ifdef ... else #endif`` so the skybox fallback runs on iOS; only the
+    light side is asymmetric.  Fix it the same way - wrap the whole CAELUM
+    branch in ``#if defined(USE_CAELUM) ... #endif`` so that when Caelum is
+    absent the mode falls through to the "roll our own light" path.  Desktop
+    behaviour is byte-for-byte unchanged (the branch compiles identically
+    when USE_CAELUM is defined); iOS gains a real directional sun light.
+    """
+    path = os.path.join(ror, "source", "main", "terrain", "Terrain.cpp")
+    text = read(path)
+
+    text = must_replace(
+        text,
+        "    if (App::gfx_sky_mode->getEnum<GfxSkyMode>() == GfxSkyMode::CAELUM)\n"
+        "    {\n"
+        "#ifdef USE_CAELUM\n"
+        "        m_main_light = m_sky_manager->GetSkyMainLight();\n"
+        "#endif\n"
+        "    }\n"
+        "    else if (App::gfx_sky_mode->getEnum<GfxSkyMode>() == GfxSkyMode::SKYX)\n",
+        "#if defined(USE_CAELUM)\n"
+        "    if (App::gfx_sky_mode->getEnum<GfxSkyMode>() == GfxSkyMode::CAELUM)\n"
+        "    {\n"
+        "        m_main_light = m_sky_manager->GetSkyMainLight();\n"
+        "    }\n"
+        "    else\n"
+        "#endif // USE_CAELUM\n"
+        "    if (App::gfx_sky_mode->getEnum<GfxSkyMode>() == GfxSkyMode::SKYX)\n",
+        "Terrain.cpp: fall through to the built-in light when Caelum is absent",
+    )
+
+    # Diagnostic: record the sky ground-truth.  The viewport background, the
+    # linear-fog colour and the built-in light's diffuse colour are all
+    # m_def->ambient_color (Terrain::initCamera / initFog / initLight).  A
+    # black sky therefore comes from one of two places - the clear colour
+    # (ambient_color is black) or the skybox render itself (cubemap samples
+    # black).  Logging ambient_color plus the chosen skybox separates them.
+    text = must_replace(
+        text,
+        "void RoR::Terrain::initSkySubSystem()\n"
+        "{\n"
+        "#ifdef USE_CAELUM\n",
+        "void RoR::Terrain::initSkySubSystem()\n"
+        "{\n"
+        "    // Apple/iOS diagnostic: sky ground-truth - the background/fog/light\n"
+        "    // colour (ambient_color) and which skybox is used, so a black sky can\n"
+        "    // be attributed to the clear colour or to the skybox render itself.\n"
+        "    LOG(std::string(\"[RoR|ios-sky] mode=\") +\n"
+        "        std::to_string((int)App::gfx_sky_mode->getEnum<GfxSkyMode>()) +\n"
+        "        \" ambient=(\" + std::to_string(m_def->ambient_color.r) + \", \" +\n"
+        "        std::to_string(m_def->ambient_color.g) + \", \" +\n"
+        "        std::to_string(m_def->ambient_color.b) +\n"
+        "        \") cubemap='\" + m_def->cubemap_config + \"' sight_range=\" +\n"
+        "        std::to_string(m_sight_range));\n"
+        "#ifdef USE_CAELUM\n",
+        "Terrain.cpp: log the sky ground-truth (ambient colour + skybox)",
+    )
+
+    write(path, text)
+
+
+def patch_cvar_sky_default(ror):
+    """CVar.cpp: default the sky mode to SANDSTORM on iOS.
+
+    Why this exists (device evidence, rtss15)
+    -----------------------------------------
+    ``gfx_sky_mode`` defaults to ``"1"`` == ``GfxSkyMode::CAELUM`` ("best
+    looking").  But iOS builds neither Caelum nor SkyX - they are optional
+    conan deps the iOS workflow never provides - so CAELUM is the one mode
+    that cannot actually run on the device:
+
+      * ``main.cpp`` picks the scene ambient from the mode: CAELUM gets a
+        dim (0.3,0.3,0.3) ambient meant to be *supplemented* by Caelum's
+        lighting, while SANDSTORM gets the full (0.7,0.7,0.7).  With no
+        Caelum present the CAELUM branch leaves the whole scene under-lit.
+      * ``ContentManager`` still mounts the ``caelum.zip`` resource pack for
+        CAELUM, producing the harmless but noisy "unexpected token / legacy
+        script" errors for every ``*.os`` Caelum script, because no plugin is
+        registered to compile them.
+      * ``Terrain::initLight()``'s CAELUM branch is empty without
+        ``USE_CAELUM`` (see patch_terrain_sky_light).
+
+    SANDSTORM is the mode RoR itself designates for machines without
+    Caelum/SkyX: it uses the same ``tracks/skyboxcol`` skybox but pairs it
+    with a real directional sun light and the brighter ambient.  Defaulting
+    to it makes the out-of-box iOS scene correctly lit; CAELUM stays
+    reachable from the settings menu and is still patched to create a light
+    (patch_terrain_sky_light) as a backstop.
+    """
+    path = os.path.join(ror, "source", "main", "system", "CVar.cpp")
+    text = read(path)
+
+    text = must_replace(
+        text,
+        '"1"/*(int)GfxSkyMode::CAELUM*/);',
+        '"0"/*(int)GfxSkyMode::SANDSTORM*/);',
+        "CVar.cpp: default sky mode to SANDSTORM (no Caelum/SkyX on iOS)",
+    )
+
+    write(path, text)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("ror_dir")
@@ -3749,6 +3928,17 @@ def main():
     # Fall back to OGRE's stock generator, which fully supports GLSL ES.
     # See patch_terrain_stock_generator().
     patch_terrain_stock_generator(args.ror_dir)
+    # The default sky mode is CAELUM but Caelum is not compiled in on iOS, so
+    # Terrain::initLight()'s CAELUM branch is empty and m_main_light stays
+    # null - no directional sun light, the scene is lit only by ambient.  Make
+    # the light fall through to the built-in path when Caelum is absent.
+    # See patch_terrain_sky_light().
+    patch_terrain_sky_light(args.ror_dir)
+    # Also default the sky mode itself to SANDSTORM - the only sky mode iOS
+    # can fully run (no Caelum/SkyX libraries), which selects the brighter
+    # scene ambient and the built-in directional light.  See
+    # patch_cvar_sky_default().
+    patch_cvar_sky_default(args.ror_dir)
 
     print("applied Apple/iOS patches to %s" % args.ror_dir)
     if args.ois_include:
