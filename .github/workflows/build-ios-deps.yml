@@ -470,6 +470,19 @@ jobs:
           # ever stops being true.
           # ZLIB_* is the SDK stub zziplib itself was built against; OGRE links
           # ZLIB::ZLIB into OgreMain as soon as zip is on.
+          #
+          # OGRE_RESOURCEMANAGER_STRICT=0: OGRE 1.10+ defaults this to 2, which
+          # makes every resource group self-contained - createResourceGroup()'s
+          # inGlobalPool defaults to !STRICT, so a material in MaterialsRG can
+          # NOT resolve a texture that lives in a different group.  RoR's
+          # dashboard scripts reference textures (adi.dds, whiteneedle.dds,
+          # speedo.dds, ...) that recursive_zip_folder packed into
+          # textures.zip -> TexturesRG, while the .material files that use them
+          # are in materials.zip -> MaterialsRG: with STRICT=2 every gauge came
+          # up blank ("Cannot locate resource adi.dds in resource group
+          # MaterialsRG").  RoR desktop pins the opposite setting (conanfile.py:
+          # ogre3d*:resourcemanager_strict = "off"), which is why it renders the
+          # same content fine; match it so cross-group lookups work again.
           cmake -S ogre -B ogre/build -G Xcode \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_SYSTEM_NAME=iOS \
@@ -485,6 +498,7 @@ jobs:
             -DAPPLE_IOS=TRUE -DOGRE_BUILD_PLATFORM_APPLE_IOS=TRUE \
             -DOGRE_STATIC=TRUE \
             -DOGRE_BUILD_DEPENDENCIES=FALSE \
+            -DOGRE_RESOURCEMANAGER_STRICT=0 \
             -DFREETYPE_LIBRARY="$IOS_PREFIX/lib/libfreetype.a" \
             -DFREETYPE_INCLUDE_DIRS="$IOS_PREFIX/include/freetype2" \
             -DZLIB_LIBRARY="$IOS_SYSROOT/usr/lib/libz.tbd" \
