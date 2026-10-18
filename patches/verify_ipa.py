@@ -574,10 +574,11 @@ def main(argv):
     # steering bar.  Both labels are string literals only IosLayout emits
     # and they occur zero times in the previous build's binary, so their
     # presence proves the extended layout, its hit-test and its drawing all
-    # shipped together.
+    # shipped together.  ("CR+" is the cruise-control "raise" button label;
+    # it doubles as the panel marker because it is unique to this layout.)
     if exe:
         for marker, what in (
-                (b"CRZ+", "vehicle-systems panel grid (IosLayout VEH panel)"),
+                (b"CR+",  "vehicle-systems panel grid (IosLayout VEH panel)"),
                 (b"BL<",  "turn-signal row next to the steering bar")):
             if marker not in binary:
                 bad.append(
