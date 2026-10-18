@@ -1687,6 +1687,60 @@ def patch_main_cpp(ror):
         )
 
     # ---------------------------------------------------------------------
+    # GUI message breadcrumbs
+    # ---------------------------------------------------------------------
+    # The main menu is *drawn* by ImGui but *enabled* by a message on RoR's own
+    # queue.  If those messages are never handled - or are handled and then
+    # undone - no ImGui window exists at all and the screen shows only the
+    # wallpaper, however healthy the renderer is.  One line per transition
+    # makes that readable in ror-trace.log instead of inferred.
+    #
+    # The close-handler anchors include their `case` label because
+    # `MainSelector.Close()` and `GameMainMenu.SetVisible(false)` each appear
+    # more than once in main.cpp.
+    gui_handlers = (
+        ("App::GetGuiManager()->GameMainMenu.SetVisible(true);\n",
+         "#ifdef ROR_PLATFORM_IOS\n"
+         '                        RoR_IosTrace("[RoR|GUI] handler OPEN_MENU: GameMainMenu.SetVisible(true), state=%d",\n'
+         "                            (int)App::app_state->getEnum<AppState>());\n"
+         "#endif\n",
+         "MSG_GUI_OPEN_MENU_REQUESTED"),
+        ("                case MSG_GUI_CLOSE_MENU_REQUESTED:\n"
+         "                {\n"
+         "                    try\n"
+         "                    {\n"
+         "                        App::GetGuiManager()->GameMainMenu.SetVisible(false);\n",
+         "#ifdef ROR_PLATFORM_IOS\n"
+         '                        RoR_IosTrace("[RoR|GUI] handler CLOSE_MENU: GameMainMenu.SetVisible(false), state=%d",\n'
+         "                            (int)App::app_state->getEnum<AppState>());\n"
+         "#endif\n",
+         "MSG_GUI_CLOSE_MENU_REQUESTED"),
+        ("App::GetGuiManager()->MainSelector.Show(*type, m.description);\n",
+         "#ifdef ROR_PLATFORM_IOS\n"
+         '                        RoR_IosTrace("[RoR|GUI] handler OPEN_SELECTOR: MainSelector.Show(type=%d), state=%d",\n'
+         "                            (int)*type, (int)App::app_state->getEnum<AppState>());\n"
+         "#endif\n",
+         "MSG_GUI_OPEN_SELECTOR_REQUESTED"),
+        ("                case MSG_GUI_CLOSE_SELECTOR_REQUESTED:\n"
+         "                {\n"
+         "                    try\n"
+         "                    {\n"
+         "                        App::GetGuiManager()->MainSelector.Close();\n",
+         "#ifdef ROR_PLATFORM_IOS\n"
+         '                        RoR_IosTrace("[RoR|GUI] handler CLOSE_SELECTOR: MainSelector.Close(), state=%d",\n'
+         "                            (int)App::app_state->getEnum<AppState>());\n"
+         "#endif\n",
+         "MSG_GUI_CLOSE_SELECTOR_REQUESTED"),
+    )
+    for anchor, insertion, label in gui_handlers:
+        found = text.count(anchor)
+        if found != 1:
+            raise SystemExit(
+                "ERROR: main.cpp GUI handler anchor for %s found %d times, expected 1: %r"
+                % (label, found, anchor))
+        text = text.replace(anchor, anchor + insertion)
+
+    # ---------------------------------------------------------------------
     # Do not let a caught exception turn into a silent black screen
     # ---------------------------------------------------------------------
     # The whole frame loop is wrapped in try/catch (Release builds only).  An
@@ -2398,6 +2452,32 @@ def patch_rtshader(ror):
         "\n"
         "        RoR_IosTrace(\"[rtss] generating shaders for fixed-function material '%s'\",\n"
         "            material->getName().c_str());\n"
+        "        // Apple/iOS: log the pass state RTSS is about to read.  The\n"
+        "        // generated shader for 'ImGui/material' declares no 'colour'\n"
+        "        // attribute, so ImGui's per-vertex colour (window/button alpha and\n"
+        "        // text tint) never reaches the GPU; FFPColour only wires up\n"
+        "        // SF_VS_INPUT_DIFFUSE when srcPass->getVertexColourTracking() != 0\n"
+        "        // (OgreShaderFFPColour.cpp, preAddToRenderState).  Sampling both the\n"
+        "        // source and the freshly generated technique says whether the flag\n"
+        "        // survives into the pass RTSS reads; without this the trace only\n"
+        "        // shows the attribute warning and the reason stays guesswork.\n"
+        "        for (unsigned short ios_ti = 0; ios_ti < material->getNumTechniques(); ++ios_ti)\n"
+        "        {\n"
+        "            Ogre::Technique* ios_tech = material->getTechnique(ios_ti);\n"
+        "            if (ios_tech == nullptr || ios_tech->getNumPasses() == 0)\n"
+        "                continue;\n"
+        "            Ogre::Pass* ios_pass = ios_tech->getPass(0);\n"
+        "            RoR_IosTrace(\"[rtss]   '%s' tech#%d scheme='%s' vcol=%d lighting=%d texunits=%d \"\n"
+        "                \"depthcheck=%d depthwrite=%d cull=%d\",\n"
+        "                material->getName().c_str(), (int)ios_ti,\n"
+        "                ios_tech->getSchemeName().c_str(),\n"
+        "                (int)ios_pass->getVertexColourTracking(),\n"
+        "                (int)ios_pass->getLightingEnabled(),\n"
+        "                (int)ios_pass->getNumTextureUnitStates(),\n"
+        "                (int)ios_pass->getDepthCheckEnabled(),\n"
+        "                (int)ios_pass->getDepthWriteEnabled(),\n"
+        "                (int)ios_pass->getCullingMode());\n"
+        "        }\n"
         "\n"
         "        // The generated technique is normally built on the next\n"
         "        // SGScheme::validate(), which for this frame has already run, so\n"
@@ -2719,6 +2799,21 @@ def patch_gui_manager(ror):
     path = os.path.join(ror, "source", "main", "gui", "GUIManager.cpp")
     text = read(path)
 
+    text = must_replace(
+        text,
+        '#include "GUIManager.h"\n'
+        "\n"
+        '#include "Actor.h"\n',
+        '#include "GUIManager.h"\n'
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        '#   include "ios_platform.h"\n'
+        "#endif\n"
+        "\n"
+        '#include "Actor.h"\n',
+        "GUIManager.cpp ios_platform.h include",
+    )
+
     # NB: upstream indents that comment with five spaces.  Keep it byte-exact.
     text = must_replace(
         text,
@@ -2747,13 +2842,34 @@ def patch_gui_manager(ror):
         "GUIManager.cpp NewImGuiFrame null keyboard guard",
     )
 
-    # One-shot "is the menu even on screen" diagnostic.  A user report of
-    # "taps do nothing, I only see the wallpaper" has two very different
-    # causes - the ImGui canvas being empty/uninitialized, or the main menu
-    # widget simply not being marked visible - and the device log can tell
-    # them apart in a single line.  Logged on the first frame that actually
-    # has a viewport (DisplaySize is zero until then) and only once, because
-    # repeating it every frame would drown ror-trace.log.
+    # Periodic "is there anything on screen" probe.  A user report of "I only
+    # see the wallpaper, tapping does nothing" has three very different causes
+    # and this one line separates them:
+    #
+    #  * the main menu widget is never marked visible -> there is no ImGui
+    #    window at all, ImGui::Render() emits nothing, the overlay draws
+    #    nothing.  (Also covers the app_skip_main_menu path, which opens
+    #    MainSelector instead of GameMainMenu.)
+    #  * the widget is visible but ImGui still emits nothing - the window was
+    #    culled, got zero size, or ImGui::Begin() early-outed.
+    #  * ImGui does emit geometry but the GPU never shows it (the RTSS drops
+    #    the vertex colour for 'ImGui/material', the overlay is never queued
+    #    because the active viewport is not the app viewport, ...).
+    #
+    # lastdraw() is the ImDrawData left over from the PREVIOUS frame's
+    # ImGui::Render(), read here because this runs just before
+    # ImGui::NewFrame() invalidates it (imgui.h: GetDrawData() is valid after
+    # Render() and until the next NewFrame()).  cmds==0 means ImGui had no
+    # windows to draw; the first draw command's clip rectangle says whether
+    # the geometry is aimed at the screen.
+    #
+    # The previous, one-shot version of this probe was worthless: it fired
+    # during the mod-cache load, because LoadingWindow::SetProgress() renders a
+    # frame through this very function while main()'s
+    # MSG_GUI_OPEN_MENU_REQUESTED is still queued behind
+    # MSG_APP_MODCACHE_LOAD_REQUESTED (the queue is FIFO), so the menu was
+    # always still closed and the reading always said "no".  Hence: first call,
+    # then every 300.
     text = must_replace(
         text,
         "    io.KeySuper = false;\n"
@@ -2761,17 +2877,157 @@ def patch_gui_manager(ror):
         "    // Call IMGUI\n",
         "    io.KeySuper = false;\n"
         "\n"
-        "    static bool s_ios_menu_diag_done = false;\n"
-        "    if (!s_ios_menu_diag_done && io.DisplaySize.x > 0.0f)\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    static int s_ios_gui_diag_n = 0;\n"
+        "    ++s_ios_gui_diag_n;\n"
+        "    if (s_ios_gui_diag_n == 1 || (s_ios_gui_diag_n % 300) == 0)\n"
         "    {\n"
-        "        s_ios_menu_diag_done = true;\n"
-        "        LOG(std::string(\"[RoR|GUI] ImGui DisplaySize=(\")\n"
-        "            + TOSTRING((int)io.DisplaySize.x) + \",\" + TOSTRING((int)io.DisplaySize.y)\n"
-        "            + \") main_menu_visible=\" + (this->GameMainMenu.IsVisible() ? \"yes\" : \"no\"));\n"
+        "        ImDrawData* dd = ImGui::GetDrawData();\n"
+        "        int dd_cmds = -1;\n"
+        "        int dd_vtx = -1;\n"
+        "        float cl0 = 0.f;\n"
+        "        float cl1 = 0.f;\n"
+        "        float cl2 = 0.f;\n"
+        "        float cl3 = 0.f;\n"
+        "        if (dd != nullptr)\n"
+        "        {\n"
+        "            dd_cmds = dd->CmdListsCount;\n"
+        "            dd_vtx = dd->TotalVtxCount;\n"
+        "            if (dd->CmdListsCount > 0 && dd->CmdLists[0]->CmdBuffer.Size > 0)\n"
+        "            {\n"
+        "                const ImVec4& r = dd->CmdLists[0]->CmdBuffer[0].ClipRect;\n"
+        "                cl0 = r.x;\n"
+        "                cl1 = r.y;\n"
+        "                cl2 = r.z;\n"
+        "                cl3 = r.w;\n"
+        "            }\n"
+        "        }\n"
+        "        RoR_IosTrace(\"[RoR|GUI] n=%d display=(%d,%d) lastdraw(cmds=%d,vtx=%d,clip=%.0f,%.0f,%.0f,%.0f)\"\n"
+        "            \" menu=%d selector=%d loading=%d msgbox=%d menubar=%d wallpaper=%d state=%d\",\n"
+        "            s_ios_gui_diag_n, (int)io.DisplaySize.x, (int)io.DisplaySize.y,\n"
+        "            dd_cmds, dd_vtx, cl0, cl1, cl2, cl3,\n"
+        "            (int)this->GameMainMenu.IsVisible(),\n"
+        "            (int)this->MainSelector.IsVisible(),\n"
+        "            (int)this->LoadingWindow.IsVisible(),\n"
+        "            (int)this->MessageBoxDialog.IsVisible(),\n"
+        "            (int)this->TopMenubar.IsVisible(),\n"
+        "            (int)(this->MenuWallpaper != nullptr && this->MenuWallpaper->isVisible()),\n"
+        "            (int)App::app_state->getEnum<AppState>());\n"
         "    }\n"
+        "#endif\n"
         "\n"
         "    // Call IMGUI\n",
-        "GUIManager.cpp NewImGuiFrame one-shot menu diagnostic",
+        "GUIManager.cpp NewImGuiFrame periodic menu/draw diagnostic",
+    )
+
+    write(path, text)
+
+
+def patch_ogreimgui(ror):
+    """OgreImGui.cpp: trace whether the ImGui overlay ever reaches the queue.
+
+    ``OgreImGui::renderQueueStarted()`` is the *only* thing that puts the ImGui
+    overlay into the render queue, and it does so under a pointer-identity test
+    against the app viewport:
+
+        if (vp == App::GetAppContext()->GetViewport())
+            m_imgui_overlay->_findVisibleObjects(...)
+
+    The wallpaper is drawn by OGRE's own ``OverlaySystem``, which has no such
+    test, so if this one ever fails the screen shows the wallpaper and nothing
+    else - which is exactly the user report ("I only see the background").
+    That failure is invisible in a trace today, so this adds a counter of how
+    often the overlay render-queue group is entered and how often the overlay
+    is actually queued, plus the state of every input to that decision, sampled
+    once and then every 300 overlay-group entries.
+
+    It also marks ``Init()``: if the trace shows no such line at all, ImGui's
+    glue never ran, which is a different failure entirely.
+    """
+    path = os.path.join(ror, "source", "main", "gui", "imgui", "OgreImGui.cpp")
+    text = read(path)
+
+    text = must_replace(
+        text,
+        "#include <imgui.h>\n"
+        "#include <Ogre.h>\n",
+        "#include <imgui.h>\n"
+        "#include <Ogre.h>\n"
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        '#   include "ios_platform.h"\n'
+        "#endif\n",
+        "OgreImGui.cpp ios_platform.h include",
+    )
+
+    text = must_replace(
+        text,
+        "    m_imgui_overlay->setZOrder(300);\n"
+        "    m_imgui_overlay->initialise(); // Build font texture\n"
+        "    m_imgui_overlay->show();\n",
+        "    m_imgui_overlay->setZOrder(300);\n"
+        "    m_imgui_overlay->initialise(); // Build font texture\n"
+        "    m_imgui_overlay->show();\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        '    RoR_IosTrace("[RoR|GUI] ImGui glue initialised: overlay zorder=300, shown");\n'
+        "#endif\n",
+        "OgreImGui.cpp Init() breadcrumb",
+    )
+
+    text = must_replace(
+        text,
+        "    if(queueGroupId == Ogre::RENDER_QUEUE_OVERLAY)\n"
+        "    {\n"
+        "        Ogre::Viewport* vp = Ogre::Root::getSingletonPtr()->getRenderSystem()->_getViewport();\n",
+        "    if(queueGroupId == Ogre::RENDER_QUEUE_OVERLAY)\n"
+        "    {\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "        // See the header of patch_ogreimgui: this listener is the only\n"
+        "        // thing that queues the ImGui overlay, and it does so under a\n"
+        "        // pointer-identity test against the app viewport.\n"
+        "        static int s_rq_overlay = 0;\n"
+        "        static int s_rq_queued = 0;\n"
+        "        ++s_rq_overlay;\n"
+        "#endif\n"
+        "        Ogre::Viewport* vp = Ogre::Root::getSingletonPtr()->getRenderSystem()->_getViewport();\n",
+        "OgreImGui.cpp renderQueueStarted counters",
+    )
+
+    text = must_replace(
+        text,
+        "                if (vp == vp_target)\n"
+        "                {\n"
+        "                    m_imgui_overlay->_findVisibleObjects(vp->getCamera(), sceneMgr->getRenderQueue(), vp);\n"
+        "                }\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "}\n",
+        "                if (vp == vp_target)\n"
+        "                {\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "                    ++s_rq_queued;\n"
+        "#endif\n"
+        "                    m_imgui_overlay->_findVisibleObjects(vp->getCamera(), sceneMgr->getRenderQueue(), vp);\n"
+        "                }\n"
+        "            }\n"
+        "        }\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "        if (s_rq_overlay == 1 || (s_rq_overlay % 300) == 0)\n"
+        "        {\n"
+        "            Ogre::Viewport* vp_now = Ogre::Root::getSingletonPtr()->getRenderSystem()->_getViewport();\n"
+        "            Ogre::Viewport* vp_app = App::GetAppContext()->GetViewport();\n"
+        '            RoR_IosTrace("[RoR|GUI] rq: overlay_entries=%d queued=%d vp_now_null=%d vp_app_null=%d vp_same=%d "\n'
+        '                "overlays_enabled=%d camera_null=%d",\n'
+        "                s_rq_overlay, s_rq_queued,\n"
+        "                (int)(vp_now == nullptr), (int)(vp_app == nullptr), (int)(vp_now == vp_app),\n"
+        "                (int)(vp_now != nullptr && vp_now->getOverlaysEnabled()),\n"
+        "                (int)(vp_now != nullptr && vp_now->getCamera() == nullptr));\n"
+        "        }\n"
+        "#endif\n"
+        "    }\n"
+        "}\n",
+        "OgreImGui.cpp renderQueueStarted queue counter + sample",
     )
 
     write(path, text)
@@ -3047,6 +3303,12 @@ def main():
     # directly - the one such caller, and the first thing to dereference the
     # null keyboard after the main menu comes up.
     patch_gui_manager(args.ror_dir)
+    # The menu is drawn by ImGui, but it is *queued* for drawing by
+    # OgreImGui::renderQueueStarted(), which silently skips the overlay when the
+    # active viewport is not the app viewport.  That is the difference between
+    # "the menu is not visible" and "the menu is never drawn", so make it
+    # observable.
+    patch_ogreimgui(args.ror_dir)
     # Same class of bug one level up: FetchIcon() asks for every icon in the
     # group that only holds the country flags, and the icons live elsewhere.
     # It only bites on the first launch after a mod-cache rebuild, which is
