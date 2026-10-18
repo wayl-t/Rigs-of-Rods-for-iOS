@@ -1942,7 +1942,15 @@ float s_iosSteer = 0.f;   // -1 = full left .. +1 = full right
 float s_iosJoyX  = 0.f;
 float s_iosJoyY  = 0.f;   // -1 = up (forward) .. +1 = down (back)
 
-enum IosCtlKind { IOS_STEER, IOS_JOY, IOS_HELD, IOS_TOGGLE };
+// The vehicle-systems panel opened by the "VEH" button - open or closed.
+bool s_iosPanel = false;
+
+// IOS_PANEL: the VEH button itself - a pure UI toggle, drives no event.
+// IOS_GUP / IOS_GDN: gear buttons that pulse TWO events each - both the
+// sequential pair (EV_TRUCK_SHIFT_UP/DOWN) and the automatic pair
+// (EV_TRUCK_AUTOSHIFT_UP/DOWN) - because Engine.cpp reads only the pair
+// matching the current gearbox mode, and either mode may be active.
+enum IosCtlKind { IOS_STEER, IOS_JOY, IOS_HELD, IOS_TOGGLE, IOS_PANEL, IOS_GUP, IOS_GDN };
 
 struct IosCtl {
     RoR::events ev;      // the event this control drives (STEER/JOY drive several)
@@ -1999,6 +2007,59 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
         out.push_back({RoR::EV_COMMON_RESET_TRUCK,         IOS_TOGGLE, ux + 2.f * uw, uy, uw, uh, "R"});
         out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_TOGGLE, ux + 3.f * uw, uy, uw, uh, "EXIT"});
         out.push_back({RoR::EV_TRUCK_STARTER,              IOS_HELD,   ux + 4.f * uw, uy, uw, uh, "STRT"});
+        // Turn signals and hazard flasher - the left-thumb zone above the bar.
+        const float bx = 0.030f, bw = 0.115f, by = 0.560f, bh = 0.130f;
+        out.push_back({RoR::EV_TRUCK_BLINK_LEFT,  IOS_TOGGLE, bx,                          by, bw, bh, "BL<"});
+        out.push_back({RoR::EV_TRUCK_BLINK_WARN,  IOS_TOGGLE, bx + (bw + 0.010f),          by, bw, bh, "HAZ"});
+        out.push_back({RoR::EV_TRUCK_BLINK_RIGHT, IOS_TOGGLE, bx + 2.f * (bw + 0.010f),    by, bw, bh, "BL>"});
+        // The vehicle-systems panel switch, top-right above the pedals.
+        // ("ev" is ignored for IOS_PANEL - the field only has to be filled.)
+        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_PANEL, 0.845f, 0.050f, 0.150f, 0.240f, "VEH"});
+        // The panel itself: a 5x4 grid over the empty middle of the screen
+        // holding every remaining unit of the truck - lights, sound, gearbox,
+        // differentials, transfer case, clutch, trailer brake, cruise control
+        // and the truck's own command functions - shown while "VEH" is on.
+        if (s_iosPanel)
+        {
+            struct IosPanelCell { RoR::events ev; IosCtlKind kind; const char* label; };
+            static const IosPanelCell cells[] =
+            {   // lights / sound / camera
+                {RoR::EV_TRUCK_LIGHTTOGGLE01,             IOS_TOGGLE, "L1"},
+                {RoR::EV_TRUCK_LIGHTTOGGLE02,             IOS_TOGGLE, "L2"},
+                {RoR::EV_COMMON_TOGGLE_TRUCK_BEACONS,     IOS_TOGGLE, "BCN"},
+                {RoR::EV_TRUCK_HORN,                      IOS_HELD,   "HRN"},
+                {RoR::EV_CAMERA_CHANGE,                   IOS_TOGGLE, "CAM"},
+                // gearbox: mode, up, down, neutral, reverse
+                {RoR::EV_TRUCK_SWITCH_SHIFT_MODES,        IOS_TOGGLE, "A/M"},
+                {RoR::EV_TRUCK_SHIFT_UP,                  IOS_GUP,    "G+"},
+                {RoR::EV_TRUCK_SHIFT_DOWN,                IOS_GDN,    "G-"},
+                {RoR::EV_TRUCK_SHIFT_NEUTRAL,             IOS_TOGGLE, "N"},
+                {RoR::EV_TRUCK_SHIFT_GEAR_REVERSE,        IOS_TOGGLE, "RVS"},
+                // drivetrain: differentials, transfer case, clutch, trailer brake
+                {RoR::EV_TRUCK_TOGGLE_INTER_AXLE_DIFF,    IOS_TOGGLE, "AXD"},
+                {RoR::EV_TRUCK_TOGGLE_INTER_WHEEL_DIFF,   IOS_TOGGLE, "WHD"},
+                {RoR::EV_TRUCK_TOGGLE_TCASE_4WD_MODE,     IOS_TOGGLE, "T4W"},
+                {RoR::EV_TRUCK_MANUAL_CLUTCH,             IOS_HELD,   "CLT"},
+                {RoR::EV_TRUCK_TRAILER_PARKING_BRAKE,     IOS_TOGGLE, "TPK"},
+                // cruise control and the truck's own command functions
+                {RoR::EV_TRUCK_CRUISE_CONTROL,            IOS_TOGGLE, "CRZ"},
+                {RoR::EV_TRUCK_CRUISE_CONTROL_ACCL,       IOS_HELD,   "CR+"},
+                {RoR::EV_TRUCK_CRUISE_CONTROL_DECL,       IOS_HELD,   "CR-"},
+                {RoR::EV_COMMANDS_01,                     IOS_HELD,   "C1"},
+                {RoR::EV_COMMANDS_02,                     IOS_HELD,   "C2"},
+            };
+            const float px0 = 0.442f, pw = 0.070f, pgap  = 0.008f;
+            const float py0 = 0.075f, ph = 0.140f, pgapy = 0.012f;
+            for (size_t i = 0; i < sizeof(cells) / sizeof(cells[0]); ++i)
+            {
+                const float col = (float)(i % 5);
+                const float row = (float)(i / 5);
+                out.push_back({cells[i].ev, cells[i].kind,
+                               px0 + col * (pw + pgap),
+                               py0 + row * (ph + pgapy),
+                               pw, ph, cells[i].label});
+            }
+        }
     }
     else
     {
@@ -2015,6 +2076,14 @@ bool IosPtIn(const IosCtl& c, float W, float H, float px, float py)
 {
     return px >= c.x * W && px <= (c.x + c.w) * W
         && py >= c.y * H && py <= (c.y + c.h) * H;
+}
+
+// The whole panel area (its backdrop), in the same display fractions.
+// Shared by the draw (background + title) and the touch path (stray taps
+// inside are swallowed so they can't swing the camera behind the panel).
+void IosPanelRect(float& x0, float& y0, float& x1, float& y1)
+{
+    x0 = 0.432f; y0 = 0.025f; x1 = 0.834f; y1 = 0.690f;
 }
 
 // The already-tracked control-touch nearest to (px,py), or -1.  The match
@@ -2070,11 +2139,37 @@ bool IosControlsHandleTouch(int action, float x, float y)
         for (size_t i = 0; i < ctls.size(); ++i)
         {
             if (!IosPtIn(ctls[i], W, H, x, y)) continue;
+            if (ctls[i].kind == IOS_PANEL)
+            {
+                s_iosPanel = !s_iosPanel;      // the VEH switch: pure UI state
+                return true;
+            }
             if (ctls[i].kind == IOS_TOGGLE)
                 IosPulseEvent(ctls[i].ev);
+            else if (ctls[i].kind == IOS_GUP)
+            {
+                // Pulse both shift pairs: Engine.cpp only reads the one that
+                // matches the current gearbox mode, the other is inert.
+                IosPulseEvent(RoR::EV_TRUCK_SHIFT_UP);
+                IosPulseEvent(RoR::EV_TRUCK_AUTOSHIFT_UP);
+            }
+            else if (ctls[i].kind == IOS_GDN)
+            {
+                IosPulseEvent(RoR::EV_TRUCK_SHIFT_DOWN);
+                IosPulseEvent(RoR::EV_TRUCK_AUTOSHIFT_DOWN);
+            }
             else
                 s_iosCtlTouches.push_back({x, y});
             return true;
+        }
+        // With the panel open, a tap that missed every one of its buttons
+        // belongs to the panel - swallow it instead of swinging the camera.
+        if (s_iosPanel && IosInTruck())
+        {
+            float bx0, by0, bx1, by1;
+            IosPanelRect(bx0, by0, bx1, by1);
+            if (x >= bx0 * W && x <= bx1 * W && y >= by0 * H && y <= by1 * H)
+                return true;
         }
         return false;
     }
@@ -2111,6 +2206,12 @@ void IosApplyHeldEvents(float W, float H, const std::vector<IosCtl>& ctls)
     ie->setEventSimulatedValue(RoR::EV_CHARACTER_RIGHT,     0.f);
     ie->setEventSimulatedValue(RoR::EV_CHARACTER_RUN,       0.f);
     ie->setEventSimulatedValue(RoR::EV_CHARACTER_JUMP,      0.f);
+    ie->setEventSimulatedValue(RoR::EV_TRUCK_HORN,                 0.f);
+    ie->setEventSimulatedValue(RoR::EV_TRUCK_MANUAL_CLUTCH,        0.f);
+    ie->setEventSimulatedValue(RoR::EV_TRUCK_CRUISE_CONTROL_ACCL,  0.f);
+    ie->setEventSimulatedValue(RoR::EV_TRUCK_CRUISE_CONTROL_DECL,  0.f);
+    ie->setEventSimulatedValue(RoR::EV_COMMANDS_01,                0.f);
+    ie->setEventSimulatedValue(RoR::EV_COMMANDS_02,                0.f);
     s_iosSteer = 0.f;
     s_iosJoyX  = 0.f;
     s_iosJoyY  = 0.f;
@@ -2118,7 +2219,10 @@ void IosApplyHeldEvents(float W, float H, const std::vector<IosCtl>& ctls)
     for (size_t i = 0; i < ctls.size(); ++i)
     {
         const IosCtl& c = ctls[i];
-        if (c.kind == IOS_TOGGLE) continue;   // one-shots are handled by pulses
+        // One-shots are handled by pulses; the panel and gear buttons never
+        // carry an analog position or a level value.
+        if (c.kind == IOS_TOGGLE || c.kind == IOS_PANEL ||
+            c.kind == IOS_GUP    || c.kind == IOS_GDN) continue;
 
         // A control is live while some control-finger rests inside its region.
         bool  active = false;
@@ -2187,6 +2291,27 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
     ImFont*      font = ImGui::GetFont();
     const float  fs   = ImGui::GetFontSize();
 
+    // Labels ride at a fixed fraction of the (iOS: 2x) UI font - the cells
+    // are laid out in screen fractions, so text must not outgrow its buttons
+    // as the font grows.
+    const float lfs = fs * 0.75f;
+
+    // The vehicle-systems panel backdrop, under its buttons.
+    if (s_iosPanel && IosInTruck())
+    {
+        float bx0, by0, bx1, by1;
+        IosPanelRect(bx0, by0, bx1, by1);
+        const ImVec2 q0(bx0 * W, by0 * H);
+        const ImVec2 q1(bx1 * W, by1 * H);
+        dl->AddRectFilled(q0, q1, IM_COL32(8, 10, 14, 190), 14.f, ImDrawCornerFlags_All);
+        dl->AddRect(q0, q1, IM_COL32(255, 255, 255, 70), 14.f, ImDrawCornerFlags_All, 2.f);
+        const char*  title = "VEHICLE";
+        const float  tfs   = fs * 0.5f;
+        const ImVec2 ts    = font->CalcTextSizeA(tfs, 1e6f, 0.f, title);
+        dl->AddText(font, tfs, ImVec2((q0.x + q1.x - ts.x) * 0.5f, q0.y + 2.f),
+                    IM_COL32(200, 215, 235, 235), title);
+    }
+
     for (size_t i = 0; i < ctls.size(); ++i)
     {
         const IosCtl& c = ctls[i];
@@ -2194,7 +2319,11 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         const ImVec2 p1((c.x + c.w) * W, (c.y + c.h) * H);
 
         bool pressed = false;
-        if (c.kind == IOS_TOGGLE)
+        if (c.kind == IOS_PANEL)
+        {
+            pressed = s_iosPanel;            // the VEH switch lights while open
+        }
+        else if (c.kind == IOS_TOGGLE || c.kind == IOS_GUP || c.kind == IOS_GDN)
         {
             for (size_t p = 0; p < s_iosPulses.size(); ++p)
                 if (s_iosPulses[p].ev == c.ev) { pressed = true; break; }
@@ -2211,9 +2340,9 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         dl->AddRect(p0, p1, border, 10.f, ImDrawCornerFlags_All, 2.f);
 
         // Centred label.
-        const ImVec2 ts = font->CalcTextSizeA(fs, 1e6f, 0.f, c.label);
+        const ImVec2 ts = font->CalcTextSizeA(lfs, 1e6f, 0.f, c.label);
         const ImVec2 tp((p0.x + p1.x - ts.x) * 0.5f, (p0.y + p1.y - ts.y) * 0.5f);
-        dl->AddText(tp, IM_COL32(255, 255, 255, 240), c.label);
+        dl->AddText(font, lfs, tp, IM_COL32(255, 255, 255, 240), c.label);
 
         // Live marker for the two analog controls.
         if (c.kind == IOS_STEER)
@@ -2270,6 +2399,10 @@ void InputEngine::IosDrawTouchControls(float dt)
         s_iosCtlTouches.clear();
         return;
     }
+
+    // Leaving the truck takes the vehicle panel with it.
+    if (!IosInTruck())
+        s_iosPanel = false;
 
     float W, H; IosDisplaySize(W, H);
     std::vector<IosCtl> ctls;
@@ -3352,6 +3485,29 @@ def patch_gui_manager(ror):
         "GUIManager.cpp DrawSimulationGui iOS touch controls",
     )
 
+    # Widget metrics for the phone, kept in step with the font that
+    # patch_ogreimgui_overlay rasterizes 2x bigger (anchor verified against
+    # the pinned tree: line after style.WindowBorderSize).
+    text = must_replace(
+        text,
+        "    style.WindowBorderSize      = 0.f;\n"
+        "\n"
+        "    App::GetGfxScene()->GetSceneManager()->addRenderQueueListener(&m_imgui);\n",
+        "    style.WindowBorderSize      = 0.f;\n"
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Apple/iOS port: give the widgets the same 2x the font just got (see\n"
+        "    // patch_ogreimgui_overlay, OgreImGuiOverlay.cpp addFont) - paddings,\n"
+        "    // spacings and rounding grow with it, so every ImGui control stays\n"
+        "    // finger-sized while each panel keeps the proportions its upstream\n"
+        "    // design used.\n"
+        "    style.ScaleAllSizes(2.0f);\n"
+        "#endif\n"
+        "\n"
+        "    App::GetGfxScene()->GetSceneManager()->addRenderQueueListener(&m_imgui);\n",
+        "GUIManager.cpp SetupImGui iOS ScaleAllSizes",
+    )
+
     write(path, text)
 
 
@@ -3515,6 +3671,12 @@ def patch_ogreimgui_overlay(ror):
     ``mCurrentRenderable`` is already this renderable - ``renderSingleObject()``
     sets it before ``_issueRenderOp()`` is reached - so the identity view and
     projection are picked up and ``worldViewProj`` comes out as ``mXform``.
+
+    The same function also carries the phone's font size: ``addFont()`` is
+    the single place a glyph rasterization size enters the ImGui atlas, and
+    on a 844x390-point screen read at arm's length the desktop size is
+    unreadable - while ImGui cannot scale a glyph after it was rasterized.
+    ``GUIManager::SetupImGui`` scales the widget metrics by the same factor.
     """
     path = os.path.join(ror, "source", "main", "gui", "imgui",
                         "OgreImGuiOverlay.cpp")
@@ -3580,6 +3742,36 @@ def patch_ogreimgui_overlay(ror):
         "\n"
         "    for (int i = 0; i < draw_data->CmdListsCount; ++i)\n",
         "OgreImGuiOverlay.cpp refresh shader auto params before drawing",
+    )
+
+    # Font size for the phone: the atlas is rasterized at the final size, so
+    # this is where "readable on a 844x390-point screen" has to happen - see
+    # the comment inside the replacement.  GUIManager::SetupImGui scales the
+    # widget metrics to the same factor.
+    text = must_replace(
+        text,
+        "    ImFontConfig cfg;\n"
+        "    strncpy(cfg.Name, name.c_str(), 40);\n"
+        "    return io.Fonts->AddFontFromMemoryTTF(ttfchunk.getPtr(), (int)ttfchunk.size(), font->getTrueTypeSize(), &cfg,\n"
+        "                                          cprangePtr);\n"
+        "}\n",
+        "    ImFontConfig cfg;\n"
+        "    strncpy(cfg.Name, name.c_str(), 40);\n"
+        "    // Apple/iOS port: rasterize the font twice as big as on the desktop.\n"
+        "    // The phone draws 844x390 points into the whole screen and is read at\n"
+        "    // arm's length, where the desktop glyph size is unreadable - and ImGui\n"
+        "    // cannot scale an already-rasterized glyph, so the atlas has to be built\n"
+        "    // at the final size.  GUIManager::SetupImGui scales the widget metrics to\n"
+        "    // match (style.ScaleAllSizes), so every panel keeps the proportions its\n"
+        "    // upstream design used.\n"
+        "    float font_size = (float)font->getTrueTypeSize();\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    font_size *= 2.0f;\n"
+        "#endif\n"
+        "    return io.Fonts->AddFontFromMemoryTTF(ttfchunk.getPtr(), (int)ttfchunk.size(), font_size, &cfg,\n"
+        "                                          cprangePtr);\n"
+        "}\n",
+        "OgreImGuiOverlay.cpp addFont iOS size",
     )
 
     write(path, text)

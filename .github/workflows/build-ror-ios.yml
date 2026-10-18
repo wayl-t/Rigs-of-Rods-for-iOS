@@ -379,6 +379,16 @@ jobs:
           else
             echo "::warning::ror/build/bin/content is missing - the app starts with no terrain and no vehicle"
           fi
+
+          # The home-screen icon.  Generated straight into the bundle by a
+          # pure-stdlib Python script (a stock runner has no Pillow), BEFORE
+          # codesign seals the bundle - an icon added after signing would be
+          # an unsealed resource and the install would be refused.  Every
+          # PNG is RGB without an alpha channel: iOS does not accept alpha
+          # in app icons.
+          python3 patches/ios/make_app_icon.py --out "$APP_DIR"
+          echo "----- app icons -----"
+          ls -la "$APP_DIR"/AppIcon*.png "$APP_DIR"/Icon-*.png
           # plugins.cfg is deliberately NOT copied: on iOS the OGRE plugins are
           # static and registered through OgreBites::StaticPluginLoader, so RoR
           # never reads the file (SetUpRendering's iOS branch skips it).  It also
@@ -439,6 +449,18 @@ jobs:
             '    </array>' \
             '    <key>UIFileSharingEnabled</key><true/>' \
             '    <key>LSSupportsOpeningDocumentsInPlace</key><true/>' \
+            '    <key>CFBundleIcons</key><dict>' \
+            '        <key>CFBundlePrimaryIcon</key><dict>' \
+            '            <key>CFBundleIconFiles</key><array><string>AppIcon60x60</string></array>' \
+            '        </dict>' \
+            '    </dict>' \
+            '    <key>CFBundleIcons~ipad</key><dict>' \
+            '        <key>CFBundlePrimaryIcon</key><dict>' \
+            '            <key>CFBundleIconFiles</key><array>' \
+            '                <string>AppIcon60x60</string><string>Icon-76</string><string>Icon-83.5</string>' \
+            '            </array>' \
+            '        </dict>' \
+            '    </dict>' \
             '</dict>' \
             '</plist>' > "$APP_DIR/Info.plist"
 
@@ -645,6 +667,9 @@ jobs:
             cp /tmp/RoR-tiny TinyStage/Payload/RoR.app/RoR
             cp "$APP_DIR/Info.plist" TinyStage/Payload/RoR.app/Info.plist
             cp "$APP_DIR/PkgInfo" TinyStage/Payload/RoR.app/PkgInfo
+            # The plist references the icons; hand the tiny diagnostic bundle
+            # the same PNGs so the reference never dangles.
+            cp "$APP_DIR"/AppIcon*.png "$APP_DIR"/Icon-*.png TinyStage/Payload/RoR.app/ 2>/dev/null || true
             adhoc_sign "TinyStage/Payload/RoR.app" || true
             rm -f adhoc.log
             (cd TinyStage && zip -qry ../RoR-ios-tiny.ipa Payload)
