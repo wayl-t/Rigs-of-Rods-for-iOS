@@ -14,37 +14,31 @@
 //6 - CMPF_GREATER_EQUAL,
 //7 - CMPF_GREATER
 
+// Apple/iOS port: GLSL ES 1.00 reserves 'switch' and 'case', so the upstream
+// switch-chain fails to compile on GLES2 with "'switch' : Reserved word".
+// That aborted RTSS shader generation and, because the exception escaped to
+// RoRMain, took the whole app down with a red fatal-error box whenever a
+// material used alpha_rejection (e.g. the Semi trailer).  An if/else chain is
+// semantically identical and compiles on both desktop GLSL and GLSL ES.
 bool Alpha_Func(in int func, in float alphaRef, in float alphaValue)
 {
-    bool result = true;
-    switch (func)
-    {
-        case 0:// - CMPF_ALWAYS_FAIL,
-            result = false;
-        break;
-        case 1: //- CMPF_ALWAYS_PASS,
-            result = true;
-        break;
-        case 2: //- CMPF_LESS,
-            result = alphaValue < alphaRef;
-        break;
-        case 3: //- CMPF_LESS_EQUAL,
-            result = alphaValue <= alphaRef;
-        break;
-        case 4: //- CMPF_EQUAL,
-            result = alphaValue == alphaRef;
-        break;
-        case 5: //- CMPF_NOT_EQUAL,
-            result = alphaValue != alphaRef;
-        break;
-        case 6: //- CMPF_GREATER_EQUAL,
-            result = alphaValue >= alphaRef;
-        break;
-        case 7: //- CMPF_GREATER
-            result = alphaValue > alphaRef;
-        break;
-    }
-    return result;
+    if (func == 0)            // 0 - CMPF_ALWAYS_FAIL
+        return false;
+    else if (func == 1)       // 1 - CMPF_ALWAYS_PASS
+        return true;
+    else if (func == 2)       // 2 - CMPF_LESS
+        return alphaValue < alphaRef;
+    else if (func == 3)       // 3 - CMPF_LESS_EQUAL
+        return alphaValue <= alphaRef;
+    else if (func == 4)       // 4 - CMPF_EQUAL
+        return alphaValue == alphaRef;
+    else if (func == 5)       // 5 - CMPF_NOT_EQUAL
+        return alphaValue != alphaRef;
+    else if (func == 6)       // 6 - CMPF_GREATER_EQUAL
+        return alphaValue >= alphaRef;
+    else if (func == 7)       // 7 - CMPF_GREATER
+        return alphaValue > alphaRef;
+    return true;
 }
 
 

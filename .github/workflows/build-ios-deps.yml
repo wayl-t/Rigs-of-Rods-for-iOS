@@ -269,6 +269,134 @@ jobs:
           grep -n 'getCamera() != NULL' "$f"
           sed -n '70,92p' "$f"
 
+      - name: "Patch OGRE: the GLSL preprocessor must not blank the terrain"
+        run: |
+          # Device evidence (rtss12 build, RoR.log at 10:34:08, immediately
+          # after 'Terrain created; size=1025 minBatch=17 maxBatch=65 ...'):
+          #
+          #   RenderingAPIException: Failed to preprocess shader
+          #     OgreTerrain/629172533/sm2/vp/hlod/hlod in loadFromSource at
+          #     ogre/RenderSystems/GLSupport/src/GLSL/OgreGLSLShaderCommon.cpp (line 132)
+          #   High-level program '...' is not supported: Failed to preprocess shader ...
+          #   Warning: material OgreTerrain/629172533 has no supportable
+          #     Techniques and will be blank.  Explanation:
+          #     Pass 0: vertex program .../sm2/vp/hlod/hlod cannot be used - compile error.
+          #
+          # All six terrain programs (hlod/llod/comp, vp+fp) fail, so the
+          # terrain material is blank - that is the "artifact" visible in the
+          # 3D scene.  The source itself is plain GLSL ES assembled by
+          # Components/Terrain/src/OgreTerrainMaterialShaderHelperGLSL.cpp (no
+          # #include, no #if) and _resolveIncludes() has already run by then.
+          #
+          # Why RoR.log carries no explanation: cpp.Parse() reports through
+          # CPreprocessor::ErrorHandler -> DefaultError, which logs at
+          # LML_CRITICAL, and Log::logMessage drops messages whose level is
+          # above the log's own detail level (LML_NORMAL by default).  The one
+          # line that names the offending construct never reaches the device.
+          #
+          # Two changes:
+          #   1. Route the preprocessor's diagnostics to LML_NORMAL, so the next
+          #      device trace names the exact line and construct.
+          #   2. When preprocessing yields nothing, compile the include-resolved
+          #      source instead of discarding the material - GLSL ES has its own
+          #      preprocessor, so the raw source is compilable as it stands.
+          f=ogre/RenderSystems/GLSupport/src/GLSL/OgreGLSLShaderCommon.cpp
+          python3 - "$f" <<'PY'
+          import sys
+          p = sys.argv[1]
+          d = open(p, "r", encoding="utf-8", errors="replace").read()
+
+          anchor = ('    //-----------------------------------------------------------------------\n'
+                    '    void GLSLShaderCommon::loadFromSource(void)\n')
+
+          handler = (
+              '    //-----------------------------------------------------------------------\n'
+              '    // Apple/iOS port: OGRE preprocessor diagnostics go to\n'
+              '    // CPreprocessor::ErrorHandler, whose default sink logs at\n'
+              '    // LML_CRITICAL - a level the default log never forwards - which is\n'
+              '    // why the terrain-shader failure handled below reached the device\n'
+              '    // with no explanation at all.  Report them at the normal level so\n'
+              '    // the trace can name the offending line and construct.\n'
+              '    static void iosGlslPreprocError(void *iData, int iLine, const char *iError,\n'
+              '                                    const char *iToken, size_t iTokenLen)\n'
+              '    {\n'
+              '        (void)iData;\n'
+              '        String line = "[ogre-preproc] line " + StringConverter::toString(iLine)\n'
+              '                     + ": " + (iError ? iError : "(no error text)");\n'
+              '        if (iToken)\n'
+              '            line += String(" `") + String(iToken, iTokenLen) + "\'";\n'
+              '        LogManager::getSingleton().logMessage(line, LML_NORMAL);\n'
+              '    }\n'
+              '\n')
+
+          assert anchor in d, "loadFromSource anchor missing"
+          d = d.replace(anchor, handler + anchor, 1)
+
+          old = ('        size_t out_size = 0;\n'
+                 '        const char *src = mSource.c_str ();\n'
+                 '        size_t src_len = mSource.size ();\n'
+                 '        char *out = cpp.Parse (src, src_len, out_size);\n'
+                 '        if (!out || !out_size)\n'
+                 '            // Failed to preprocess, break out\n'
+                 '            OGRE_EXCEPT(Exception::ERR_RENDERINGAPI_ERROR, "Failed to preprocess shader " + mName);\n'
+                 '\n'
+                 '        mSource = String (out, out_size);\n'
+                 '        if (out < src || out > src + src_len)\n'
+                 '            free (out);\n')
+
+          new = ('        // Apple/iOS port: report this shader\'s preprocessor diagnostics\n'
+                 '        // through the LML_NORMAL handler while parsing it.\n'
+                 '        CPreprocessor::ErrorHandlerFunc iosPrevHandler = CPreprocessor::ErrorHandler;\n'
+                 '        CPreprocessor::ErrorHandler = iosGlslPreprocError;\n'
+                 '\n'
+                 '        size_t out_size = 0;\n'
+                 '        const char *src = mSource.c_str ();\n'
+                 '        size_t src_len = mSource.size ();\n'
+                 '        char *out = cpp.Parse (src, src_len, out_size);\n'
+                 '\n'
+                 '        CPreprocessor::ErrorHandler = iosPrevHandler;\n'
+                 '\n'
+                 '        if (!out || !out_size)\n'
+                 '        {\n'
+                 '            // Apple/iOS port: this is where the OGRE Terrain shaders\n'
+                 '            // used to die - the material then reported "no supportable\n'
+                 '            // Techniques" and the whole terrain rendered blank.  The\n'
+                 '            // includes are already resolved above and GLSL ES runs its\n'
+                 '            // own preprocessor, so the source is compilable as it\n'
+                 '            // stands: hand it to the driver instead of discarding the\n'
+                 '            // material.\n'
+                 '            if (out)\n'
+                 '            {\n'
+                 '                if (out >= src && out <= src + src_len)\n'
+                 '                    out = NULL; // zero-length view into src, nothing to free\n'
+                 '                else\n'
+                 '                    free (out);\n'
+                 '            }\n'
+                 '\n'
+                 '            String snippet = mSource.substr(0, 120);\n'
+                 '            size_t iosNL = snippet.find_first_of("\\r\\n");\n'
+                 '            if (iosNL != String::npos)\n'
+                 '                snippet.erase(iosNL);\n'
+                 '            LogManager::getSingleton().logWarning(\n'
+                 '                "GLSL: preprocessor produced nothing for " + getResourceLogName()\n'
+                 '                + " (src_len=" + StringConverter::toString(src_len)\n'
+                 '                + "); compiling the raw source. head: " + snippet);\n'
+                 '        }\n'
+                 '        else\n'
+                 '        {\n'
+                 '            mSource = String (out, out_size);\n'
+                 '            if (out < src || out > src + src_len)\n'
+                 '                free (out);\n'
+                 '        }\n')
+
+          assert old in d, "preprocessor block anchor missing"
+          d = d.replace(old, new, 1)
+          open(p, "w", encoding="utf-8").write(d)
+          print("patched")
+          PY
+          grep -n 'iosGlslPreprocError\|preprocessor produced nothing' "$f"
+          sed -n '/void GLSLShaderCommon::loadFromSource/,/^        compile(true);/p' "$f" | head -75
+
       - name: Pin FindZZip to the zziplib in the SDK prefix
         run: |
           # OGRE's stock CMake/Packages/FindZZip.cmake cannot see our zziplib.

@@ -3158,44 +3158,31 @@ def patch_fetchicon(ror):
 
     ``FetchIcon()`` is how every ImGui panel gets a small PNG - the vehicle
     dashboard, the survey map, the repository selector, the multiplayer flags
-    and the main menu's "Cache updated" notice all go through it.  Upstream asks
-    for all of them in the group ``"FlagsRG"``, but that group only holds
-    ``resources/flags`` (the country flags).  The UI icons live in
-    ``resources/icons`` (``IconsRG``), and two names - ``control_pause.png`` /
-    ``control_play.png``, drawn by the multiplayer actor list - exist only in
-    ``resources/famicons`` (``FamiconsRG``).
+    and the main menu notice all go through it.  Upstream asks for all of them
+    in the group ``"FlagsRG"``, but that group only holds ``resources/flags``
+    (the country flags).  The UI icons live in ``resources/icons``
+    (``IconsRG``), and two names - ``control_pause.png`` / ``control_play.png``,
+    drawn by the multiplayer actor list - exist only in ``resources/famicons``
+    (``FamiconsRG``).
 
     The wrong group cannot be recovered from further down either:
-    ``Texture::readImage()`` opens the image with ::
+    ``Texture::readImage()`` opens the image with::
 
         ResourceGroupManager::getSingleton().openResource(name, mGroup, this);
 
     which is the overload that hard-codes ``searchGroupsIfNotFound = false``
-    (``OgreResourceGroupManager.h``), so OGRE searches that one group and
-    nothing else, throws ``FileNotFoundException``, and the old code swallowed
-    it and returned an empty ``Ogre::TexturePtr`` while all ~30 callers do
-    ``tex->getHandle()`` with no null check.  (OGRE's RTShader library lookups
-    do *not* hit this, because they ask in ``DEFAULT_RESOURCE_GROUP_NAME``,
-    which ``openResourceImpl`` searches across all groups regardless.)
+    (``OgreResourceGroupManager.h``), so OGRE searches that one group only and
+    throws ``FileNotFoundException`` when the file lives elsewhere.  Ask OGRE
+    which mounted group owns the file, and fall back to OGRE warning texture
+    when no group has it (an empty ``TexturePtr`` is a null dereference in
+    every caller - they all do ``tex->getHandle()`` unconditionally).
 
-    On device this fired on every fresh install: the first launch has no
-    ``mods.cache``, rebuilds it, and the main menu then draws its notice box::
-
-        [trace] FileNotFoundException: Cannot locate resource accept.png
-                in resource group FlagsRG.  (OgreResourceGroupManager.cpp 706)
-        [crash] SIGSEGV - invalid memory access addr=0x0 pc=...(+0x1aef60)
-                -> RoR::GUI::GameMainMenu::DrawNoticeBox() +0x2f4
-
-    The second launch reads a valid cache, never draws the notice, and runs
-    fine - exactly the "crashes once, then works" pattern the tester reported.
-
-    So: let OGRE name the group that owns the file (``resourceExistsInAnyGroup``
-    inspects the mounted archives and does not depend on the group we pass in),
-    and if the icon exists nowhere, hand back OGRE's warning texture instead of
-    a null pointer.  ``main()`` has already dimmed that texture to a single
-    unobtrusive pixel unless ``App::diag_warning_texture`` is on, so a missing
-    icon is invisible in normal play and shows the yellow warning stripes while
-    diagnosing.
+    Both outcomes - found and missing - are cached per name so a caller that
+    redraws every frame (the console posts one icon per message, every frame)
+    does not repeat the group search and re-throw thousands of times.  Before
+    the cache, the console hint icon "lightbulb.png" (shipped in no mounted
+    group) produced 3306 identical throw+catch pairs in a single device
+    session.
     """
     path = os.path.join(ror, "source", "main", "gui", "GUIUtils.cpp")
     text = read(path)
@@ -3207,6 +3194,7 @@ def patch_fetchicon(ror):
         "#include <stdio.h> // sscanf\n",
         '#include "imgui_internal.h" // ImTextCharFromUtf8\n'
         "#include <OgreResourceGroupManager.h> // resourceExistsInAnyGroup()\n"
+        "#include <map>\n"
         "#include <regex>\n"
         "#include <stdio.h> // sscanf\n",
         "GUIUtils.cpp OgreResourceGroupManager include",
@@ -3214,48 +3202,130 @@ def patch_fetchicon(ror):
 
     text = must_replace(
         text,
-        "        Ogre::TexturePtr tex = Ogre::static_pointer_cast<Ogre::Texture>(\n"
-        '            Ogre::TextureManager::getSingleton().createOrRetrieve(name, "FlagsRG").first);\n',
-        "        // Apple/iOS port: upstream asks for every icon in the group \"FlagsRG\",\n"
-        "        // but that group only holds resources/flags (the country flags).  The UI\n"
-        "        // icons live in resources/icons (\"IconsRG\"), and control_pause.png /\n"
-        "        // control_play.png exist only in resources/famicons (\"FamiconsRG\").  The\n"
-        "        // group is not recoverable downstream: Texture::readImage() opens the\n"
-        "        // image with openResource(name, mGroup, this) - the overload that passes\n"
-        "        // searchGroupsIfNotFound=false - so a wrong group throws instead of being\n"
-        "        // looked up elsewhere.  Ask OGRE which mounted group has the file; that\n"
-        "        // search walks the archives and ignores the group name we pass in.\n"
-        "        Ogre::ResourceGroupManager& rgm = Ogre::ResourceGroupManager::getSingleton();\n"
-        "        std::string group = \"IconsRG\";\n"
-        "        if (rgm.resourceExistsInAnyGroup(name))\n"
-        "        {\n"
-        "            group = rgm.findGroupContainingResource(name);\n"
-        "        }\n"
-        "        else\n"
-        "        {\n"
-        "            RoR::Log((std::string(\"[RoR|FetchIcon] no resource group contains '\") + name\n"
-        "                + \"', using the warning texture\").c_str());\n"
-        "        }\n"
-        "\n"
-        "        Ogre::TexturePtr tex = Ogre::static_pointer_cast<Ogre::Texture>(\n"
-        "            Ogre::TextureManager::getSingleton().createOrRetrieve(name, group).first);\n",
-        "GUIUtils.cpp FetchIcon group lookup",
+        'Ogre::TexturePtr RoR::FetchIcon(const char* name)\n'
+        '{\n'
+        '    try\n'
+        '    {\n'
+        '        Ogre::TexturePtr tex = Ogre::static_pointer_cast<Ogre::Texture>(\n'
+        '            Ogre::TextureManager::getSingleton().createOrRetrieve(name, "FlagsRG").first);\n'
+        '        \n'
+        '        // Load the texture now to catch FileNotFoundException early. This is more efficient than\n'
+        '        // lazy loading because: (1) the texture will be loaded on first use anyway, and\n'
+        '        // (2) catching exceptions here is safer than during ImGui rendering.\n'
+        '        if (!tex->isLoaded())\n'
+        '        {\n'
+        '            tex->load();\n'
+        '        }\n'
+        '        return tex;\n'
+        '    }\n'
+        '    catch (...) \n'
+        '    {\n'
+        '        return Ogre::TexturePtr(); // null\n'
+        '    }\n'
+        '}\n',
+        'Ogre::TexturePtr RoR::FetchIcon(const char* name)\n'
+        '{\n'
+        '    // Apple/iOS port: cache every resolved icon - found or missing - so a\n'
+        '    // caller that redraws each frame does not repeat the resource-group\n'
+        '    // search and re-throw thousands of times (see the docstring above).\n'
+        '    static std::map<std::string, Ogre::TexturePtr> s_cachedIcons;\n'
+        '    std::map<std::string, Ogre::TexturePtr>::iterator it = s_cachedIcons.find(name);\n'
+        '    if (it != s_cachedIcons.end())\n'
+        '    {\n'
+        '        return it->second;\n'
+        '    }\n'
+        '\n'
+        '    Ogre::TexturePtr result;\n'
+        '    try\n'
+        '    {\n'
+        '        // Upstream asked for every icon in "FlagsRG", but the UI icons live in\n'
+        '        // "IconsRG" (and two in "FamiconsRG").  Texture::readImage() opens with\n'
+        '        // openResource(name, mGroup, this) - searchGroupsIfNotFound=false - so a\n'
+        '        // wrong group throws instead of searching elsewhere.  Ask OGRE which\n'
+        '        // mounted group owns the file.\n'
+        '        Ogre::ResourceGroupManager& rgm = Ogre::ResourceGroupManager::getSingleton();\n'
+        '        std::string group = "IconsRG";\n'
+        '        if (rgm.resourceExistsInAnyGroup(name))\n'
+        '        {\n'
+        '            group = rgm.findGroupContainingResource(name);\n'
+        '        }\n'
+        '        else\n'
+        '        {\n'
+        '            RoR::Log((std::string("[RoR|FetchIcon] no resource group contains ") + name\n'
+        '                + ", using the warning texture").c_str());\n'
+        '        }\n'
+        '\n'
+        '        result = Ogre::static_pointer_cast<Ogre::Texture>(\n'
+        '            Ogre::TextureManager::getSingleton().createOrRetrieve(name, group).first);\n'
+        '        if (!result->isLoaded())\n'
+        '        {\n'
+        '            result->load();\n'
+        '        }\n'
+        '    }\n'
+        '    catch (...)\n'
+        '    {\n'
+        '        // An empty TexturePtr is a null dereference in every caller - they all\n'
+        '        // do tex->getHandle() unconditionally.  Hand back the OGRE warning\n'
+        '        // texture: a real handle, always.\n'
+        '        RoR::Log((std::string("[RoR|FetchIcon] could not load icon ") + name\n'
+        '            + ", using the warning texture").c_str());\n'
+        '        result = Ogre::TextureManager::getSingleton()._getWarningTexture();\n'
+        '    }\n'
+        '\n'
+        '    s_cachedIcons[name] = result;\n'
+        '    return result;\n'
+        '}\n',
+        "GUIUtils.cpp FetchIcon body (any-group lookup + per-name cache)",
     )
+
+    write(path, text)
+
+
+def patch_console_view(ror):
+    """GUI_ConsoleView.cpp: draw console icons through RoR::FetchIcon().
+
+    The console draws a per-message icon and asked for all of them with::
+
+        Ogre::TextureManager::load(name, "IconsRG")
+
+    a hard-coded group.  The fixed names (script.png, information.png,
+    error.png, cancel.png, comment.png) do live in resources/icons, but the
+    dynamic per-message icon (``cm_icon`` - e.g. the "lightbulb.png" hint the
+    chat box posts on entry) is not shipped in any mounted group, so every
+    redraw threw ``FileNotFoundException`` that the surrounding try/catch
+    swallowed.  With the console open that is one throw+catch per frame: the
+    device trace for a single session carries 3306 identical
+
+        Cannot locate resource lightbulb.png in resource group IconsRG.
+
+    lines.  ``RoR::FetchIcon()`` (patched by :func:`patch_fetchicon`) checks
+    which group actually owns a file before loading and caches the result, so
+    routing the console through it removes the per-frame exception storm and
+    the hard-coded group.  GUI_ConsoleView.cpp already includes "GUIUtils.h",
+    so FetchIcon() is in scope.
+    """
+    path = os.path.join(ror, "source", "main", "gui", "panels",
+                        "GUI_ConsoleView.cpp")
+    text = read(path)
 
     text = must_replace(
         text,
-        "        return Ogre::TexturePtr(); // null\n",
-        "        // Apple/iOS port: an empty TexturePtr here is a null dereference in\n"
-        "        // every caller - they all do tex->getHandle() unconditionally (that is\n"
-        "        // precisely how GameMainMenu::DrawNoticeBox() took the process down on\n"
-        "        // the first launch).  Hand back OGRE's own warning texture instead: a\n"
-        "        // real handle, always.  If even that fails, let the exception fly - RoR\n"
-        "        // handles a thrown exception, it does not handle a null handle.\n"
-        "        RoR::Log((std::string(\"[RoR|FetchIcon] could not load icon '\") + name\n"
-        "            + \"', using the warning texture\").c_str());\n"
-        "        return Ogre::TextureManager::getSingleton()._getWarningTexture();\n",
-        "GUIUtils.cpp FetchIcon null return",
+        '                icon = Ogre::TextureManager::getSingleton().load(m.cm_icon, "IconsRG");\n',
+        '                // Apple/iOS port: FetchIcon() picks the group that owns the file and\n'
+        '                // caches the result, instead of hard-coding "IconsRG" and throwing\n'
+        '                // once per frame for icons shipped nowhere (e.g. lightbulb.png).\n'
+        '                icon = RoR::FetchIcon(m.cm_icon.c_str());\n',
+        "GUI_ConsoleView.cpp cm_icon load",
     )
+
+    for name in ("script.png", "information.png", "error.png",
+                 "cancel.png", "comment.png"):
+        text = must_replace(
+            text,
+            '            icon = Ogre::TextureManager::getSingleton().load("%s", "IconsRG");\n' % name,
+            '            icon = RoR::FetchIcon("%s");\n' % name,
+            "GUI_ConsoleView.cpp %s load" % name,
+        )
 
     write(path, text)
 
@@ -3440,6 +3510,10 @@ def main():
     # It only bites on the first launch after a mod-cache rebuild, which is
     # exactly when the main menu draws its "Cache updated" notice box.
     patch_fetchicon(args.ror_dir)
+    # The console draws one icon per message every frame; route those loads
+    # through the same FetchIcon() so a missing icon (lightbulb.png) stops
+    # throwing once per frame.
+    patch_console_view(args.ror_dir)
     # The runtime platform layer: the new iOS files themselves plus the two
     # entry-point/frame-loop changes in main.cpp that hand the process over to
     # UIKit.

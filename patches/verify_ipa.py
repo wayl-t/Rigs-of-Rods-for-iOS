@@ -29,6 +29,7 @@ Usage:
     python3 patches/verify_ipa.py RoR-ios.ipa
 """
 import io
+import re
 import sys
 import zipfile
 
@@ -136,6 +137,28 @@ def main(argv):
         else:
             print("  ok      executable: RTShader System bootstrap present")
 
+    # The OGRE GLSL preprocessor fallback is what keeps the terrain on screen.
+    # OGRE's stock preprocessor discards a shader whose preprocessing yields
+    # nothing, and the OGRE Terrain programs hit exactly that path on GLES2 -
+    # the material then reports "no supportable Techniques" and renders blank
+    # (device evidence: "Failed to preprocess shader OgreTerrain/.../hlod/hlod
+    # ... (line 132)" followed by "material ... has no supportable Techniques").
+    # build-ios-deps.yml patches GLSLShaderCommon::loadFromSource() to compile
+    # the include-resolved raw source instead, logging "compiling the raw
+    # source" when it does.  rtss13 shipped WITHOUT this because the build
+    # consumed a stale dependency run.  Require the marker in the shipped
+    # binary so a stale OGRE can never be released again.
+    if exe:
+        if b"compiling the raw source" in binary:
+            print("  ok      executable: OGRE GLSL preprocessor fallback present")
+        else:
+            bad.append(
+                "the executable lacks the OGRE GLSL preprocessor fallback "
+                "('compiling the raw source') - it was linked against an "
+                "unpatched OGRE, so the OGRE Terrain shaders are discarded and "
+                "the terrain renders blank.  Re-run build-ios-deps.yml and "
+                "point build-ror-ios.yml at that run (deps_run_id input).")
+
     # The generator reads the FFP function library out of this pack when it
     # builds a shader, with ResourceGroupManager::openResource() - any group
     # will do, but the files have to exist.
@@ -196,6 +219,32 @@ def main(argv):
             else:
                 print("  ok      rorres/rtshader.zip: %d GLSL FFP library files,"
                       " signatures match OGRE 1.11.6" % len(libs))
+
+            # GLSL ES 1.00 reserves 'switch'/'case'.  The alpha-test library
+            # ships an if/else chain; if the upstream switch-chain ever comes
+            # back, every alpha_rejection material dies with "'switch' :
+            # Reserved word", acquireGpuPrograms() throws, and RoRMain shows a
+            # red fatal-error box (device evidence: spawning the Semi trailer,
+            # ror-trace "ERROR: 0:21: 'switch' : Reserved word" +
+            # "InvalidParametersException: Could not create gpu programs").
+            alphaname = [n for n in libs
+                         if n.endswith("FFPLib_AlphaTest.glsl")]
+            if alphaname:
+                alphaname = alphaname[0]
+                alphatext = inner.read(alphaname).decode("utf-8", "replace")
+                # Match the construct itself, not the word in prose comments.
+                if re.search(r"\bswitch\s*\(", alphatext) or \
+                        re.search(r"\bcase\s+\d+\s*:", alphatext):
+                    bad.append(
+                        "rorres/rtshader.zip %s still uses 'switch'/'case', "
+                        "which GLSL ES 1.00 reserves - the alpha-test shader "
+                        "fails to compile on GLES2 and every material with "
+                        "alpha_rejection aborts the app with a fatal error.  "
+                        "patches/ror/rtshader_glsl/FFPLib_AlphaTest.glsl must "
+                        "use the if/else chain." % alphaname)
+                else:
+                    print("  ok      rorres/rtshader.zip: FFPLib_AlphaTest.glsl"
+                          " is GLSL ES safe (no switch)")
 
     # OGRE's StdQuad_vp.program asks for four GLSL ES sources that upstream
     # never wrote (nothing selects a GLSLES delegate on desktop).  Without
