@@ -316,6 +316,44 @@ def main(argv):
         else:
             print("  ok      executable: touch -> mouse -> ImGui bridge present")
 
+    # The ImGui overlay draws its own command lists - each command needs its own
+    # scissor rect and texture, so preRender() does the drawing itself and
+    # returns false to stop SceneManager::_issueRenderOp() from drawing it a
+    # second time.  That same false return, however, is also what stops OGRE
+    # from calling updateGpuProgramParameters() for this renderable - the only
+    # caller of GpuProgramParameters::_updateAutoParams() and
+    # RenderSystem::bindGpuProgramParameters() in the whole engine.
+    #
+    # That is harmless on the desktop (RoR's ImGui material has no shader there,
+    # so the matrices reach the GPU through the fixed-function world matrix
+    # SceneManager::setWorldTransform() sets) and fatal on GLES2, where there is
+    # no fixed function and the RTSS emulates it: the generated vertex shader
+    # kept the auto parameters of whichever renderable had been drawn before it
+    # - an overlay element of the wallpaper or the loading screen, all of which
+    # have identity view, identity projection *and* identity world matrix,
+    # because OGRE's overlay geometry is already in clip space.  ImGui's
+    # vertices are in *pixels* (its mXform is the projection that maps them),
+    # so under an identity transform a pixel coordinate is a clip coordinate and
+    # the entire menu - x in [0, 844] - collapsed into the one-pixel-wide sliver
+    # x in [0, 1] at the left edge.  This is why the device trace showed the
+    # menu state, three command lists and 904 vertices every frame, with
+    # hit-testing working and nothing on screen.
+    #
+    # patch_ogreimgui_overlay() refreshes those parameters inside preRender(),
+    # with public OGRE entry points only (no OGRE patch and no OGRE rebuild), so
+    # this marker means the menu is uploaded with worldViewProj == mXform.
+    if exe:
+        marker = b"[RoR|GUI] ImGui overlay: refreshed the shader auto params"
+        if marker not in binary:
+            bad.append(
+                "the executable carries no %r - the ImGui overlay is not "
+                "refreshing its shader auto parameters (patch_ogreimgui_overlay),"
+                " so on GLES2 the menu stays invisible: its pixel coordinates "
+                "are transformed by a stale identity worldViewProj"
+                % marker.decode())
+        else:
+            print("  ok      executable: ImGui overlay shader-param refresh present")
+
     # ------------------------------------------------------------------ #
     # 7. There must be something to load: the base content.                #
     # ------------------------------------------------------------------ #

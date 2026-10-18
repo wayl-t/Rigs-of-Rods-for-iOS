@@ -3033,6 +3033,126 @@ def patch_ogreimgui(ror):
     write(path, text)
 
 
+def patch_ogreimgui_overlay(ror):
+    """OgreImGuiOverlay.cpp: upload the shader parameters before drawing ImGui.
+
+    This is the reason the menu was invisible on the device, and it is worth
+    writing down in full, because nothing about it is specific to ImGui.
+
+    ``ImGUIRenderable::preRender()`` draws the ImGui command lists *itself* (a
+    renderable has to, because ImGui needs a scissor rect and a texture per
+    command) and returns ``false`` so that OGRE will not also draw it.  But
+    ``SceneManager::_issueRenderOp()`` looks like this::
+
+        if (rend->preRender(this, mDestRenderSystem))
+        {
+            if (pass) updateGpuProgramParameters(pass);   // <-- uploads the
+            rend->getRenderOperation(ro);                 //     shader params
+            mDestRenderSystem->_render(ro);
+        }
+
+    so returning ``false`` means ``updateGpuProgramParameters()`` is never
+    called for this renderable - and that method is the only thing in OGRE that
+    calls ``GpuProgramParameters::_updateAutoParams()`` and
+    ``bindGpuProgramParameters()``.  On the desktop that is harmless: RoR's
+    ImGui material has no shader there, so the matrices reach the GPU through
+    the fixed-function state that ``SceneManager::setWorldTransform()`` sets.
+
+    On GLES2 there is no fixed-function pipeline, the RTSS emulates it, and the
+    generated vertex shader gets its ``worldViewProj`` from the auto-parameter
+    system - which now never ran for this renderable.  The shader therefore kept
+    the parameters of whichever renderable was drawn before it: an overlay
+    element of the wallpaper or the loading screen, both of which have identity
+    view/projection *and* identity world matrix, because OGRE's overlay geometry
+    is already in clip space.
+
+    ImGui's vertices are in pixels (its ``mXform`` is the projection that maps
+    them to clip space, and that is what ``getWorldTransforms()`` hands OGRE).
+    Multiplied by a stale identity matrix, a pixel coordinate *is* a clip
+    coordinate, so the entire menu - x in [0, 844] - collapses into the single
+    pixel-wide sliver x in [0, 1] at the far left edge.  Hence: geometry
+    generated, command lists queued, hit-testing working, and the screen showing
+    nothing but the wallpaper.
+
+    The fix is to do exactly what OGRE would have done for us if ``preRender()``
+    returned ``true``.  All three calls below are public (``SceneManager::
+    _getAutoParamDataSource()``, ``GpuProgramParameters::_updateAutoParams()``
+    and ``RenderSystem::bindGpuProgramParameters()`` are ``_``-prefixed but
+    live in public sections, and ``OgreCompositorInstance.cpp`` already uses the
+    same pair), so no OGRE patch and no OGRE rebuild is needed.
+    ``mCurrentRenderable`` is already this renderable - ``renderSingleObject()``
+    sets it before ``_issueRenderOp()`` is reached - so the identity view and
+    projection are picked up and ``worldViewProj`` comes out as ``mXform``.
+    """
+    path = os.path.join(ror, "source", "main", "gui", "imgui",
+                        "OgreImGuiOverlay.cpp")
+    text = read(path)
+
+    text = must_replace(
+        text,
+        "#include <OgreRoot.h>\n",
+        "#include <OgreRoot.h>\n"
+        "#include <OgreSceneManager.h>\n"
+        "#include <OgreGpuProgram.h>\n"
+        "#include <OgreGpuProgramParams.h>\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        '#   include "ios_platform.h"\n'
+        "#endif\n",
+        "OgreImGuiOverlay.cpp includes for the shader-parameter refresh",
+    )
+
+    text = must_replace(
+        text,
+        "    TextureUnitState* tu = mMaterial->getBestTechnique()->getPass(0)->getTextureUnitState(0);\n"
+        "\n"
+        "    for (int i = 0; i < draw_data->CmdListsCount; ++i)\n",
+        "    TextureUnitState* tu = mMaterial->getBestTechnique()->getPass(0)->getTextureUnitState(0);\n"
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // See the header of patch_ogreimgui_overlay(): this renderable draws itself\n"
+        "    // and returns false, so OGRE never calls updateGpuProgramParameters() for\n"
+        "    // it.  With the RTSS emulating the fixed-function pipeline the generated\n"
+        "    // vertex shader would then transform our pixel-space vertices with the\n"
+        "    // previous renderable's (identity) matrices and put the whole menu outside\n"
+        "    // the viewport.  Refresh the auto parameters ourselves, exactly like\n"
+        "    // SceneManager does for a renderable whose preRender() returns true.\n"
+        "    // mCurrentRenderable is already this renderable, and it has\n"
+        "    // getUseIdentityView()/getUseIdentityProjection() set, so the result is\n"
+        "    // worldViewProj == mXform - the pixel to clip space projection.\n"
+        "    const Pass* iosPass = mMaterial->getBestTechnique()->getPass(0);\n"
+        "    const uint16 iosParamMask = (uint16)(GPV_GLOBAL | GPV_PER_OBJECT);\n"
+        "    for (int iosTypeI = 0; iosTypeI < GPT_COUNT; ++iosTypeI)\n"
+        "    {\n"
+        "        GpuProgramType iosType = static_cast<GpuProgramType>(iosTypeI);\n"
+        "        if (!iosPass->hasGpuProgram(iosType))\n"
+        "            continue;\n"
+        "        const GpuProgramParametersSharedPtr& iosParams =\n"
+        "            iosPass->getGpuProgramParameters(iosType);\n"
+        "        if (!iosParams)\n"
+        "            continue;\n"
+        "        iosParams->_updateAutoParams(sm->_getAutoParamDataSource(), iosParamMask);\n"
+        "        rsys->bindGpuProgramParameters(iosType, iosParams, iosParamMask);\n"
+        "    }\n"
+        "    static bool s_ios_imgui_params_logged = false;\n"
+        "    if (!s_ios_imgui_params_logged)\n"
+        "    {\n"
+        "        s_ios_imgui_params_logged = true;\n"
+        '        RoR_IosTrace("[RoR|GUI] ImGui overlay: refreshed the shader auto params "\n'
+        '            "(vs=%d fs=%d mask=%d), mUseIdentityView=%d mUseIdentityProjection=%d",\n'
+        "            (int)iosPass->hasGpuProgram(GPT_VERTEX_PROGRAM),\n"
+        "            (int)iosPass->hasGpuProgram(GPT_FRAGMENT_PROGRAM),\n"
+        "            (int)iosParamMask, (int)getUseIdentityView(),\n"
+        "            (int)getUseIdentityProjection());\n"
+        "    }\n"
+        "#endif\n"
+        "\n"
+        "    for (int i = 0; i < draw_data->CmdListsCount; ++i)\n",
+        "OgreImGuiOverlay.cpp refresh shader auto params before drawing",
+    )
+
+    write(path, text)
+
+
 def patch_fetchicon(ror):
     """GUIUtils.cpp: fetch an icon from the resource group that actually has it.
 
@@ -3309,6 +3429,12 @@ def main():
     # "the menu is not visible" and "the menu is never drawn", so make it
     # observable.
     patch_ogreimgui(args.ror_dir)
+    # And the next layer down again: the overlay IS queued and drawn, but on
+    # GLES2 its RTSS vertex shader was left holding the previous renderable's
+    # matrices, so the pixel-space ImGui vertices collapsed into the left edge.
+    # This is the one that actually made the menu invisible; see the (long)
+    # header of patch_ogreimgui_overlay().
+    patch_ogreimgui_overlay(args.ror_dir)
     # Same class of bug one level up: FetchIcon() asks for every icon in the
     # group that only holds the country flags, and the icons live elsewhere.
     # It only bites on the first launch after a mod-cache rebuild, which is

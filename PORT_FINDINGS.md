@@ -2797,6 +2797,126 @@ InputEngine::touchMoved()  -> mMouseListener->mouseMoved()
 
 ---
 
+### 7.34. Меню нарисовано, но невидимо: GLES2-шейдер ImGui получал матрицы **предыдущего** объекта
+
+Самая дорогая ошибка порта, и самая неочевидная: меню было **исправно на всех
+уровнях, кроме последнего**. Трасса с устройства показывала одновременно всё:
+
+```
+n=300 display=(844,390) lastdraw(cmds=3,vtx=904,clip=0,0,844,390) menu=1 … wallpaper=1 state=1
+```
+
+то есть «панель меню видима» (`menu=1`), ImGui отдал **три** командных списка и
+**904** вершины, область отсечения — весь экран, обработчики нажатий срабатывают
+(`handler OPEN_MENU`, затем `handler OPEN_SELECTOR` по тапу в (144,120)), — а
+глаз видел только обои. Значит виноват не интерфейс и не логика, а **GPU**.
+
+Причина нашлась в OGRE, в порядке, который ничего не знает про ImGui:
+
+```cpp
+// OgreSceneManager.cpp:4524
+void SceneManager::_issueRenderOp(Renderable* rend, const Pass* pass)
+{
+    if (rend->preRender(this, mDestRenderSystem))
+    {
+        if (pass) updateGpuProgramParameters(pass);   // <-- единственная закачка
+        rend->getRenderOperation(ro);                 //     uniform-ов в GPU
+        mDestRenderSystem->_render(ro);
+    }
+    rend->postRender(this, mDestRenderSystem);
+}
+```
+
+`ImGUIRenderable::preRender()` рисует командные списки ImGui **сам** (иначе
+нельзя: у каждой команды свой прямоугольник отсечения и своя текстура) и
+возвращает `false`, чтобы OGRE не нарисовал его второй раз. Но `false` — это
+ровно то условие, которое **отменяет** `updateGpuProgramParameters(pass)`. А этот
+метод в OGRE — единственный, кто вызывает
+`GpuProgramParameters::_updateAutoParams()` и
+`RenderSystem::bindGpuProgramParameters()` (второй вызывающий — вычислительный
+композитор, `OgreCompositorInstance.cpp:309`).
+
+На настольном компьютере это безвредно: у материала ImGui там нет шейдера, и
+матрицы попадают в GPU через фиксированное состояние, которое
+`SceneManager::setWorldTransform()` выставляет напрямую.
+
+На GLES2 фиксированного конвейера нет, его эмулирует RTSS (§7.27), и
+сгенерированный вершинный шейдер берёт `worldViewProj` из авто-параметров —
+которые для этого объекта **не пересчитывались никогда**. Шейдер оставался с
+параметрами того объекта, что рисовался перед ним: элемент обоев или загрузочного
+экрана. У них единичные вид и проекция **и единичная мировая матрица**, потому что
+геометрия `OverlayElement` уже в clip-space. Вершины же ImGui — в **пикселях**
+(`mXform` — это как раз проекция «пиксели → clip», и именно её
+`getWorldTransforms()` отдаёт OGRE как мировую матрицу). Под единичной матрицей
+пиксельная координата **и есть** clip-координата, поэтому всё меню — x в
+`[0, 844]` — сжималось в полоску шириной в один пиксель, x в `[0, 1]`, у левого
+края. Отсюда и полный набор совпадений в трассе: геометрия есть, командные списки
+есть, попадания по виджетам есть, изображения нет.
+
+**Исправление.** `patch_ogreimgui_overlay()` делает внутри `preRender()` то, что
+OGRE сделал бы сам, если бы тот вернул `true`:
+
+```cpp
+const Pass* iosPass = mMaterial->getBestTechnique()->getPass(0);
+const uint16 iosParamMask = (uint16)(GPV_GLOBAL | GPV_PER_OBJECT);
+for (int iosTypeI = 0; iosTypeI < GPT_COUNT; ++iosTypeI)
+{
+    GpuProgramType iosType = static_cast<GpuProgramType>(iosTypeI);
+    if (!iosPass->hasGpuProgram(iosType))
+        continue;
+    const GpuProgramParametersSharedPtr& iosParams =
+        iosPass->getGpuProgramParameters(iosType);
+    if (!iosParams)
+        continue;
+    iosParams->_updateAutoParams(sm->_getAutoParamDataSource(), iosParamMask);
+    rsys->bindGpuProgramParameters(iosType, iosParams, iosParamMask);
+}
+```
+
+Все три вызова помечены `_`, но лежат в **открытых** секциях
+(`SceneManager::_getAutoParamDataSource()`, `GpuProgramParameters::
+_updateAutoParams()`, `RenderSystem::bindGpuProgramParameters()`), а первый и
+третий уже применяются вместе в композиторе, — поэтому патч OGRE и пересборка
+OGRE не нужны, достаточно файла самого RoR. К моменту `preRender()` рендерером
+уже установлен `mCurrentRenderable = <наш объект>` (`renderSingleObject()`,
+строка 2058, вызывается раньше `_issueRenderOp()`), а у него взведены
+`mUseIdentityView`/`mUseIdentityProjection` (конструктор, строки 251–253),
+поэтому `_updateAutoParams(…, GPV_GLOBAL | GPV_PER_OBJECT)` даёт ровно
+`worldViewProj = I * I * mXform = mXform`. Маска `1|2` — это в точности то, что
+накопил бы сам OGRE: `GPV_GLOBAL` от единичных вида/проекции,
+`GPV_PER_OBJECT` от мировой матрицы.
+
+**Что отклонили и почему.**
+
+- Вернуть из `preRender()` `true`, а рисовать в `postRender()`. Тогда OGRE сам
+  вызовет `_render(mRenderOp)` — а `GLES2RenderSystem::_render()` (строка 1388)
+  приводит `op.vertexData->vertexDeclaration` к VAO и привязывает буферы. В
+  первом кадре привязок ещё нет, и `VertexBufferBinding::getBuffer()` вполне
+  может бросить исключение: «починили, но уронили».
+- Написать для `ImGui/material` свою пару шейдеров GLES2 вручную: имена
+  сэмплеров и атрибутов, которые ждёт GLES2-бэкенд, без локального компилятора не
+  проверить никак.
+- Патчить OGRE: `SceneManager::updateGpuProgramParameters()` объявлен
+  `protected` (`OgreSceneManager.h:1064`), а сам OGRE приходит готовым
+  артефактом из `build-ios-deps.yml`, то есть правка заголовка требует полной
+  пересборки зависимостей.
+- `setNamedConstant("worldViewProj", mXform)` в одиночку: значения доезжают до
+  GL **только** внутри `bindGpuProgramParameters()`, который для этого объекта
+  не вызывается.
+
+**Маркер.** Один раз за процесс:
+`[RoR|GUI] ImGui overlay: refreshed the shader auto params …` — и это же
+проверяет `verify_ipa.py` (раздел 6): без этой строки в бинарнике патч в сборку
+не попал, и меню снова будет невидимым.
+
+**Урок.** «Объект нарисован» и «объект нарисован правильно» — разные вещи, и
+разница может лежать в чужом коде на слой ниже. Симптом «функционально всё
+работает, но ничего не видно» почти всегда означает, что до GPU доехали не те
+данные, а не то, что данных нет. Проверять нужно **самую последнюю** стадию —
+ту, где уже нет ни логики, ни отладочной печати.
+
+---
+
 ## Уточнённая карта порта
 
 | Компонент | Судьба | Состояние |
