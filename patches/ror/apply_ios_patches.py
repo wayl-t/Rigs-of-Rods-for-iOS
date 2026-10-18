@@ -4416,6 +4416,49 @@ def patch_cvar_sky_default(ror):
     write(path, text)
 
 
+def patch_cvar_shadow_default(ror):
+    """CVar.cpp: default the shadow type to NONE on iOS.
+
+    Why this exists (device evidence, ror-trace log)
+    ------------------------------------------------
+    ``gfx_shadow_type`` defaults to ``"1"`` == ``GfxShadowType::PSSM``.  RoR's
+    PSSM path programs every shadow-casting and shadow-receiving material with
+    ``PSSM/shadow_caster_vs`` / ``PSSM/shadow_receiver_vs``, and on this port
+    the GLES2 RTSS cannot build those programs - the device log shows::
+
+        Initializing Shadow Subsystem
+        material Ogre/shadow/depth/caster has no supportable Techniques
+        Pass 0: vertex program PSSM/shadow_caster_vs cannot be used - not supported
+        material tracks/Character#0 has no supportable Techniques and will be blank
+        Pass 0: vertex program PSSM/shadow_receiver_vs cannot be used - not supported
+
+    The shadow_receiver failure is not cosmetic: the on-foot/driver character
+    (``tracks/character: RoR/Managed_Mats_Base``, cloned per instance by
+    ``Character::SetupGfx``) ends up with *no* supportable technique at all,
+    so it renders as a broken mesh instead of a human - the exact report from
+    the device.  Every other RoR material keeps its lit/textured technique
+    next to the shadow pass, but the character's is blanked by it.
+
+    With ``GfxShadowType::NONE`` no PSSM programs are requested anywhere:
+    ``ShadowManager`` takes its non-PSSM branch, ``ContentManager`` skips
+    mounting the ``shadows/pssm`` resource packs, and every material keeps
+    its normal technique.  Shadows simply do not render - the sane default
+    for a phone port whose GPU path cannot produce them; the option stays
+    reachable from the settings menu for anyone who wants to try.
+    """
+    path = os.path.join(ror, "source", "main", "system", "CVar.cpp")
+    text = read(path)
+
+    text = must_replace(
+        text,
+        '"1"/*(int)GfxShadowType::PSSM*/);',
+        '"0"/*(int)GfxShadowType::NONE*/);',
+        "CVar.cpp: default shadow type to NONE (PSSM programs unsupported on GLES2)",
+    )
+
+    write(path, text)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("ror_dir")
@@ -4519,6 +4562,8 @@ def main():
     # scene ambient and the built-in directional light.  See
     # patch_cvar_sky_default().
     patch_cvar_sky_default(args.ror_dir)
+    # patch_cvar_shadow_default().
+    patch_cvar_shadow_default(args.ror_dir)
 
     print("applied Apple/iOS patches to %s" % args.ror_dir)
     if args.ois_include:
