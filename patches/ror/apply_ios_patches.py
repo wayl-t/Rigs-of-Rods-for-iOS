@@ -1862,6 +1862,8 @@ def patch_inputengine_header(ror):
         "    bool                touchCancelled(const OIS::MultiTouchEvent& arg) override;\n"
         "    // Translates one touch into RoR's ordinary mouse path.\n"
         "    void                IosHandleTouch(int action, float x, float y);\n"
+        "    // Apple/iOS port: draws the on-screen touch controls and applies their state.\n"
+        "    void                IosDrawTouchControls(float dt);\n"
         "    // Creates the accelerometer-as-joystick and the multitouch device.\n"
         "    void                IosSetupInput(size_t hWnd);\n"
         "#endif\n"
@@ -1895,6 +1897,388 @@ def patch_inputengine_header(ror):
         "InputEngine.h iOS members",
     )
     write(path, text)
+
+
+# Apple/iOS port: on-screen touch controls ("virtual gamepad").
+#
+# The device has no keyboard, so RoR's default input map - hold UP to drive,
+# WASD to walk - can never fire and the game sits waiting for keys.  This layer
+# draws large touch regions and translates touches over them into the very
+# events the keyboard would have produced, via InputEngine's simulated-value
+# channel (setEventSimulatedValue), which getEventValue() returns in place of
+# any key state - the same mechanism AngelScript and the AI already use to
+# drive vehicles, so the simulation itself needs no change.
+#
+# Two constraints shaped it:
+#   * OIS's MultiTouchEvent carries only X/Y - no finger id - so fingers cannot
+#     be named.  We keep our own list of touches that began on a control and
+#     match later move/release events to it by nearest position, which is
+#     reliable because the controls are large, well-separated regions.
+#   * The hit-test runs when a touch arrives; the drawing runs inside the ImGui
+#     frame.  Both call IosLayout() - one pure function of the display size -
+#     so what you touch is always exactly what you see.
+#
+# It is appended before the touch->mouse translation because IosHandleTouch()
+# calls straight into it and C++ needs every helper declared before first use.
+IOS_TOUCH_CONTROLS_HELPERS = r"""#ifdef ROR_PLATFORM_IOS
+#include <imgui.h> // drawn with ImGui's foreground draw list
+// App::GetGameContext()->GetPlayerActor() needs the complete GameContext type;
+// nothing else in this translation unit pulls this header in.
+#include "GameContext.h"
+
+namespace {
+
+// A touch that began on a control and keeps driving it until it lifts.
+struct IosTouchPt { float x, y; };
+std::vector<IosTouchPt> s_iosCtlTouches;
+
+// A one-shot ("tap") control: the event is held at 1 briefly so the game's
+// bounce logic (getEventBoolValueBounce) sees exactly one press, then dropped.
+struct IosPulse { RoR::events ev; float t; };
+std::vector<IosPulse> s_iosPulses;
+
+// Last applied analog values, mirrored for the on-screen markers.
+float s_iosSteer = 0.f;   // -1 = full left .. +1 = full right
+float s_iosJoyX  = 0.f;
+float s_iosJoyY  = 0.f;   // -1 = up (forward) .. +1 = down (back)
+
+enum IosCtlKind { IOS_STEER, IOS_JOY, IOS_HELD, IOS_TOGGLE };
+
+struct IosCtl {
+    RoR::events ev;      // the event this control drives (STEER/JOY drive several)
+    IosCtlKind  kind;
+    float x, y, w, h;    // fraction of the display, 0..1
+    const char* label;
+};
+
+// Controls are only up while actually driving, and step aside whenever a menu
+// or dialog owns the screen - those keep getting the touches themselves.
+bool IosControlsActive()
+{
+    if (App::app_state->getEnum<AppState>() != AppState::SIMULATION)
+        return false;
+    if (App::GetGuiManager()->GameMainMenu.IsVisible())     return false;
+    if (App::GetGuiManager()->MainSelector.IsVisible())     return false;
+    if (App::GetGuiManager()->MessageBoxDialog.IsVisible()) return false;
+    if (App::GetGuiManager()->LoadingWindow.IsVisible())    return false;
+    return true;
+}
+
+bool IosInTruck()
+{
+    return App::GetGameContext()->GetPlayerActor() != nullptr;
+}
+
+// The display size ImGui is drawing into - the very space the touch coordinates
+// arrive in (see IosHandleTouch's coordinate note), so the layout fractions
+// line up with both sides.
+void IosDisplaySize(float& W, float& H)
+{
+    const ImVec2 d = ImGui::GetIO().DisplaySize;
+    W = (d.x > 1.f) ? d.x : 1.f;
+    H = (d.y > 1.f) ? d.y : 1.f;
+}
+
+// The one true layout.  Pure function of the display size, so the touch
+// hit-test and the ImGui draw can never disagree about where a button is.
+void IosLayout(float W, float H, std::vector<IosCtl>& out)
+{
+    out.clear();
+    if (IosInTruck())
+    {
+        // Steering: an absolute-position bar.  Left of centre = steer left,
+        // right of centre = steer right, amount = distance from centre.
+        out.push_back({RoR::EV_TRUCK_STEER_LEFT, IOS_STEER, 0.030f, 0.720f, 0.400f, 0.250f, "<  STEER  >"});
+        // Pedals under the right thumb.
+        out.push_back({RoR::EV_TRUCK_ACCELERATE, IOS_HELD,   0.845f, 0.360f, 0.150f, 0.300f, "GAS"});
+        out.push_back({RoR::EV_TRUCK_BRAKE,      IOS_HELD,   0.845f, 0.680f, 0.150f, 0.300f, "BRK"});
+        // A small utility row along the bottom, between steering and pedals.
+        const float ux = 0.452f, uw = 0.070f, uy = 0.855f, uh = 0.125f;
+        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE,        IOS_TOGGLE, ux + 0.f * uw, uy, uw, uh, "P"});
+        out.push_back({RoR::EV_TRUCK_TOGGLE_CONTACT,       IOS_TOGGLE, ux + 1.f * uw, uy, uw, uh, "IGN"});
+        out.push_back({RoR::EV_COMMON_RESET_TRUCK,         IOS_TOGGLE, ux + 2.f * uw, uy, uw, uh, "R"});
+        out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_TOGGLE, ux + 3.f * uw, uy, uw, uh, "EXIT"});
+        out.push_back({RoR::EV_TRUCK_STARTER,              IOS_HELD,   ux + 4.f * uw, uy, uw, uh, "STRT"});
+    }
+    else
+    {
+        // On foot: a walking/turning joystick under the left thumb...
+        out.push_back({RoR::EV_CHARACTER_FORWARD, IOS_JOY, 0.040f, 0.470f, 0.340f, 0.500f, "MOVE"});
+        // ...and the actions under the right thumb.
+        out.push_back({RoR::EV_CHARACTER_JUMP,             IOS_HELD,   0.800f, 0.420f, 0.190f, 0.170f, "JUMP"});
+        out.push_back({RoR::EV_CHARACTER_RUN,              IOS_HELD,   0.800f, 0.600f, 0.190f, 0.170f, "RUN"});
+        out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_TOGGLE, 0.800f, 0.780f, 0.190f, 0.200f, "ENTER"});
+    }
+}
+
+bool IosPtIn(const IosCtl& c, float W, float H, float px, float py)
+{
+    return px >= c.x * W && px <= (c.x + c.w) * W
+        && py >= c.y * H && py <= (c.y + c.h) * H;
+}
+
+// The already-tracked control-touch nearest to (px,py), or -1.  The match
+// radius is tied to the display, not to any one control, so a finger only
+// ever pairs with a touch genuinely close by - and the controls never overlap.
+int IosFindTouch(float W, float H, float px, float py)
+{
+    const float rad  = 0.08f * ((W < H) ? W : H);
+    const float rad2 = rad * rad;
+    int   best = -1;
+    float best_d = rad2;
+    for (size_t i = 0; i < s_iosCtlTouches.size(); ++i)
+    {
+        const float dx = s_iosCtlTouches[i].x - px;
+        const float dy = s_iosCtlTouches[i].y - py;
+        const float d2 = dx * dx + dy * dy;
+        if (d2 <= best_d) { best_d = d2; best = (int)i; }
+    }
+    return best;
+}
+
+// Hold a toggle event at 1 for just long enough for one bounce to register.
+void IosPulseEvent(RoR::events ev)
+{
+    App::GetInputEngine()->setEventSimulatedValue(ev, 1.0f);
+    for (size_t i = 0; i < s_iosPulses.size(); ++i)
+    {
+        if (s_iosPulses[i].ev == ev) { s_iosPulses[i].t = 0.18f; return; }
+    }
+    s_iosPulses.push_back({ev, 0.18f});
+}
+
+// Track one touch event against the control regions.  Returns true when the
+// touch belongs to a control and must NOT go on to the mouse/ImGui/camera path.
+bool IosControlsHandleTouch(int action, float x, float y)
+{
+    if (!IosControlsActive())
+    {
+        // The controls went away (a menu opened); drop any fingers they held so
+        // nothing can stay pressed.
+        s_iosCtlTouches.clear();
+        return false;
+    }
+
+    float W, H; IosDisplaySize(W, H);
+    std::vector<IosCtl> ctls;
+    IosLayout(W, H, ctls);
+
+    if (action == OIS::MT_Pressed)
+    {
+        // Only a touch that begins on a control becomes a control-finger; every
+        // other touch keeps its old meaning (camera / ImGui widgets).
+        for (size_t i = 0; i < ctls.size(); ++i)
+        {
+            if (!IosPtIn(ctls[i], W, H, x, y)) continue;
+            if (ctls[i].kind == IOS_TOGGLE)
+                IosPulseEvent(ctls[i].ev);
+            else
+                s_iosCtlTouches.push_back({x, y});
+            return true;
+        }
+        return false;
+    }
+
+    const int idx = IosFindTouch(W, H, x, y);
+    if (action == OIS::MT_Moved)
+    {
+        if (idx < 0) return false;     // a camera/ImGui finger, not ours
+        s_iosCtlTouches[idx].x = x;    // stays a control-finger for its whole life
+        s_iosCtlTouches[idx].y = y;
+        return true;
+    }
+    // Release or cancel.
+    if (idx < 0) return false;
+    s_iosCtlTouches.erase(s_iosCtlTouches.begin() + idx);
+    return true;
+}
+
+// Re-derive every continuously-held event from the tracked fingers.  Runs each
+// frame, so it both applies pedal positions and - by zeroing the whole set
+// first - clears anything left over when the player gets in or out of a truck.
+void IosApplyHeldEvents(float W, float H, const std::vector<IosCtl>& ctls)
+{
+    InputEngine* ie = App::GetInputEngine();
+
+    ie->setEventSimulatedValue(RoR::EV_TRUCK_ACCELERATE,    0.f);
+    ie->setEventSimulatedValue(RoR::EV_TRUCK_BRAKE,         0.f);
+    ie->setEventSimulatedValue(RoR::EV_TRUCK_STEER_LEFT,    0.f);
+    ie->setEventSimulatedValue(RoR::EV_TRUCK_STEER_RIGHT,   0.f);
+    ie->setEventSimulatedValue(RoR::EV_TRUCK_STARTER,       0.f);
+    ie->setEventSimulatedValue(RoR::EV_CHARACTER_FORWARD,   0.f);
+    ie->setEventSimulatedValue(RoR::EV_CHARACTER_BACKWARDS, 0.f);
+    ie->setEventSimulatedValue(RoR::EV_CHARACTER_LEFT,      0.f);
+    ie->setEventSimulatedValue(RoR::EV_CHARACTER_RIGHT,     0.f);
+    ie->setEventSimulatedValue(RoR::EV_CHARACTER_RUN,       0.f);
+    ie->setEventSimulatedValue(RoR::EV_CHARACTER_JUMP,      0.f);
+    s_iosSteer = 0.f;
+    s_iosJoyX  = 0.f;
+    s_iosJoyY  = 0.f;
+
+    for (size_t i = 0; i < ctls.size(); ++i)
+    {
+        const IosCtl& c = ctls[i];
+        if (c.kind == IOS_TOGGLE) continue;   // one-shots are handled by pulses
+
+        // A control is live while some control-finger rests inside its region.
+        bool  active = false;
+        float tx = 0.f, ty = 0.f;
+        for (size_t t = 0; t < s_iosCtlTouches.size(); ++t)
+        {
+            if (IosPtIn(c, W, H, s_iosCtlTouches[t].x, s_iosCtlTouches[t].y))
+            {
+                active = true;
+                tx = s_iosCtlTouches[t].x;
+                ty = s_iosCtlTouches[t].y;
+                break;
+            }
+        }
+
+        if (c.kind == IOS_STEER)
+        {
+            const float cx = (c.x + 0.5f * c.w) * W;
+            const float hw = 0.5f * c.w * W;
+            float s = active ? (tx - cx) / hw : 0.f;          // -1 .. +1
+            const float dz = 0.12f;
+            if (s > -dz && s < dz) s = 0.f;
+            else s = (s > 0.f) ? (s - dz) / (1.f - dz) : (s + dz) / (1.f - dz);
+            if (s < -1.f) s = -1.f;
+            if (s > 1.f)  s = 1.f;
+            s_iosSteer = s;
+            if (s < 0.f) ie->setEventSimulatedValue(RoR::EV_TRUCK_STEER_LEFT, -s);
+            else         ie->setEventSimulatedValue(RoR::EV_TRUCK_STEER_RIGHT, s);
+        }
+        else if (c.kind == IOS_JOY)
+        {
+            const float cx = (c.x + 0.5f * c.w) * W;
+            const float cy = (c.y + 0.5f * c.h) * H;
+            const float rx = 0.5f * c.w * W;
+            const float ry = 0.5f * c.h * H;
+            float jx = active ? (tx - cx) / rx : 0.f;
+            float jy = active ? (ty - cy) / ry : 0.f;
+            const float dz = 0.22f;
+            if (jx > -dz && jx < dz) jx = 0.f;
+            else jx = (jx > 0.f) ? (jx - dz) / (1.f - dz) : (jx + dz) / (1.f - dz);
+            if (jy > -dz && jy < dz) jy = 0.f;
+            else jy = (jy > 0.f) ? (jy - dz) / (1.f - dz) : (jy + dz) / (1.f - dz);
+            if (jx < -1.f) jx = -1.f;
+            if (jx > 1.f)  jx = 1.f;
+            if (jy < -1.f) jy = -1.f;
+            if (jy > 1.f)  jy = 1.f;
+            s_iosJoyX = jx;
+            s_iosJoyY = jy;
+            if (jy < 0.f) ie->setEventSimulatedValue(RoR::EV_CHARACTER_FORWARD, -jy);
+            if (jy > 0.f) ie->setEventSimulatedValue(RoR::EV_CHARACTER_BACKWARDS, jy);
+            if (jx < 0.f) ie->setEventSimulatedValue(RoR::EV_CHARACTER_LEFT, -jx);
+            if (jx > 0.f) ie->setEventSimulatedValue(RoR::EV_CHARACTER_RIGHT, jx);
+        }
+        else // IOS_HELD
+        {
+            ie->setEventSimulatedValue(c.ev, active ? 1.f : 0.f);
+        }
+    }
+}
+
+// The on-screen controls themselves, drawn on the foreground draw list so they
+// stay readable over the 3D scene and the dashboard.
+void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
+{
+    ImDrawList*  dl   = ImGui::GetForegroundDrawList();
+    ImFont*      font = ImGui::GetFont();
+    const float  fs   = ImGui::GetFontSize();
+
+    for (size_t i = 0; i < ctls.size(); ++i)
+    {
+        const IosCtl& c = ctls[i];
+        const ImVec2 p0(c.x * W, c.y * H);
+        const ImVec2 p1((c.x + c.w) * W, (c.y + c.h) * H);
+
+        bool pressed = false;
+        if (c.kind == IOS_TOGGLE)
+        {
+            for (size_t p = 0; p < s_iosPulses.size(); ++p)
+                if (s_iosPulses[p].ev == c.ev) { pressed = true; break; }
+        }
+        else
+        {
+            for (size_t t = 0; t < s_iosCtlTouches.size(); ++t)
+                if (IosPtIn(c, W, H, s_iosCtlTouches[t].x, s_iosCtlTouches[t].y)) { pressed = true; break; }
+        }
+
+        const ImU32 fill   = pressed ? IM_COL32(30, 130, 255, 135) : IM_COL32(15, 15, 15, 95);
+        const ImU32 border = pressed ? IM_COL32(130, 205, 255, 235) : IM_COL32(255, 255, 255, 125);
+        dl->AddRectFilled(p0, p1, fill, 10.f, ImDrawCornerFlags_All);
+        dl->AddRect(p0, p1, border, 10.f, ImDrawCornerFlags_All, 2.f);
+
+        // Centred label.
+        const ImVec2 ts = font->CalcTextSizeA(fs, 1e6f, 0.f, c.label);
+        const ImVec2 tp((p0.x + p1.x - ts.x) * 0.5f, (p0.y + p1.y - ts.y) * 0.5f);
+        dl->AddText(tp, IM_COL32(255, 255, 255, 240), c.label);
+
+        // Live marker for the two analog controls.
+        if (c.kind == IOS_STEER)
+        {
+            const float mid  = (p0.x + p1.x) * 0.5f;
+            const float mark = mid + s_iosSteer * 0.5f * (p1.x - p0.x);
+            dl->AddLine(ImVec2(mid, p0.y + 5.f), ImVec2(mid, p1.y - 5.f),
+                        IM_COL32(255, 255, 255, 80), 1.f);
+            dl->AddCircleFilled(ImVec2(mark, (p0.y + p1.y) * 0.5f), 13.f,
+                                IM_COL32(130, 205, 255, 235), 20);
+        }
+        else if (c.kind == IOS_JOY)
+        {
+            const float kx = (p0.x + p1.x) * 0.5f + s_iosJoyX * 0.5f * (p1.x - p0.x);
+            const float ky = (p0.y + p1.y) * 0.5f + s_iosJoyY * 0.5f * (p1.y - p0.y);
+            dl->AddCircleFilled(ImVec2((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f),
+                                0.16f * (p1.y - p0.y), IM_COL32(255, 255, 255, 45), 24);
+            dl->AddCircleFilled(ImVec2(kx, ky),
+                                0.12f * (p1.y - p0.y), IM_COL32(130, 205, 255, 210), 24);
+        }
+    }
+}
+
+} // namespace
+#endif // ROR_PLATFORM_IOS
+"""
+
+# The per-frame entry point GUIManager::DrawSimulationGui() calls: expires
+# one-shot presses, folds the tracked fingers into this frame's input events,
+# then draws the controls.  Declared in InputEngine.h under ROR_PLATFORM_IOS.
+IOS_TOUCH_CONTROLS_DRAW = r"""#ifdef ROR_PLATFORM_IOS
+void InputEngine::IosDrawTouchControls(float dt)
+{
+    // Let any one-shot ("tap") press expire first, whatever else is going on.
+    for (size_t i = 0; i < s_iosPulses.size(); )
+    {
+        s_iosPulses[i].t -= dt;
+        if (s_iosPulses[i].t <= 0.f)
+        {
+            this->setEventSimulatedValue(s_iosPulses[i].ev, 0.f);
+            s_iosPulses.erase(s_iosPulses.begin() + i);
+        }
+        else
+        {
+            ++i;
+        }
+    }
+
+    if (!IosControlsActive())
+    {
+        // Nothing is on screen: make sure no held event is left behind.
+        const std::vector<IosCtl> empty;
+        IosApplyHeldEvents(1.f, 1.f, empty);
+        s_iosCtlTouches.clear();
+        return;
+    }
+
+    float W, H; IosDisplaySize(W, H);
+    std::vector<IosCtl> ctls;
+    IosLayout(W, H, ctls);
+    IosApplyHeldEvents(W, H, ctls);
+    IosDrawControls(W, H, ctls);
+}
+#endif // ROR_PLATFORM_IOS
+"""
 
 
 def patch_inputengine(ror):
@@ -2169,6 +2553,11 @@ def patch_inputengine(ror):
         "InputEngine.cpp getMouseNormalizedScreenPos()",
     )
 
+    # The on-screen touch controls.  Appended before the touch -> mouse
+    # translation because IosHandleTouch() calls straight into them and C++
+    # needs every helper declared before its first use.
+    text += IOS_TOUCH_CONTROLS_HELPERS
+
     # The touch -> mouse translation itself.  Appended at the end of the file so
     # it cannot disturb any other anchor.
     text += (
@@ -2220,6 +2609,14 @@ def patch_inputengine(ror):
         "    if ((s_touch_count % 5) == 1)\n"
         "    {\n"
         "        LOG(String(\"[RoR|Input] touch #\") + TOSTRING(s_touch_count) + \": action=\" + TOSTRING(action) + \", pos=(\" + TOSTRING((int)x) + \",\" + TOSTRING((int)y) + \")\");\n"
+        "    }\n"
+        "\n"
+        "    // Apple/iOS port: touches that land on an on-screen control are\n"
+        "    // consumed there (they become input events, not mouse motion); every\n"
+        "    // other touch keeps its old meaning below - the camera and ImGui.\n"
+        "    if (IosControlsHandleTouch(action, x, y))\n"
+        "    {\n"
+        "        return;\n"
         "    }\n"
         "\n"
         "    // Coordinates arrive in points, and so do the render window metrics,\n"
@@ -2283,6 +2680,10 @@ def patch_inputengine(ror):
         "}\n"
         "#endif // ROR_PLATFORM_IOS\n"
     )
+
+    # Draw + apply the on-screen controls once per frame (GUIManager calls this).
+    text += IOS_TOUCH_CONTROLS_DRAW
+
     write(path, text)
 
 
@@ -2918,6 +3319,37 @@ def patch_gui_manager(ror):
         "\n"
         "    // Call IMGUI\n",
         "GUIManager.cpp NewImGuiFrame periodic menu/draw diagnostic",
+    )
+
+    # Apple/iOS port: draw + apply the on-screen touch controls once per frame.
+    # This lands at the tail of DrawSimulationGui, which main() calls every
+    # simulation frame after NewImGuiFrame() and before ImGui::Render() (the
+    # latter runs from OgreImGuiOverlay::ImGUIRenderable::preRender), so the
+    # additions are picked up by the very frame that requested them.  The
+    # function early-outs when no controls are on screen, so this is a no-op on
+    # platforms without the controls and whenever a menu owns the screen.
+    text = must_replace(
+        text,
+        "    if (this->FlexbodyDebug.IsVisible())\n"
+        "    {\n"
+        "        this->FlexbodyDebug.Draw();\n"
+        "    }\n"
+        "\n"
+        "\n"
+        "};\n",
+        "    if (this->FlexbodyDebug.IsVisible())\n"
+        "    {\n"
+        "        this->FlexbodyDebug.Draw();\n"
+        "    }\n"
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Apple/iOS port: draw the virtual steering/pedals/joystick and fold\n"
+        "    // the current finger state into this frame's input events.\n"
+        "    App::GetInputEngine()->IosDrawTouchControls(dt);\n"
+        "#endif\n"
+        "\n"
+        "};\n",
+        "GUIManager.cpp DrawSimulationGui iOS touch controls",
     )
 
     write(path, text)
