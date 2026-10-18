@@ -3453,6 +3453,210 @@ def patch_rtshader_media(ror):
           "OGRE 1.11.6 (v1.11.6) set" % replaced)
 
 
+def patch_terrain_stock_generator(ror):
+    """TerrainGeometryManager.cpp: use OGRE's stock terrain generator on GLES2.
+
+    Why this exists (device evidence, rtss14, RoR (2).log ~14:46:33)
+    ----------------------------------------------------------------
+    The terrain geometry loads ("Terrain created; size=1025 ...") but the whole
+    landscape renders blank.  Every terrain program fails the same way::
+
+        Warning: GLSL: preprocessor produced nothing for
+          'OgreTerrain/659483710/sm2/vp/hlod/hlod' (src_len=0); compiling the
+          raw source. head:
+        RenderingAPIException: ... in compile at .../OgreGLSLESProgram.cpp (line 207)
+        Warning: material OgreTerrain/659483710 has no supportable Techniques
+          and will be blank.
+
+    The tell is ``src_len=0`` - the shader *source is empty* by the time it is
+    compiled.  That is not a preprocessor problem (the earlier iOS fix, the OGRE
+    GLSL-preproc fallback, fires only because the source is already empty); it
+    means nothing ever wrote GLSL into the program.
+
+    Root cause
+    ----------
+    RoR does not use OGRE's terrain material generator.  It ships a fork -
+    ``source/main/terrain/OgreTerrainPSSMMaterialGenerator.{h,cpp}`` - that adds
+    PSSM dynamic shadows.  In the fork only the Cg/HLSL shader helpers are
+    actually implemented; ``ShaderHelperGLSL`` and ``ShaderHelperGLSLES`` declare
+    ``createVertexProgram``/``createFragmentProgram`` but leave **every**
+    ``generateVpHeader``/``generateFpHeader``/``generateVpLayer``/... method an
+    empty ``{}`` stub (OgreTerrainPSSMMaterialGenerator.h:232-262).  The active
+    helper is chosen at runtime by shader-language availability
+    (OgreTerrainPSSMMaterialGenerator.cpp:324-337); on desktop Windows Cg or
+    HLSL wins and the terrain renders, but the iPhone's GLES2 render system
+    supports only ``glsles`` - so ``ShaderHelperGLSLES`` is picked, its empty
+    generators produce an empty string, ``setSource("")`` is called, and every
+    terrain program compiles empty source and dies.
+
+    Fix
+    ---
+    On iOS (ROR_PLATFORM_IOS) fall back to OGRE's *stock*
+    ``TerrainMaterialGeneratorA``, whose ``ShaderHelperGLSL`` fully implements
+    GLSL **and** GLSL ES generation (``generateVpHeader`` emits ``#version 100``
+    + precision qualifiers when ``isLanguageSupported("glsles")``).  This is the
+    terrain path OGRE itself ships and tests on GLES2.
+
+    The stock generator is safe to use with RoR's terrain data because its layer
+    declaration is byte-identical to the fork's - both expect an
+    ``albedo_specular`` (RGBA) and a ``normal_height`` (RGBA) sampler with the
+    same element layout, so the terrain's layer textures are sampled identically
+    (compare OgreTerrainMaterialGeneratorA.cpp:49-65 with
+    OgreTerrainPSSMMaterialGenerator.cpp:43-59).
+
+    The only capability lost is PSSM dynamic shadows *on the terrain* on iOS,
+    which is a visual nicety far outweighed by having a visible landscape.  The
+    two profile-config blocks below are adjusted so they either configure the
+    stock SM2Profile (a different type) or skip entirely - importantly, the
+    ``matProfile->getReceiveDynamicShadowsPSSM()`` dereference further down would
+    otherwise null-deref, since ``matProfile`` is only assigned for the fork.
+    """
+    path = os.path.join(ror, "source", "main", "terrain", "TerrainGeometryManager.cpp")
+    text = read(path)
+
+    # 1) Include the stock generator (only compiled on iOS).
+    text = must_replace(
+        text,
+        "#include <OgreLight.h>\n"
+        "#include <Terrain/OgreTerrainGroup.h>\n",
+        "#include <OgreLight.h>\n"
+        "#include <Terrain/OgreTerrainGroup.h>\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "// Apple/iOS port: OGRE's stock terrain material generator, used in place\n"
+        "// of RoR's TerrainPSSMMaterialGenerator because the latter cannot\n"
+        "// generate GLSL ES shaders at all (see configureTerrainDefaults()).\n"
+        "#   include <Terrain/OgreTerrainMaterialGeneratorA.h>\n"
+        "#endif\n",
+        "TerrainGeometryManager.cpp include OgreTerrainMaterialGeneratorA.h",
+    )
+
+    # 2) Pick the stock generator on iOS instead of the (GLSL-ES-incapable) fork.
+    text = must_replace(
+        text,
+        "    std::string const & custom_mat = terrainManager->GetDef()->custom_material_name;\n"
+        "    if (!custom_mat.empty())\n"
+        "    {\n"
+        "        terrainOptions->setDefaultMaterialGenerator(\n"
+        "            Ogre::TerrainMaterialGeneratorPtr(new Terrn2CustomMaterial(custom_mat, false, true)));\n"
+        "    }\n"
+        "    else\n"
+        "    {\n"
+        "        terrainOptions->setDefaultMaterialGenerator(\n"
+        "            Ogre::TerrainMaterialGeneratorPtr(new Ogre::TerrainPSSMMaterialGenerator()));\n"
+        "    }\n",
+        "    std::string const & custom_mat = terrainManager->GetDef()->custom_material_name;\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Apple/iOS port: true once OGRE's stock generator is selected below;\n"
+        "    // the profile-config blocks further down then treat the active\n"
+        "    // profile differently (it is a different type, or not configured at all).\n"
+        "    bool ios_stock_gen = false;\n"
+        "#endif\n"
+        "    if (!custom_mat.empty())\n"
+        "    {\n"
+        "        terrainOptions->setDefaultMaterialGenerator(\n"
+        "            Ogre::TerrainMaterialGeneratorPtr(new Terrn2CustomMaterial(custom_mat, false, true)));\n"
+        "    }\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    else\n"
+        "    {\n"
+        "        // Apple/iOS port: RoR's TerrainPSSMMaterialGenerator only implements\n"
+        "        // shader generation for Cg/HLSL; its ShaderHelperGLSL and\n"
+        "        // ShaderHelperGLSLES leave every generate*() method an empty stub,\n"
+        "        // so on a GLES2-only device the terrain programs are generated as\n"
+        "        // EMPTY source, compile to nothing, and the terrain is blank.\n"
+        "        // OGRE's stock TerrainMaterialGeneratorA has a complete GLSL / GLSL\n"
+        "        // ES generator, so use it here (cost: no PSSM terrain shadows).\n"
+        "        ios_stock_gen = true;\n"
+        "        terrainOptions->setDefaultMaterialGenerator(\n"
+        "            Ogre::TerrainMaterialGeneratorPtr(new Ogre::TerrainMaterialGeneratorA()));\n"
+        "    }\n"
+        "#else\n"
+        "    else\n"
+        "    {\n"
+        "        terrainOptions->setDefaultMaterialGenerator(\n"
+        "            Ogre::TerrainMaterialGeneratorPtr(new Ogre::TerrainPSSMMaterialGenerator()));\n"
+        "    }\n"
+        "#endif\n",
+        "TerrainGeometryManager.cpp pick the stock generator on iOS",
+    )
+
+    # 3) Skip the fork-specific profile config when the stock generator is in
+    #    use (its active profile is a different type), and configure the stock
+    #    SM2Profile in its own branch instead.
+    text = must_replace(
+        text,
+        "    // optimizations\n"
+        "    TerrainPSSMMaterialGenerator::SM2Profile* matProfile = nullptr;\n"
+        "    if (custom_mat.empty())\n"
+        "    {\n",
+        "    // optimizations\n"
+        "    TerrainPSSMMaterialGenerator::SM2Profile* matProfile = nullptr;\n"
+        "    if (custom_mat.empty()\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "        && !ios_stock_gen // the stock generator's profile is a different type\n"
+        "#endif\n"
+        "        )\n"
+        "    {\n",
+        "TerrainGeometryManager.cpp guard the fork profile config",
+    )
+
+    # 3b) ...and configure the stock SM2Profile right after that block closes.
+    text = must_replace(
+        text,
+        "            terrainManager->getShadowManager()->updateTerrainMaterial(matProfile);\n"
+        "        }\n"
+        "    }\n",
+        "            terrainManager->getShadowManager()->updateTerrainMaterial(matProfile);\n"
+        "        }\n"
+        "    }\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    else if (ios_stock_gen)\n"
+        "    {\n"
+        "        // Apple/iOS port: configure OGRE's stock SM2Profile (a different type\n"
+        "        // from the fork's, hence not handled above).  Normal + specular mapping\n"
+        "        // are forced on - exactly as the desktop OpenGL branch does - because\n"
+        "        // the terrain otherwise renders black; the PSSM shadow hookup is\n"
+        "        // skipped, the stock generator manages its own shadows.\n"
+        "        Ogre::TerrainMaterialGeneratorA::SM2Profile* stockProfile =\n"
+        "            static_cast<Ogre::TerrainMaterialGeneratorA::SM2Profile*>(\n"
+        "                terrainOptions->getDefaultMaterialGenerator()->getActiveProfile());\n"
+        "        if (stockProfile)\n"
+        "        {\n"
+        "            stockProfile->setLightmapEnabled(m_spec->lightmap_enabled);\n"
+        "            stockProfile->setLayerNormalMappingEnabled(true);\n"
+        "            stockProfile->setLayerSpecularMappingEnabled(true);\n"
+        "            stockProfile->setLayerParallaxMappingEnabled(false);\n"
+        "            stockProfile->setGlobalColourMapEnabled(m_spec->global_colormap_enabled);\n"
+        "        }\n"
+        "    }\n"
+        "#endif\n",
+        "TerrainGeometryManager.cpp configure the stock SM2Profile on iOS",
+    )
+
+    # 4) The casts-dynamic-shadows block dereferences matProfile, which stays
+    #    null when the stock generator is used - guard it.
+    text = must_replace(
+        text,
+        "    if (custom_mat.empty())\n"
+        "    {\n"
+        "        if (matProfile->getReceiveDynamicShadowsPSSM())\n"
+        "        {\n"
+        "            terrainOptions->setCastsDynamicShadows(true);\n"
+        "        }\n"
+        "    }\n",
+        "    if (custom_mat.empty() && matProfile) // matProfile is null with the stock generator\n"
+        "    {\n"
+        "        if (matProfile->getReceiveDynamicShadowsPSSM())\n"
+        "        {\n"
+        "            terrainOptions->setCastsDynamicShadows(true);\n"
+        "        }\n"
+        "    }\n",
+        "TerrainGeometryManager.cpp guard the casts-dynamic-shadows deref",
+    )
+
+    write(path, text)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("ror_dir")
@@ -3539,6 +3743,12 @@ def main():
     # sub-render-states make ("Error: Cached function not found SGX_*" on
     # device).  See patch_rtshader_media().
     patch_rtshader_media(args.ror_dir)
+    # The landscape renders blank because RoR's forked terrain material
+    # generator cannot emit GLSL ES at all - its GLSL/GLSLES shader helpers are
+    # empty stubs, so on GLES2 the terrain shaders are generated as empty source.
+    # Fall back to OGRE's stock generator, which fully supports GLSL ES.
+    # See patch_terrain_stock_generator().
+    patch_terrain_stock_generator(args.ror_dir)
 
     print("applied Apple/iOS patches to %s" % args.ror_dir)
     if args.ois_include:
