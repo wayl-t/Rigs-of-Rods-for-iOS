@@ -404,6 +404,35 @@ def main(argv):
             print("  ok      executable: ImGui overlay shader-param refresh present")
 
     # ------------------------------------------------------------------ #
+    # 6b. Touch must reach the driving controls, not only the menus.       #
+    # ------------------------------------------------------------------
+    # With the menus responding to touch, the port could render the world
+    # but still needed a keyboard to drive it.  IosDrawTouchControls() -
+    # one call at the tail of GUIManager::DrawSimulationGui() - draws an
+    # on-screen steering bar, pedals and utility buttons (and, on foot, a
+    # MOVE joystick), and folds the tracked fingers into
+    # InputEngine::setEventSimulatedValue(): the same public injection API
+    # the game itself uses, which getEventValue() short-circuits on, so
+    # both the digital and analog reads used for steering pick it up.
+    #
+    # "<  STEER  >" is the steering bar's label - a string literal only
+    # this code emits, carried exactly once by the binary - so its presence
+    # proves the layout, the hit-test and the drawing all shipped together.
+    # Without them the app installs and renders fine and the player can
+    # only watch: nothing is drivable without a keyboard.
+    if exe:
+        marker = b"<  STEER  >"
+        if marker not in binary:
+            bad.append(
+                "the executable carries no %r - the on-screen touch driving "
+                "controls (IosDrawTouchControls, added by patch_inputengine's "
+                "IOS_TOUCH_CONTROLS_* blocks) are not in this build, so the "
+                "game can be looked at but not driven without a keyboard"
+                % marker.decode())
+        else:
+            print("  ok      executable: on-screen touch driving controls present")
+
+    # ------------------------------------------------------------------ #
     # 7. There must be something to load: the base content.                #
     # ------------------------------------------------------------------ #
     # Rigs of Rods ships no built-in terrain.  Its only content is the
