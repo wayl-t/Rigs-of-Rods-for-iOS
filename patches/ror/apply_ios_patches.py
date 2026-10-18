@@ -2516,54 +2516,6 @@ def patch_rtshader(ror):
         "        }\n"
         "        mBusy = false;\n"
         "\n"
-        "        // Apple/iOS: one-time dump of the generated GLSL ES for a cubemap\n"
-        "        // material - the skybox.  On device the sky renders black even though\n"
-        "        // the cubemap loads (the six cloudy_noon faces) and the shader\n"
-        "        // compiles (no 'Cached function not found'), so the exact generated\n"
-        "        // source is what separates a bad sampler/varying declaration from a\n"
-        "        // texture-binding problem on GLES2.\n"
-        "        if (!mLoggedCube)\n"
-        "        {\n"
-        "            for (Ogre::Technique* tech : material->getTechniques())\n"
-        "            {\n"
-        "                if (tech->getSchemeName() != schemeName)\n"
-        "                    continue;\n"
-        "                bool cube = false;\n"
-        "                for (unsigned short p = 0; p < tech->getNumPasses(); ++p)\n"
-        "                {\n"
-        "                    Ogre::Pass* pass = tech->getPass(p);\n"
-        "                    for (unsigned short t = 0; t < pass->getNumTextureUnitStates(); ++t)\n"
-        "                    {\n"
-        "                        if (pass->getTextureUnitState(t)->getTextureType() ==\n"
-        "                                Ogre::TEX_TYPE_CUBE_MAP)\n"
-        "                        {\n"
-        "                            cube = true;\n"
-        "                        }\n"
-        "                    }\n"
-        "                }\n"
-        "                if (!cube)\n"
-        "                    continue;\n"
-        "                mLoggedCube = true;\n"
-        "                for (unsigned short p = 0; p < tech->getNumPasses(); ++p)\n"
-        "                {\n"
-        "                    Ogre::Pass* pass = tech->getPass(p);\n"
-        "                    if (!pass->getVertexProgram().isNull())\n"
-        "                    {\n"
-        "                        RoR_IosTrace(\"[rtss][cube] '%s' VS:\\n%s\",\n"
-        "                            material->getName().c_str(),\n"
-        "                            pass->getVertexProgram()->getSource().c_str());\n"
-        "                    }\n"
-        "                    if (!pass->getFragmentProgram().isNull())\n"
-        "                    {\n"
-        "                        RoR_IosTrace(\"[rtss][cube] '%s' FS:\\n%s\",\n"
-        "                            material->getName().c_str(),\n"
-        "                            pass->getFragmentProgram()->getSource().c_str());\n"
-        "                    }\n"
-        "                }\n"
-        "                break;\n"
-        "            }\n"
-        "        }\n"
-        "\n"
         "        for (Ogre::Technique* tech : material->getTechniques())\n"
         "        {\n"
         "            if (tech->getSchemeName() == schemeName)\n"
@@ -2574,7 +2526,6 @@ def patch_rtshader(ror):
         "\n"
         "private:\n"
         "    bool mBusy = false;\n"
-        "    bool mLoggedCube = false; // skybox shader diagnostic, dumped once\n"
         "};\n"
         "\n"
         "void RoR::Ios::RtssRegisterSceneManager(Ogre::SceneManager* scene_manager)\n"
@@ -3767,10 +3718,14 @@ def patch_terrain_sky_light(ror):
 
     # Diagnostic: record the sky ground-truth.  The viewport background, the
     # linear-fog colour and the built-in light's diffuse colour are all
-    # m_def->ambient_color (Terrain::initCamera / initFog / initLight).  A
-    # black sky therefore comes from one of two places - the clear colour
-    # (ambient_color is black) or the skybox render itself (cubemap samples
-    # black).  Logging ambient_color plus the chosen skybox separates them.
+    # m_def->ambient_color (Terrain::initCamera / initFog / initLight).
+    #
+    # This line earned its keep: on rtss15 the sky rendered black while
+    # ambient turned out to be white (1,1,1), which proved the black came
+    # from the skybox render - not the clear colour - and pointed at the
+    # CAELUM sky mode (which mounts caelum.zip) as the culprit rather than a
+    # bad cubemap or shader.  Keep it: one cheap line that instantly separates
+    # "background is wrong" from "skybox is wrong" for any future map.
     text = must_replace(
         text,
         "void RoR::Terrain::initSkySubSystem()\n"
@@ -3779,8 +3734,9 @@ def patch_terrain_sky_light(ror):
         "void RoR::Terrain::initSkySubSystem()\n"
         "{\n"
         "    // Apple/iOS diagnostic: sky ground-truth - the background/fog/light\n"
-        "    // colour (ambient_color) and which skybox is used, so a black sky can\n"
-        "    // be attributed to the clear colour or to the skybox render itself.\n"
+        "    // colour (ambient_color) and which skybox is used.  A cheap one-line\n"
+        "    // way to tell 'background is wrong' from 'skybox is wrong' should a\n"
+        "    // sky ever render a solid colour again.\n"
         "    LOG(std::string(\"[RoR|ios-sky] mode=\") +\n"
         "        std::to_string((int)App::gfx_sky_mode->getEnum<GfxSkyMode>()) +\n"
         "        \" ambient=(\" + std::to_string(m_def->ambient_color.r) + \", \" +\n"
