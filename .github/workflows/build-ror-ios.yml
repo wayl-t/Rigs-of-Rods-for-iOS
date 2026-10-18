@@ -160,19 +160,20 @@ jobs:
             echo "  MISSING OGRE was built WITHOUT Zip archive support - re-run build-ios-deps.yml first"
             missing=1
           fi
-          # The GLSL preprocessor fallback (blank terrain) is compiled into
-          # OGRE Main.  rtss13 shipped an UNPATCHED OGRE because this workflow
+          # The GLSL preprocessor fallback (blank terrain) is compiled into the
+          # GLES2 render system - GLSLShaderCommon.cpp lives in
+          # RenderSystems/GLSupport and links into RenderSystem_GLES2, not
+          # OgreMain - so search every static lib rather than assuming which one
+          # carries it.  rtss13 shipped an UNPATCHED OGRE because this workflow
           # consumed a stale dependency run - the binary still threw
           # "Failed to preprocess shader ... (line 132)" and the terrain stayed
-          # blank, while verify_ipa's needle passed only because the string
-          # lives in the deps SDK, not the app source.  Grep the downloaded
-          # static lib for the patched fallback's marker so a stale SDK fails
-          # loudly here instead of shipping a terrain-less build.
-          OGRE_MAIN="$(find "$IOS_PREFIX" -name 'libOgreMain*.a' | head -1)"
-          if [ -n "$OGRE_MAIN" ] && grep -qa "compiling the raw source" "$OGRE_MAIN"; then
-            echo "  ok      OGRE Main carries the GLSL preprocessor fallback ($OGRE_MAIN)"
+          # blank.  Grep the downloaded libs for the patched fallback's marker
+          # so a stale SDK fails loudly here instead of shipping a terrain-less
+          # build.
+          if grep -qra "compiling the raw source" "$IOS_PREFIX/lib"; then
+            echo "  ok      the GLSL preprocessor fallback is present in the SDK's static libs"
           else
-            echo "  MISSING OGRE Main lacks the GLSL preprocessor fix - re-run build-ios-deps.yml and point this build at THAT run"
+            echo "  MISSING the SDK's static libs lack the GLSL preprocessor fix - re-run build-ios-deps.yml and point this build at THAT run"
             missing=1
           fi
           for lib in MyGUIEngine MyGUI.OgrePlatform fmt SocketW PagedGeometry angelscript openal; do
