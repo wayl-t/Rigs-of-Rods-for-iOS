@@ -588,6 +588,59 @@ def main(argv):
             else:
                 print("  ok      executable: %s present" % what)
 
+    # ------------------------------------------------------------------ #
+    # 10. The GLES2-critical cvars must outlive RoR.cfg.                   #
+    # ------------------------------------------------------------------ #
+    # CVar.cpp gives RoR its defaults, but main() calls
+    # App::GetConsole()->loadConfig() right after creating the cvars, and
+    # RoR.cfg wins for every value it mentions.  The file ships empty in
+    # skeleton.zip, so a fresh install looks fine; RoR rewrites it from the
+    # settings menu and from 'saveconfig', and the app container survives a
+    # re-install, so from the second launch on the phone's own RoR.cfg
+    # decides - which is how the character fix (shadows NONE) silently did
+    # nothing on the device while the build was green (PORT_FINDINGS 7.35).
+    #
+    # patch_cvar_ios_overrides() re-asserts three values after loadConfig():
+    #   gfx_sky_mode=0               no Caelum/SkyX in this build
+    #   gfx_shadow_type=0            PSSM/shadow_receiver_vs cannot be built
+    #   gfx_alt_actor_materials=true vehicles must use the RTSS-generated
+    #                                managed/*/specular* materials, not the
+    #                                Cg "_nicemetal" ones (PORT_FINDINGS 7.36)
+    # and logs them.  The marker below is that log line's literal.
+    if exe:
+        marker = b"[RoR|iOS] cvars after RoR.cfg"
+        if marker not in binary:
+            bad.append(
+                "the executable carries no %r - the iOS cvar override after "
+                "RoR.cfg (patch_cvar_ios_overrides) is not in this build, so "
+                "whatever the phone's RoR.cfg says wins: PSSM shadows come "
+                "back (the on-foot character renders as a broken mesh) and "
+                "vehicle materials go through the Cg '_nicemetal' variants "
+                "again, which crash on spawn" % marker.decode())
+        else:
+            print("  ok      executable: iOS cvar override after RoR.cfg present")
+
+    # A malformed `texture_alias specular_tex 2d` line in the transparent
+    # nicemetal material makes OGRE's script compiler abandon the rest of the
+    # file (every definition below line 125 stops existing).  The material
+    # files are loose in the bundle, so the shipped copy is checked directly.
+    # The file itself is optional, so only a present-but-unfixed one fails.
+    mat = [n for n in names
+           if n.endswith("/rorres/managed_materials/"
+                         "managed_mats_vehicles_transparent_nicemetal.material")]
+    if mat:
+        body = ipa.read(mat[0]).decode("utf-8", "replace")
+        if re.search(r"texture_alias\s+specular_tex\s+2d", body):
+            bad.append(
+                "the shipped managed_mats_vehicles_transparent_nicemetal"
+                ".material still has 'texture_alias specular_tex 2d' - "
+                "texture_alias takes one argument, so the script compiler "
+                "errors out and abandons every definition below that line "
+                "(patch_nicemetal_material_bug did not run)")
+        else:
+            print("  ok      managed_mats_vehicles_transparent_nicemetal"
+                  ".material: texture_alias is well formed")
+
     for line in bad:
         print("  MISSING " + line)
         print("::error::" + line)

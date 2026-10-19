@@ -4513,6 +4513,12 @@ def patch_cvar_ios_overrides(ror):
     without changing anything on desktop, where ``RoR.cfg`` is *supposed* to
     win.  ``setStr()`` is the generic setter and works for the enum (int) and
     bool cvars alike.
+
+    The block also writes the before -> after values into ror-trace.log
+    (``[RoR|iOS] cvars after RoR.cfg``).  That line is the fastest way to tell
+    from a device trace whether RoR.cfg had overridden anything, and it is the
+    marker ``verify_ipa.py`` requires in the shipped binary, so this patch
+    cannot fall out of a build unnoticed.
     """
     path = os.path.join(ror, "source", "main", "main.cpp")
     text = read(path)
@@ -4529,10 +4535,18 @@ def patch_cvar_ios_overrides(ror):
         "        // defaults set in CVar.cpp, so re-assert the three values this\n"
         "        // GLES2 render path cannot work without.  See\n"
         "        // patch_cvar_ios_overrides() in apply_ios_patches.py for the\n"
-        "        // device evidence behind each of them.\n"
-        "        App::gfx_sky_mode->setStr(\"0\");                // GfxSkyMode::SANDSTORM (no Caelum/SkyX on iOS)\n"
-        "        App::gfx_shadow_type->setStr(\"0\");             // GfxShadowType::NONE (PSSM programs unsupported)\n"
-        "        App::gfx_alt_actor_materials->setStr(\"true\");  // RTSS-safe vehicle materials (Cg 'nicemetal' unsupported)\n"
+        "        // device evidence behind each of them; verify_ipa.py requires the\n"
+        "        // marker line below to be present in the shipped binary.\n"
+        "        {\n"
+        "            const std::string ios_cfg_sky    = App::gfx_sky_mode->getStr();\n"
+        "            const std::string ios_cfg_shadow = App::gfx_shadow_type->getStr();\n"
+        "            const std::string ios_cfg_alt    = App::gfx_alt_actor_materials->getStr();\n"
+        "            App::gfx_sky_mode->setStr(\"0\");                // GfxSkyMode::SANDSTORM (no Caelum/SkyX on iOS)\n"
+        "            App::gfx_shadow_type->setStr(\"0\");             // GfxShadowType::NONE (PSSM programs unsupported)\n"
+        "            App::gfx_alt_actor_materials->setStr(\"true\");  // RTSS-safe vehicle materials (Cg 'nicemetal' unsupported)\n"
+        "            RoR_IosStartupTick(\"[RoR|iOS] cvars after RoR.cfg: sky %s->0, shadow %s->0, alt_actor_materials %s->true\",\n"
+        "                ios_cfg_sky.c_str(), ios_cfg_shadow.c_str(), ios_cfg_alt.c_str());\n"
+        "        }\n"
         "#endif\n",
         "main.cpp re-assert the iOS-critical cvars after RoR.cfg",
     )
