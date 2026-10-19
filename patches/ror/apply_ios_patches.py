@@ -3486,7 +3486,7 @@ def patch_gui_manager(ror):
     )
 
     # Widget metrics for the phone, kept in step with the font that
-    # patch_ogreimgui_overlay rasterizes 2x bigger (anchor verified against
+    # patch_ogreimgui_overlay rasterizes (anchor verified against
     # the pinned tree: line after style.WindowBorderSize).
     text = must_replace(
         text,
@@ -3496,12 +3496,12 @@ def patch_gui_manager(ror):
         "    style.WindowBorderSize      = 0.f;\n"
         "\n"
         "#ifdef ROR_PLATFORM_IOS\n"
-        "    // Apple/iOS port: give the widgets the same 1.5x the font just got (see\n"
-        "    // patch_ogreimgui_overlay, OgreImGuiOverlay.cpp addFont) - paddings,\n"
-        "    // spacings and rounding grow with it, so every ImGui control stays\n"
-        "    // finger-sized while each panel keeps the proportions its upstream\n"
-        "    // design used.\n"
-        "    style.ScaleAllSizes(1.5f);\n"
+        "    // Apple/iOS port: draw the UI at the desktop size - 1.0x.  The\n"
+        "    // earlier 1.5x/2x scale made every panel too big on the device; this\n"
+        "    // is the single knob for the whole ImGui UI and it is kept in step\n"
+        "    // with the font scale in patch_ogreimgui_overlay (OgreImGuiOverlay.cpp\n"
+        "    // addFont) so panels keep the proportions the upstream design used.\n"
+        "    style.ScaleAllSizes(1.0f);\n"
         "#endif\n"
         "\n"
         "    App::GetGfxScene()->GetSceneManager()->addRenderQueueListener(&m_imgui);\n",
@@ -3757,16 +3757,15 @@ def patch_ogreimgui_overlay(ror):
         "}\n",
         "    ImFontConfig cfg;\n"
         "    strncpy(cfg.Name, name.c_str(), 40);\n"
-        "    // Apple/iOS port: rasterize the font 1.5x bigger than on the desktop.\n"
-        "    // The phone draws 844x390 points into the whole screen and is read at\n"
-        "    // arm's length, where the desktop glyph size is unreadable - and ImGui\n"
+        "    // Apple/iOS port: rasterize the font at the desktop size - 1.0x.  The\n"
+        "    // earlier 1.5x/2x scale made the text too big on the device; ImGui\n"
         "    // cannot scale an already-rasterized glyph, so the atlas has to be built\n"
-        "    // at the final size.  GUIManager::SetupImGui scales the widget metrics to\n"
-        "    // match (style.ScaleAllSizes), so every panel keeps the proportions its\n"
-        "    // upstream design used.\n"
+        "    // at the final size.  GUIManager::SetupImGui scales the widget metrics\n"
+        "    // with the same factor (style.ScaleAllSizes), so every panel keeps the\n"
+        "    // proportions its upstream design used.\n"
         "    float font_size = (float)font->getTrueTypeSize();\n"
         "#ifdef ROR_PLATFORM_IOS\n"
-        "    font_size *= 1.5f;\n"
+        "    font_size *= 1.0f;\n"
         "#endif\n"
         "    return io.Fonts->AddFontFromMemoryTTF(ttfchunk.getPtr(), (int)ttfchunk.size(), font_size, &cfg,\n"
         "                                          cprangePtr);\n"
@@ -4459,6 +4458,127 @@ def patch_cvar_shadow_default(ror):
     write(path, text)
 
 
+def patch_cvar_ios_overrides(ror):
+    """main.cpp: re-assert the iOS-critical cvars *after* RoR.cfg is loaded.
+
+    Why the CVar.cpp defaults are not enough
+    ----------------------------------------
+    ``CVar.cpp`` gives RoR its default values, and ``patch_cvar_sky_default()``
+    / ``patch_cvar_shadow_default()`` change three of them for iOS.  But
+    ``main()`` creates the cvars and then immediately calls
+    ``App::GetConsole()->loadConfig()``, which reads ``config/RoR.cfg`` and
+    overwrites every value that file mentions:
+
+        App::GetConsole()->cVarSetupBuiltins();   // defaults set here
+        App::GetConsole()->loadConfig();          // RoR.cfg wins from here on
+
+    ``RoR.cfg`` ships empty in ``skeleton.zip``, so the new defaults do apply on
+    a fresh install - and that is the trap.  RoR writes ``RoR.cfg`` back
+    whenever the settings menu is used or the console runs ``saveconfig``
+    (``Console::saveConfig()`` archives every CVAR_ARCHIVE cvar), and the app
+    container survives a re-install.  From the second launch on, the phone's own
+    ``RoR.cfg`` - which still says ``gfx_shadow_type=1`` - silently undoes the
+    patch.
+
+    That is exactly what the device showed: the shadow default was switched to
+    NONE, a new build was sideloaded, and the on-foot character still rendered
+    as a broken mesh.  The log explained why it could not have helped yet::
+
+        material tracks/Character#0 has no supportable Techniques and will be blank
+        Pass 0: vertex program PSSM/shadow_receiver_vs cannot be used - not supported
+
+    The character material is ``tracks/character: RoR/Managed_Mats/Base``, whose
+    technique derives ``Shadows/managed/base_receiver``; with PSSM shadows that
+    abstract technique (``resources/managed_materials/shadows/pssm/on``) injects
+    the unsupported PSSM receiver program, so the clone ends up with no usable
+    technique at all.  With ``GfxShadowType::NONE``, ``ContentManager`` mounts
+    the ``pssm/off`` folder instead, whose ``base_receiver`` is an empty pass -
+    the character keeps its normal material.
+
+    The same mechanism breaks mods.  ``gfx_alt_actor_materials`` defaults to
+    ``false``, which routes every vehicle material that has a specular map
+    through the ``_nicemetal`` variants.  Those are Cg programs
+    (``nice metal_mm.program``: ``NiceMetal_VS_mm cg``, ``profiles vs_1_1
+    arbvp1``) and this port builds without the Cg plugin, so every specular
+    vehicle material is left with no supportable technique.  On the device the
+    ``XBGTfalcon`` mod's materials all logged "has no supportable Techniques and
+    will be blank / Pass 0: vertex program NiceMetal_VS_mm cannot be used - not
+    supported" and the truck crashed the app on spawn.  The ``true`` value uses
+    the ``managed/.../specular*`` materials from ``managed_mats_vehicles
+    .material``, which contain no program references at all and let the RTSS
+    generate GLSL ES for them.
+
+    Assigning the values here - after ``loadConfig()``, before OGRE and the
+    content manager read them - makes the iOS defaults authoritative again
+    without changing anything on desktop, where ``RoR.cfg`` is *supposed* to
+    win.  ``setStr()`` is the generic setter and works for the enum (int) and
+    bool cvars alike.
+    """
+    path = os.path.join(ror, "source", "main", "main.cpp")
+    text = read(path)
+    text = must_replace(
+        text,
+        "        // Load RoR.cfg - updates cvars\n"
+        "        App::GetConsole()->loadConfig();\n",
+        "        // Load RoR.cfg - updates cvars\n"
+        "        App::GetConsole()->loadConfig();\n"
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "        // Apple/iOS port: RoR.cfg (shipped empty, then rewritten by the\n"
+        "        // settings menu and 'saveconfig') overrides the compile-time\n"
+        "        // defaults set in CVar.cpp, so re-assert the three values this\n"
+        "        // GLES2 render path cannot work without.  See\n"
+        "        // patch_cvar_ios_overrides() in apply_ios_patches.py for the\n"
+        "        // device evidence behind each of them.\n"
+        "        App::gfx_sky_mode->setStr(\"0\");                // GfxSkyMode::SANDSTORM (no Caelum/SkyX on iOS)\n"
+        "        App::gfx_shadow_type->setStr(\"0\");             // GfxShadowType::NONE (PSSM programs unsupported)\n"
+        "        App::gfx_alt_actor_materials->setStr(\"true\");  // RTSS-safe vehicle materials (Cg 'nicemetal' unsupported)\n"
+        "#endif\n",
+        "main.cpp re-assert the iOS-critical cvars after RoR.cfg",
+    )
+    write(path, text)
+
+
+def patch_nicemetal_material_bug(ror):
+    """Fix a malformed ``texture_alias`` in the transparent nicemetal material.
+
+    ``resources/managed_materials/managed_mats_vehicles_transparent_nicemetal
+    .material`` line 125 reads::
+
+        texture_alias specular_tex 2d
+
+    but ``texture_alias`` takes exactly one argument (the alias name); the
+    texture *type* (``2d``) belongs on a ``texture`` line, as the non-nicemetal
+    file has it.  OGRE's script compiler rejects the line and gives up on the
+    rest of the file::
+
+        Error: ScriptCompiler - fewer parameters expected in
+        managed_mats_vehicles_transparent_nicemetal.material(125):
+        texture_alias must have at most 1 argument
+
+    Everything defined after line 125 - including
+    ``managed/mesh_transparent/specular_nicemetal`` - therefore never exists.
+
+    This is a genuine upstream bug, and on iOS it is the one hard
+    ``ScriptCompiler`` *error* in every trace.  ``patch_cvar_ios_overrides()``
+    now routes vehicles to the alternate materials, so the broken definition is
+    no longer reachable at runtime - but a parse error on every launch is how
+    you learn to skim the log, and the next real one hides behind it.  Dropping
+    the stray ``2d`` is the whole fix.
+    """
+    path = os.path.join(
+        ror, "resources", "managed_materials",
+        "managed_mats_vehicles_transparent_nicemetal.material")
+    text = read(path)
+    text = must_replace(
+        text,
+        "texture_alias specular_tex 2d",
+        "texture_alias specular_tex",
+        "transparent nicemetal material: texture_alias takes 1 argument",
+    )
+    write(path, text)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("ror_dir")
@@ -4564,6 +4684,14 @@ def main():
     patch_cvar_sky_default(args.ror_dir)
     # patch_cvar_shadow_default().
     patch_cvar_shadow_default(args.ror_dir)
+    # The CVar.cpp defaults above do not survive RoR.cfg on the second launch
+    # (or after any settings change) - main.cpp re-asserts them right after the
+    # config file is loaded.  See patch_cvar_ios_overrides().
+    patch_cvar_ios_overrides(args.ror_dir)
+    # A malformed `texture_alias` line in the transparent nicemetal material
+    # aborts the rest of that script and raises the only hard ScriptCompiler
+    # error in every trace.  See patch_nicemetal_material_bug().
+    patch_nicemetal_material_bug(args.ror_dir)
 
     print("applied Apple/iOS patches to %s" % args.ror_dir)
     if args.ois_include:
