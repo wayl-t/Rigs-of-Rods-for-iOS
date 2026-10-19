@@ -2969,7 +2969,9 @@ Warning: material X has no supportable Techniques and will be blank.
 **Разбор.** `ActorSpawner::ProcessManagedMaterial()` выбирает базовый материал
 по `App::gfx_alt_actor_materials->getBool()`
 (`source/main/physics/ActorSpawner.cpp:2570-2710`), а переменная заведена с
-дефолтом `"false"` (`source/main/system/CVar.cpp:210`). При `false` машина с
+дефолтом `"false"` (`source/main/system/CVar.cpp:210`; теперь и этот дефолт
+патчится — `patch_cvar_alt_materials_default()` — но сама по себе смена дефолта
+не решает ничего, см. §7.35 и §7.38). При `false` машина с
 картой бликов получает варианты `managed/.../specular*_nicemetal`, а они живут
 в `nicemetal_mm.program`:
 
@@ -2996,6 +2998,30 @@ vertexcolour`, `texture_unit`, `colour_op_ex`) плюс общий абстра�
 ровно то, что умеет RTSS: генерация texcoord'ов кубической карты лежит в
 `FFPLib_Texturing.glsl:88` (`FFP_GenerateTexCoord_EnvMap_Reflect`), а сама
 `EnvironmentTexture` создаётся в `main.cpp:160`.
+
+**Проверка полноты — иначе фикс был бы обменом одного падения на другое.**
+`ActorSpawner` для `MESH_STANDARD`/`MESH_TRANSPARENT` запрашивает только
+`/specular` или `/simple`, а для `FLEXMESH_*` — только `/speculardamage`,
+`/damageonly`, `/specularonly`, `/simple`. Все эти имена в
+`managed_mats_vehicles.material` и `managed_mats_vehicles_transparent.material`
+есть, `program_ref` нет ни в одном, у каждого есть `technique BaseTechnique` с
+`pass BaseRender`, а у вариантов с бликами ещё и `pass SpecularMapping1`
+(наследующий прототип `Texture/managed/SpecularMapping` объявляет
+`texture_unit SpecularMapping1_Tex` — `texture/texture_manager.material:3`).
+
+Проверять это стоит потому, что спавнер ищет технику и проход **по именам**:
+
+```cpp
+material->getTechnique("BaseTechnique")->getPass("SpecularMapping1")
+    ->getTextureUnitState("SpecularMapping1_Tex")
+```
+
+и любая из трёх ступеней может вернуть NULL. Заодно видно, что
+альтернативные mesh-материалы объявлены как `technique BaseTechnique:
+Shadows/managed/base_receiver` — то есть они **тоже** зависят от выключенных
+теней: при PSSM в них подмешивается `PSSM/shadow_receiver_vs`, и они снова
+остаются без техник. Две перестановки CVar'ов работают только вместе (§7.35,
+§7.38).
 
 **Урок.** «Unsupported shader» не бросает исключение — материал просто
 оказывается пустым, а падает потом что-то другое. Если в логе есть строка про
