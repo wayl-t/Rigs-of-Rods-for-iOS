@@ -161,6 +161,38 @@ def main(argv):
                 "the terrain renders blank.  Re-run build-ios-deps.yml and "
                 "point build-ror-ios.yml at that run (deps_run_id input).")
 
+    # The GL ES 2 render system's readData() must bind the buffer before it maps
+    # it.  glMapBufferRangeEXT() takes no buffer name - it maps whatever buffer
+    # is currently bound to the target - and OGRE's stock readData() never binds
+    # mBufferId first (lockImpl() does), so the map hit an unrelated buffer or
+    # failed and returned NULL, and memcpy() then read from address 0:
+    #
+    #   [crash] SIGSEGV - invalid memory access addr=0x0
+    #     pc = libsystem_platform memcpy      (not our image)
+    #     lr = Ogre::GLES2HardwareBuffer::readData + 0xbc
+    #
+    # FlexBody reads every soft-body mesh's vertex positions and normals through
+    # readData() while the actor is built, so this killed the app on spawn for
+    # every vehicle with a flexbody (the mod F-150 the player reported, and the
+    # DAF semi).  build-ios-deps.yml patches readData() to bind first and to
+    # throw instead of crashing when the map still fails; the exception text
+    # below is that patch's own and appears nowhere else, so its presence also
+    # proves the binary was linked against the patched OGRE rather than a stale
+    # dependency run.
+    if exe:
+        if b"glMapBufferRangeEXT returned NULL in readData" in binary:
+            print("  ok      executable: OGRE GLES2 readData() binds the buffer "
+                  "before mapping")
+        else:
+            bad.append(
+                "the executable lacks OGRE's GLES2 readData() fix "
+                "('glMapBufferRangeEXT returned NULL in readData') - it was "
+                "linked against an unpatched OGRE, whose readData() maps an "
+                "unbound buffer, gets NULL back and memcpy()s from address 0, "
+                "so the app crashes on spawn for every vehicle with a flexbody. "
+                "Re-run build-ios-deps.yml and point build-ror-ios.yml at that "
+                "run (deps_run_id input).")
+
     # The generator reads the FFP function library out of this pack when it
     # builds a shader, with ResourceGroupManager::openResource() - any group
     # will do, but the files have to exist.

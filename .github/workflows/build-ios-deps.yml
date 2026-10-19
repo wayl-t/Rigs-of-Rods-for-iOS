@@ -397,6 +397,80 @@ jobs:
           grep -n 'iosGlslPreprocError\|preprocessor produced nothing' "$f"
           sed -n '/void GLSLShaderCommon::loadFromSource/,/^        compile(true);/p' "$f" | head -75
 
+      - name: "Patch OGRE: GLES2HardwareBuffer::readData must bind the buffer"
+        run: |
+          # glMapBufferRangeEXT() takes no buffer name: it maps whatever buffer
+          # is *currently bound* to the target.  lockImpl() binds mBufferId
+          # before it maps; readData() did not, so it mapped an unrelated
+          # buffer - or, when the requested range did not fit that buffer,
+          # nothing at all - and the call returned NULL:
+          #
+          #   RenderSystems/GLES2/src/OgreGLES2HardwareBuffer.cpp (v1.11.6)
+          #     void GLES2HardwareBuffer::readData(size_t offset, size_t length, void* pDest)
+          #     {
+          #         if(!OGRE_NO_GLES3_SUPPORT || ...checkExtension("GL_EXT_map_buffer_range"))
+          #         {
+          #             void* srcData;
+          #             OGRE_CHECK_GL_ERROR(srcData = glMapBufferRangeEXT(mTarget, offset, length, GL_MAP_READ_BIT_EXT));
+          #             memcpy(pDest, srcData, length);          // srcData == NULL
+          #
+          # This is a GL ES 2 build (OGRE_NO_GLES3_SUPPORT == 1), and RoR
+          # reaches this path on every vehicle that has a soft body: FlexBody
+          # reads the vertex positions and normals of every flexbody mesh
+          # through readData() while the actor is being built
+          # (FlexBody.cpp:321/326 shared vertices, 350/355 per submesh).  Device
+          # evidence, the rtss22 trace, spawning a mod F-150:
+          #
+          #   [crash] SIGSEGV - invalid memory access addr=0x0
+          #     pc = libsystem_platform memcpy     (+0xa6e9ffd4, not our image)
+          #     lr = Ogre::GLES2HardwareBuffer::readData + 0xbc
+          #   ... right after 'Mesh: Loading explorer_81_cab.mesh.'
+          #
+          # so the app died on spawn for every flexbody vehicle.  Bind the
+          # buffer first (exactly as lockImpl() does) and turn a failed map into
+          # a catchable exception instead of a memcpy() from address 0.
+          f=ogre/RenderSystems/GLES2/src/OgreGLES2HardwareBuffer.cpp
+          python3 - "$f" <<'PY'
+          import sys
+          p = sys.argv[1]
+          d = open(p, "r", encoding="utf-8", errors="replace").read()
+
+          old = ('        if(!OGRE_NO_GLES3_SUPPORT || mRenderSystem->checkExtension("GL_EXT_map_buffer_range"))\n'
+                 '        {\n'
+                 '            // Map the buffer range then copy out of it into our destination buffer\n'
+                 '            void* srcData;\n'
+                 '            OGRE_CHECK_GL_ERROR(srcData = glMapBufferRangeEXT(mTarget, offset, length, GL_MAP_READ_BIT_EXT));\n'
+                 '            memcpy(pDest, srcData, length);\n')
+
+          new = ('        if(!OGRE_NO_GLES3_SUPPORT || mRenderSystem->checkExtension("GL_EXT_map_buffer_range"))\n'
+                 '        {\n'
+                 '            // Apple/iOS port: glMapBufferRangeEXT() maps whatever buffer is\n'
+                 '            // bound to mTarget at the moment of the call - it takes no\n'
+                 '            // buffer name.  lockImpl() binds mBufferId first; this method\n'
+                 '            // did not, so the map hit an unrelated buffer or failed\n'
+                 '            // outright and returned NULL, and memcpy() then read from\n'
+                 '            // address 0 whenever FlexBody loaded a soft-body mesh.\n'
+                 '            mRenderSystem->_getStateCacheManager()->bindGLBuffer(mTarget, mBufferId);\n'
+                 '\n'
+                 '            // Map the buffer range then copy out of it into our destination buffer\n'
+                 '            void* srcData = NULL;\n'
+                 '            OGRE_CHECK_GL_ERROR(srcData = glMapBufferRangeEXT(mTarget, offset, length, GL_MAP_READ_BIT_EXT));\n'
+                 '            if (!srcData)\n'
+                 '            {\n'
+                 '                OGRE_EXCEPT(Exception::ERR_INTERNAL_ERROR,\n'
+                 '                            "glMapBufferRangeEXT returned NULL in readData",\n'
+                 '                            "GLES2HardwareBuffer::readData");\n'
+                 '            }\n'
+                 '            memcpy(pDest, srcData, length);\n')
+
+          assert old in d, "GLES2HardwareBuffer::readData anchor missing"
+          d = d.replace(old, new, 1)
+          open(p, "w", encoding="utf-8").write(d)
+          print("patched")
+          PY
+          grep -n 'glMapBufferRangeEXT returned NULL in readData' "$f"
+          sed -n '/void GLES2HardwareBuffer::readData/,/^    }/p' "$f"
+
       - name: Pin FindZZip to the zziplib in the SDK prefix
         run: |
           # OGRE's stock CMake/Packages/FindZZip.cmake cannot see our zziplib.
