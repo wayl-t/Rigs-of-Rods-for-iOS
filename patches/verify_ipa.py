@@ -606,17 +606,26 @@ def main(argv):
     #   gfx_alt_actor_materials=true vehicles must use the RTSS-generated
     #                                managed/*/specular* materials, not the
     #                                Cg "_nicemetal" ones (PORT_FINDINGS 7.36)
-    # and logs them.  The marker below is that log line's literal.
+    # and logs them.  The marker below is that log line's literal up to its
+    # first value - it bakes in the *value* placeholders (%d, not %s), which is
+    # what tells this block apart from the first version of it: that one used
+    # CVar::setStr(), which zeroes m_value_num, so setStr("true") left
+    # alt_actor_materials reading false and the mod fix did nothing while the
+    # build stayed green.  Pinning the format is the only thing a static check
+    # on the IPA can do about that class of bug; the trace line itself reports
+    # the values read back out of the cvars, so a device trace settles it.
     if exe:
-        marker = b"[RoR|iOS] cvars after RoR.cfg"
+        marker = b"[RoR|iOS] cvars after RoR.cfg: sky %d->%d"
         if marker not in binary:
             bad.append(
                 "the executable carries no %r - the iOS cvar override after "
-                "RoR.cfg (patch_cvar_ios_overrides) is not in this build, so "
-                "whatever the phone's RoR.cfg says wins: PSSM shadows come "
-                "back (the on-foot character renders as a broken mesh) and "
-                "vehicle materials go through the Cg '_nicemetal' variants "
-                "again, which crash on spawn" % marker.decode())
+                "RoR.cfg (patch_cvar_ios_overrides) is either missing from "
+                "this build or predates the setVal() fix, so whatever the "
+                "phone's RoR.cfg says wins: PSSM shadows come back (the "
+                "on-foot character renders as a broken mesh), and "
+                "alt_actor_materials may read false, which routes vehicle "
+                "materials through the Cg '_nicemetal' variants that crash "
+                "on spawn" % marker.decode())
         else:
             print("  ok      executable: iOS cvar override after RoR.cfg present")
 

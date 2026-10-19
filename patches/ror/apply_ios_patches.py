@@ -4458,6 +4458,47 @@ def patch_cvar_shadow_default(ror):
     write(path, text)
 
 
+def patch_cvar_alt_materials_default(ror):
+    """CVar.cpp: default the vehicle material set to the RTSS-safe one on iOS.
+
+    Why this exists (device evidence, rtss19)
+    -----------------------------------------
+    ``gfx_alt_actor_materials`` defaults to ``false``, which routes every
+    vehicle material that has a specular map through the ``_nicemetal``
+    variants.  Those are Cg programs (``nicemetal_mm.program``:
+    ``NiceMetal_VS_mm cg``, ``profiles vs_1_1 arbvp1``) and this port builds
+    without the Cg plugin, so on the device every material of the
+    ``XBGTfalcon`` mod logged::
+
+        material XBGTbody (XBcoupe.truck [Instance ID 1]) has no supportable
+        Techniques and will be blank
+        Pass 0: vertex program NiceMetal_VS_mm cannot be used - not supported
+
+    and the truck crashed the app on spawn - a material with no technique at
+    all is what the first ``getTechnique(0)->getPass(0)`` on it dereferences.
+    With ``true`` the materials come from ``managed_mats_vehicles.material``
+    (``managed/.../specular*``), which carry no program references at all, so
+    the RTSS generates GLSL ES for them.
+
+    Like the sky and shadow defaults this is only half the fix: the phone
+    keeps its own ``RoR.cfg`` across re-installs, so one run of an older build
+    writes ``No`` into it and the default never gets a chance.  See
+    patch_cvar_ios_overrides(), which re-asserts the value after
+    ``loadConfig()``.
+    """
+    path = os.path.join(ror, "source", "main", "system", "CVar.cpp")
+    text = read(path)
+
+    text = must_replace(
+        text,
+        '"Use alternate vehicle materials", CVAR_ARCHIVE | CVAR_TYPE_BOOL, "false");',
+        '"Use alternate vehicle materials", CVAR_ARCHIVE | CVAR_TYPE_BOOL, "true");',
+        "CVar.cpp: default to the alternate (RTSS-safe) vehicle materials",
+    )
+
+    write(path, text)
+
+
 def patch_cvar_ios_overrides(ror):
     """main.cpp: re-assert the iOS-critical cvars *after* RoR.cfg is loaded.
 
@@ -4511,11 +4552,20 @@ def patch_cvar_ios_overrides(ror):
     Assigning the values here - after ``loadConfig()``, before OGRE and the
     content manager read them - makes the iOS defaults authoritative again
     without changing anything on desktop, where ``RoR.cfg`` is *supposed* to
-    win.  ``setStr()`` is the generic setter and works for the enum (int) and
-    bool cvars alike.
+    win.
+
+    ``setVal()``, not ``setStr()``: ``CVar::setStr()`` saves the string and
+    sets ``m_value_num = 0``, and every reader of these cvars goes through
+    ``m_value_num`` (``getEnum<>()`` / ``getBool()``), so ``setStr("true")``
+    leaves ``alt_actor_materials`` reading *false* - the mod fix silently
+    staying off is exactly the class of bug this patch exists to remove.
+    ``Console::loadConfig()`` does it correctly because it routes through
+    ``cVarAssign()``/``ParseHelper()``, which parse the text first.
 
     The block also writes the before -> after values into ror-trace.log
-    (``[RoR|iOS] cvars after RoR.cfg``).  That line is the fastest way to tell
+    (``[RoR|iOS] cvars after RoR.cfg``), reading the "after" values back out of
+    the cvars rather than printing the intended constants, so the trace shows
+    what the engine will actually use.  That line is the fastest way to tell
     from a device trace whether RoR.cfg had overridden anything, and it is the
     marker ``verify_ipa.py`` requires in the shipped binary, so this patch
     cannot fall out of a build unnoticed.
@@ -4537,15 +4587,24 @@ def patch_cvar_ios_overrides(ror):
         "        // patch_cvar_ios_overrides() in apply_ios_patches.py for the\n"
         "        // device evidence behind each of them; verify_ipa.py requires the\n"
         "        // marker line below to be present in the shipped binary.\n"
+        "        //\n"
+        "        // setVal(), never setStr(): setStr() stores the string and zeroes\n"
+        "        // m_value_num, and these cvars are read as getEnum<>() / getBool()\n"
+        "        // - i.e. from m_value_num - so setStr(\"true\") would leave\n"
+        "        // alt_actor_materials reading false.  The trace line prints the\n"
+        "        // values as the engine will read them, so a device trace shows\n"
+        "        // what actually took effect rather than what was intended.\n"
         "        {\n"
-        "            const std::string ios_cfg_sky    = App::gfx_sky_mode->getStr();\n"
-        "            const std::string ios_cfg_shadow = App::gfx_shadow_type->getStr();\n"
-        "            const std::string ios_cfg_alt    = App::gfx_alt_actor_materials->getStr();\n"
-        "            App::gfx_sky_mode->setStr(\"0\");                // GfxSkyMode::SANDSTORM (no Caelum/SkyX on iOS)\n"
-        "            App::gfx_shadow_type->setStr(\"0\");             // GfxShadowType::NONE (PSSM programs unsupported)\n"
-        "            App::gfx_alt_actor_materials->setStr(\"true\");  // RTSS-safe vehicle materials (Cg 'nicemetal' unsupported)\n"
-        "            RoR_IosStartupTick(\"[RoR|iOS] cvars after RoR.cfg: sky %s->0, shadow %s->0, alt_actor_materials %s->true\",\n"
-        "                ios_cfg_sky.c_str(), ios_cfg_shadow.c_str(), ios_cfg_alt.c_str());\n"
+        "            const int  ios_cfg_sky    = App::gfx_sky_mode->getInt();\n"
+        "            const int  ios_cfg_shadow = App::gfx_shadow_type->getInt();\n"
+        "            const bool ios_cfg_alt    = App::gfx_alt_actor_materials->getBool();\n"
+        "            App::gfx_sky_mode->setVal((int)0);           // GfxSkyMode::SANDSTORM (no Caelum/SkyX on iOS)\n"
+        "            App::gfx_shadow_type->setVal((int)0);        // GfxShadowType::NONE (PSSM programs unsupported)\n"
+        "            App::gfx_alt_actor_materials->setVal(true);  // RTSS-safe vehicle materials (Cg 'nicemetal' unsupported)\n"
+        "            RoR_IosStartupTick(\"[RoR|iOS] cvars after RoR.cfg: sky %d->%d, shadow %d->%d, alt_actor_materials %d->%d\",\n"
+        "                ios_cfg_sky, App::gfx_sky_mode->getInt(),\n"
+        "                ios_cfg_shadow, App::gfx_shadow_type->getInt(),\n"
+        "                (int)ios_cfg_alt, (int)App::gfx_alt_actor_materials->getBool());\n"
         "        }\n"
         "#endif\n",
         "main.cpp re-assert the iOS-critical cvars after RoR.cfg",
@@ -4698,6 +4757,11 @@ def main():
     patch_cvar_sky_default(args.ror_dir)
     # patch_cvar_shadow_default().
     patch_cvar_shadow_default(args.ror_dir)
+    # Vehicles must not take the Cg 'nicemetal' materials: they carry no
+    # technique at all on this GLES2 path, and the spawner's first
+    # getTechnique(0)->getPass(0) on one is a null dereference (the device's
+    # mod-spawn crash).  See patch_cvar_alt_materials_default().
+    patch_cvar_alt_materials_default(args.ror_dir)
     # The CVar.cpp defaults above do not survive RoR.cfg on the second launch
     # (or after any settings change) - main.cpp re-asserts them right after the
     # config file is loaded.  See patch_cvar_ios_overrides().
