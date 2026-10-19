@@ -4498,7 +4498,7 @@ def patch_cvar_ios_overrides(ror):
     The same mechanism breaks mods.  ``gfx_alt_actor_materials`` defaults to
     ``false``, which routes every vehicle material that has a specular map
     through the ``_nicemetal`` variants.  Those are Cg programs
-    (``nice metal_mm.program``: ``NiceMetal_VS_mm cg``, ``profiles vs_1_1
+    (``nicemetal_mm.program``: ``NiceMetal_VS_mm cg``, ``profiles vs_1_1
     arbvp1``) and this port builds without the Cg plugin, so every specular
     vehicle material is left with no supportable technique.  On the device the
     ``XBGTfalcon`` mod's materials all logged "has no supportable Techniques and

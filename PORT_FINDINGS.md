@@ -2917,6 +2917,122 @@ OGRE не нужны, достаточно файла самого RoR. К мо�
 
 ---
 
+### 7.35. Дефолт CVar — ещё не значение: `main()` читает `RoR.cfg` сразу после создания CVar'ов
+
+**Симптом.** Персонаж так и остался «сломанным мешем», хотя предыдущая сборка
+меняла дефолт `gfx_shadow_type` на `NONE`, и это правильное лечение: материал
+персонажа — `tracks/character: RoR/Managed_Mats/Base`
+(`resources/materials/character.material:3`), он наследует
+`Shadows/managed/base_receiver`, а при PSSM эта абстрактная техника
+(`resources/managed_materials/shadows/pssm/on/shadows.material:8-9`)
+подставляет программы `PSSM/shadow_receiver_vs/_ps`, которые на этом GLES2-пути
+не собираются. `ContentManager.cpp:401` выбирает каталог `shadows/pssm/on` или
+`shadows/pssm/off` именно по `App::gfx_shadow_type`, а в `off`
+(`shadows/pssm/off/shadows.material`) `base_receiver` — пустой проход.
+
+**Почему дефолт не помог.** В `main.cpp` порядок такой:
+
+```
+App::GetConsole()->cVarSetupBuiltins();   // здесь рождаются дефолты
+...
+App::GetConsole()->loadConfig();          // main.cpp:113-114 — это RoR.cfg
+```
+
+`RoR.cfg` перекрывает всё, что в нём упомянуто. В `skeleton.zip` файл пустой
+(0 байт), то есть **на самом первом запуске** дефолт действует — отсюда и
+ощущение, что лечение верное. Но RoR перезаписывает `RoR.cfg` при сохранении
+настроек и по команде `saveconfig` (архивируются все переменные с флагом
+`CVAR_ARCHIVE`), а контейнер приложения переживает переустановку из новой
+сборки. Со второго запуска на телефоне побеждал старый `gfx_shadow_type=1`.
+
+**Решение.** `patch_cvar_ios_overrides()` вставляет в `main.cpp` сразу после
+`loadConfig()` блок под `#ifdef ROR_PLATFORM_IOS`, который переставляет три
+значения (`gfx_sky_mode=0`, `gfx_shadow_type=0`,
+`gfx_alt_actor_materials=true`) — раньше, чем их прочитают OGRE и
+`ContentManager`.
+
+**Урок.** «Дефолт» действует ровно до того момента, как кто-то прочитает
+конфиг. Проверять надо не только место, где значение *задаётся*, но и всё, что
+после этого значение *читает*: если между ними есть загрузка сохранённого
+состояния, дефолт — это только значение «для пустого профиля».
+
+### 7.36. Краш мода при спавне: «nicemetal» — это Cg, которого в сборке нет
+
+**Симптом.** Машина из мода роняет приложение сразу при спавне. В логе — по
+одной такой строке на каждый материал машины:
+
+```
+Warning: material X has no supportable Techniques and will be blank.
+  Pass 0: vertex program NiceMetal_VS_mm cannot be used - not supported.
+```
+
+**Разбор.** `ActorSpawner::ProcessManagedMaterial()` выбирает базовый материал
+по `App::gfx_alt_actor_materials->getBool()`
+(`source/main/physics/ActorSpawner.cpp:2570-2710`), а переменная заведена с
+дефолтом `"false"` (`source/main/system/CVar.cpp:210`). При `false` машина с
+картой бликов получает варианты `managed/.../specular*_nicemetal`, а они живут
+в `nicemetal_mm.program`:
+
+```
+vertex_program NiceMetal_VS_mm cg
+{
+    source nicemetal_mm.cg
+    entry_point main_nicemetal_vp
+    profiles vs_1_1 arbvp1
+}
+```
+
+Cg — язык NVIDIA, а плагин `PlugIns/CgProgramManager` из сборки выключен
+(`patches/ogre/disable-cg.cmake`), поэтому ни один из этих материалов собрать
+нельзя, и все они остаются «без поддерживаемых техник». Само по себе это не
+фатально (материал просто пустой) — но падало-то на спавне, так что строка про
+неподдерживаемую программу и была единственной уликой.
+
+**Решение.** `gfx_alt_actor_materials=true`: машины берут обычные
+`managed/.../specular*` из `managed_mats_vehicles.material`, где **нет ни
+одного `program_ref`** — только фиксированный конвейер (`diffuse
+vertexcolour`, `texture_unit`, `colour_op_ex`) плюс общий абстрактный проход
+`Texture/managed/SpecularMapping` (`texture/texture_manager.material:3`), а это
+ровно то, что умеет RTSS: генерация texcoord'ов кубической карты лежит в
+`FFPLib_Texturing.glsl:88` (`FFP_GenerateTexCoord_EnvMap_Reflect`), а сама
+`EnvironmentTexture` создаётся в `main.cpp:160`.
+
+**Урок.** «Unsupported shader» не бросает исключение — материал просто
+оказывается пустым, а падает потом что-то другое. Если в логе есть строка про
+неподдерживаемую программу, искать причину дальше по стеку бессмысленно: это и
+есть причина.
+
+### 7.37. Одна кривая строка бросала разбор всего скрипта материалов
+
+Файл
+`resources/managed_materials/managed_mats_vehicles_transparent_nicemetal.material`
+(строка 125) содержал
+
+```
+texture_alias specular_tex 2d
+```
+
+`texture_alias` принимает ровно один аргумент (имя), а тип `2d` бывает только у
+`texture`. Компилятор скриптов OGRE ругался
+
+```
+Error: ScriptCompiler - fewer parameters expected in
+managed_mats_vehicles_transparent_nicemetal.material(125):
+texture_alias must have at most 1 argument
+```
+
+и **прекращал разбор файла**, поэтому всё, что объявлено ниже — включая
+`managed/mesh_transparent/specular_nicemetal` — не существовало вовсе. Это
+настоящий баг upstream (в не-«nicemetal» файле та же строка написана как
+`texture unknown.dds 2d`). Исправлено в
+`patch_nicemetal_material_bug()`.
+
+**Урок.** Одна ошибка в чужом контенте может стоить всего файла: парсер скриптов
+не восстанавливается после ошибки. Пока такая строка есть, любой вопрос «а этот
+материал вообще определён?» получает ложное «нет».
+
+---
+
 ## Уточнённая карта порта
 
 | Компонент | Судьба | Состояние |
