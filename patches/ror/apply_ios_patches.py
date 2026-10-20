@@ -2092,6 +2092,9 @@ void IosPanelRect(float& x0, float& y0, float& x1, float& y1)
 int IosFindTouch(float W, float H, float px, float py, int id)
 {
     // Exact finger identity first - if OIS carries the UITouch id, use it.
+    // This is the authoritative answer when two fingers are down: the camera
+    // finger must never be handed to a control just because it is the only
+    // finger that control knows about.
     if (id != 0)
     {
         for (size_t i = 0; i < s_iosCtlTouches.size(); ++i)
@@ -2099,6 +2102,11 @@ int IosFindTouch(float W, float H, float px, float py, int id)
             if (s_iosCtlTouches[i].id == id)
                 return (int)i;
         }
+        // Known id, and it is not one of ours: a camera/ImGui finger.  Do not
+        // fall back to geometry here - the fallback used to steal this finger
+        // from the camera while the joystick (or a pedal) was still held, which
+        // is what made the camera drag dead on a two-thumb hold.
+        return -1;
     }
     const float rad  = 0.08f * ((W < H) ? W : H);
     const float rad2 = rad * rad;
@@ -2112,8 +2120,10 @@ int IosFindTouch(float W, float H, float px, float py, int id)
         if (d2 <= best_d) { best_d = d2; best = (int)i; }
     }
     // If no match within the radius but there's exactly one tracked control
-    // touch, claim it - this prevents sticking after fast drags.
-    if (best < 0 && s_iosCtlTouches.size() == 1)
+    // touch, claim it - this prevents sticking after fast drags.  Only used
+    // when ids are unavailable: with real ids a second finger must not be
+    // allowed to join a control that is already driven by another finger.
+    if (best < 0 && s_iosCtlTouches.size() == 1 && s_iosCtlTouches[0].id == 0)
         return 0;
     return best;
 }
@@ -2200,10 +2210,15 @@ bool IosControlsHandleTouch(int action, float x, float y, int id)
     // Release or cancel.
     if (idx < 0)
     {
-        // If the finger id is known but we failed to match by id/position, it
+        // If the finger id is unknown but we failed to match by id/position, it
         // still likely belongs to a control finger (stuck tracking). Release the
         // only tracked touch when there's ambiguity to avoid permanent sticking.
-        if (s_iosCtlTouches.size() == 1)
+        //
+        // Only when ids are unavailable: with a real UITouch id a released
+        // camera finger must not be allowed to tear down a control that a
+        // *different* finger is still holding - that used to kill the joystick
+        // (or the pedal) mid-press.
+        if (id == 0 && s_iosCtlTouches.size() == 1 && s_iosCtlTouches[0].id == 0)
         {
             s_iosCtlTouches.clear();
             return true;
@@ -3542,70 +3557,82 @@ def patch_gui_manager(ror):
 
 
 def patch_character_material(ror):
-    """resources/materials/character.material: drop ColorChange pass on iOS."""
-    path = os.path.join(ror, "resources", "materials", "character.material")
-    try:
-        text = read(path)
-    except FileNotFoundError:
-        # Try meshes version? probably not needed
-        path = os.path.join(ror, "resources", "meshes", "character.material")
-        try:
-            text = read(path)
-        except FileNotFoundError:
-            return
-    # Replace with single-pass version (keep BaseRender, drop ColorChange)
-    new_text = """import * from "managed_mats.material"
+    """resources/materials/character.material: drop the ColorChange pass on iOS.
 
-material tracks/character: RoR/Managed_Mats/Base
-{
-\ttechnique BaseTechnique
-\t{
-\t\tpass BaseRender
-\t\t{
-\t\t\tdepth_bias -20
-\t\t\ttexture_unit Diffuse_Map
-\t\t\t{
-\t\t\t\ttexture character.dds
-\t\t\t}
-\t\t}
-\t}
-}
-"""
-    # Only replace if it contains the ColorChange pass
-    if "ColorChange" in text:
-        write(path, new_text)
-        return
-    # If it's already simplified, do nothing
-    if "tracks/character" in text:
-        write(path, new_text)
-        return
+    ``tracks/character`` derives from ``RoR/Managed_Mats/Base``, and that
+    inheritance is what supplies the technique (``Shadows/managed/base_receiver``)
+    and therefore the RTSS shader generation every other material in the scene
+    uses.  So the file is edited surgically - only the offending pass is
+    removed - instead of being rewritten, which would silently change the
+    shading path along with the fix.
+
+    The pass that has to go is ``ColorChange``:
+
+        pass ColorChange
+        {
+            scene_blend alpha_blend
+            texture_unit { texture character-alpha.png }
+            texture_unit { colour_op_ex blend_current_alpha src_manual src_current 0 0 0 }
+        }
+
+    Its job is to tint the body with the player's chosen colour, and it does it
+    with fixed-function texture blending.  GLES2 has no fixed function at all -
+    the RTSS translation of ``colour_op_ex ... src_manual 0 0 0`` multiplies the
+    whole mesh by (0,0,0), which is exactly the solid black character seen on
+    the device (the nearest black object always wins the depth test, so the
+    body reads as a black silhouette).  The tint is cosmetic; losing it is the
+    fix.
+    """
+    path = os.path.join(ror, "resources", "materials", "character.material")
+    text = read(path)
+
+    color_pass = (
+        "\t\tpass ColorChange\n"
+        "\t\t{\n"
+        "\t\t\tscene_blend alpha_blend\n"
+        "\t\t\ttexture_unit\n"
+        "\t\t\t{\n"
+        "\t\t\t\ttexture character-alpha.png\n"
+        "\t\t\t}\n"
+        "\t\t\ttexture_unit\n"
+        "\t\t\t{\n"
+        "\t\t\t\tcolour_op_ex blend_current_alpha src_manual src_current 0 0 0\n"
+        "\t\t\t}\n"
+        "\t\t}\n"
+    )
+    text = must_replace(text, color_pass, "", "character.material: ColorChange pass")
+    write(path, text)
 
 
 def patch_gamechatbox(ror):
-    """source/main/gui/panels/GUI_GameChatBox.cpp: iOS-friendly hint."""
+    """source/main/gui/panels/GUI_GameChatBox.cpp: iOS-friendly spawn hint.
+
+    On the desktop the hint reads "Press Ctrl+G to spawn a vehicle".  There is
+    no keyboard on the device, so that line is both useless and misleading -
+    the phone spawns from the on-screen buttons.
+
+    Note the anchor is the *whole* fmt::format call including its line break:
+    the upstream source wraps `App::GetInputEngine()...` onto the next line with
+    19 spaces of indentation, and matching only the first line would leave a
+    half-replaced statement behind.
+    """
     path = os.path.join(ror, "source", "main", "gui", "panels", "GUI_GameChatBox.cpp")
-    try:
-        text = read(path)
-    except FileNotFoundError:
-        return
-    # Replace the spawn hint
-    old = 'fmt::format(_LC("ChatBox", "Press {} to spawn a vehicle"),\n                   App::GetInputEngine()->getEventCommandTrimmed(EV_COMMON_GET_NEW_VEHICLE))'
-    new = '''#ifdef ROR_PLATFORM_IOS
-                                      std::string("Use the on-screen buttons")
-#else
-                                      fmt::format(_LC("ChatBox", "Press {} to spawn a vehicle"),
-                   App::GetInputEngine()->getEventCommandTrimmed(EV_COMMON_GET_NEW_VEHICLE))
-#endif'''
-    if old in text:
-        text = text.replace(old, new)
-        write(path, text)
-        return
-    # Alternative spacing
-    old2 = 'fmt::format(_LC("ChatBox", "Press {} to spawn a vehicle"),\n                                      App::GetInputEngine()->getEventCommandTrimmed(EV_COMMON_GET_NEW_VEHICLE))'
-    if old2 in text:
-        text = text.replace(old2, new)
-        write(path, text)
-        return
+    text = read(path)
+
+    old = (
+        'fmt::format(_LC("ChatBox", "Press {} to spawn a vehicle"),\n'
+        '                   App::GetInputEngine()->getEventCommandTrimmed(EV_COMMON_GET_NEW_VEHICLE))'
+    )
+    new = (
+        '#ifdef ROR_PLATFORM_IOS\n'
+        '                                      std::string("Use the on-screen buttons")\n'
+        '#else\n'
+        '                                      fmt::format(_LC("ChatBox", "Press {} to spawn a vehicle"),\n'
+        '                   App::GetInputEngine()->getEventCommandTrimmed(EV_COMMON_GET_NEW_VEHICLE))\n'
+        '#endif'
+    )
+    text = must_replace(text, old, new, "GUI_GameChatBox.cpp: spawn hint")
+    write(path, text)
 
 
 def patch_ogreimgui(ror):
@@ -4789,6 +4816,13 @@ def main():
     # directly - the one such caller, and the first thing to dereference the
     # null keyboard after the main menu comes up.
     patch_gui_manager(args.ror_dir)
+    # The character mesh and the spawn hint live outside source/, so they are
+    # their own patches rather than part of patch_gui_manager().  Both are
+    # resource/GUI fixes the device asks for directly: the "tint" pass that
+    # paints the body black on GLES2, and the desktop-only spawn hint.
+    # See patch_character_material() / patch_gamechatbox() for the reasoning.
+    patch_character_material(args.ror_dir)
+    patch_gamechatbox(args.ror_dir)
     # The menu is drawn by ImGui, but it is *queued* for drawing by
     # OgreImGui::renderQueueStarted(), which silently skips the overlay when the
     # active viewport is not the app viewport.  That is the difference between
