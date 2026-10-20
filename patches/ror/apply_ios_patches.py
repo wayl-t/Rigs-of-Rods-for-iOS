@@ -3529,7 +3529,9 @@ def patch_gui_manager(ror):
         "    // addFont) so panels keep the proportions the upstream design used.\n"
         "    style.ScaleAllSizes(1.0f);\n"
         "    // No system cursor on a touchscreen - hide ImGui's software cursor.\n"
-        "    io.MouseDrawCursor = false;\n"
+        "    // NOTE: SetupImGui() has no local `io` (that lives in NewImGuiFrame),\n"
+        "    // so the IO block has to be fetched here explicitly.\n"
+        "    ImGui::GetIO().MouseDrawCursor = false;\n"
         "#endif\n"
         "\n"
         "    App::GetGfxScene()->GetSceneManager()->addRenderQueueListener(&m_imgui);\n",
