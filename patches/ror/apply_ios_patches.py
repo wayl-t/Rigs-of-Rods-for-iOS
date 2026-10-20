@@ -35,6 +35,35 @@ def write(path, text):
         f.write(text)
 
 
+def _guard_depth(text):
+    """Net #if/#endif nesting of a piece of C++ (may be negative if unbalanced)."""
+    depth = 0
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("#if"):
+            depth += 1
+        elif s.startswith("#endif"):
+            depth -= 1
+    return depth
+
+
+def _guard_depths(root):
+    """{relative path: #if/#endif nesting} for every C++ file under root."""
+    out = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d != "build"]
+        for fn in filenames:
+            if not fn.endswith((".cpp", ".h", ".mm", ".inl")):
+                continue
+            path = os.path.join(dirpath, fn)
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    out[os.path.relpath(path, root)] = _guard_depth(f.read())
+            except OSError:
+                pass
+    return out
+
+
 def must_replace(text, old, new, what):
     if old not in text:
         sys.exit("ERROR: expected source text not found: %s" % what)
@@ -1048,7 +1077,11 @@ def patch_repository_http(ror):
         "        {\n"
         "            Ogre::LogManager::getSingleton().stream()\n"
         "                << \"[RoR|Repository] Failed to download resource;\"\n"
-        "                << \" Error: '\" << curl_easy_strerror(curl_result) << \"'; HTTP status code: \" << response_code;\n",
+        "                << \" Error: '\" << curl_easy_strerror(curl_result) << \"'; HTTP status code: \" << response_code;\n"
+        "\n"
+        "            App::GetGameContext()->PushMessage(Message(MSG_NET_DOWNLOAD_REPOFILE_FAILURE, new RepoFileInstallRequest(request)));\n"
+        "        }\n"
+        "    }\n",
         "    try // We write using Ogre::DataStream which throws exceptions\n"
         "    {\n"
         "        // smart pointer - closes stream automatically\n"
@@ -1094,7 +1127,12 @@ def patch_repository_http(ror):
         "        {\n"
         "            Ogre::LogManager::getSingleton().stream()\n"
         "                << \"[RoR|Repository] Failed to download resource;\"\n"
-        "                << \" Error: '\" << curl_easy_strerror(curl_result) << \"'; HTTP status code: \" << response_code;\n",
+        "                << \" Error: '\" << curl_easy_strerror(curl_result) << \"'; HTTP status code: \" << response_code;\n"
+        "\n"
+        "            App::GetGameContext()->PushMessage(Message(MSG_NET_DOWNLOAD_REPOFILE_FAILURE, new RepoFileInstallRequest(request)));\n"
+        "        }\n"
+        "#endif\n"
+        "    }\n",
         "GUI_RepositorySelector.cpp: mod file download",
     )
 
@@ -1135,7 +1173,6 @@ def patch_repository_http(ror):
         "\n"
         "    App::GetGameContext()->PushMessage(Message(MSG_NET_DOWNLOAD_REPOFILE_SUCCESS, new RepoFileInstallRequest(request)));\n"
         "}\n"
-        "#endif // ROR_PLATFORM_IOS\n"
         "#endif // defined(USE_CURL) || defined(ROR_PLATFORM_IOS)\n",
         "GUI_RepositorySelector.cpp: download cleanup",
     )
@@ -5617,6 +5654,13 @@ def main():
     if not os.path.isdir(args.ror_dir):
         sys.exit("ERROR: not a directory: %s" % args.ror_dir)
 
+    # The preprocessor nesting of every C++ file, before the patches.  An
+    # unbalanced #if silently swallows the rest of the file, and the symptom
+    # is a wall of unrelated compile errors half a file away - which is how
+    # two builds were lost to a single missing #endif.  The check at the end
+    # of main() compares the two.
+    guards_before = _guard_depths(args.ror_dir)
+
     patch_conanfile(args.ror_dir, minimal_deps=args.minimal_deps)
     patch_dependencies(args.ror_dir)
     patch_root_cmake(args.ror_dir)
@@ -5750,6 +5794,19 @@ def main():
     # aborts the rest of that script and raises the only hard ScriptCompiler
     # error in every trace.  See patch_nicemetal_material_bug().
     patch_nicemetal_material_bug(args.ror_dir)
+
+    # Every patched file has to keep the preprocessor nesting it had: a
+    # replacement that opens an #if has to close it again, and the pair may
+    # even live in two different edits of the same file.
+    guards_after = _guard_depths(args.ror_dir)
+    unbalanced = []
+    for rel, depth in guards_before.items():
+        if rel in guards_after and guards_after[rel] != depth:
+            unbalanced.append("%s: #if/#endif nesting %d -> %d"
+                              % (rel, depth, guards_after[rel]))
+    if unbalanced:
+        for line in unbalanced:
+            sys.exit("ERROR: the patches unbalance the preprocessor: " + line)
 
     print("applied Apple/iOS patches to %s" % args.ror_dir)
     if args.ois_include:
