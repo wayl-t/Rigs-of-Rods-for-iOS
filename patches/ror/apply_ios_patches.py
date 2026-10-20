@@ -1508,8 +1508,7 @@ void RoR_IosShowFatal(const char* format, ...);
 // failure the reason is in out_error.
 bool RoR_IosHttpGet(const std::string& url, std::string& out_body, long& out_code, std::string& out_error);
 
-extern "C" {
-#endif
+#endif   // __cplusplus
 
 #endif // ROR_IOS_PLATFORM_H
 '''
@@ -3821,13 +3820,9 @@ def patch_rtshader(ror):
     text = read(path)
     text = must_replace(
         text,
-        "extern \"C\" {\n"
-        "#endif\n"
+        "#endif   // __cplusplus\n"
         "\n"
         "#endif // ROR_IOS_PLATFORM_H\n",
-        "extern \"C\" {\n"
-        "#endif\n"
-        "\n"
         "namespace Ogre { class SceneManager; }\n"
         "\n"
         "namespace RoR\n"
@@ -3840,6 +3835,7 @@ def patch_rtshader(ror):
         "    void RtssRegisterSceneManager(Ogre::SceneManager* scene_manager);\n"
         "}\n"
         "}\n"
+        "#endif   // __cplusplus\n"
         "\n"
         "#endif // ROR_IOS_PLATFORM_H\n",
         "ios_platform.h: declare RoR::Ios::RtssRegisterSceneManager",
