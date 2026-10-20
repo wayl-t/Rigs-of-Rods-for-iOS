@@ -327,6 +327,7 @@ jobs:
           BUNDLE_ID=org.rigsofrods.ror-ios
           if [ ! -f "$APP_DIR/RoR" ]; then
             echo "no linked binary at $APP_DIR/RoR - nothing to package"
+            echo "::error::RoR was never linked - the IPA cannot be packaged"
             exit 0
           fi
 
@@ -740,7 +741,12 @@ jobs:
           if [ -f RoR-ios.ipa ]; then
             python3 patches/verify_ipa.py RoR-ios.ipa
           else
-            echo "no IPA produced - nothing to verify"
+            # A missing IPA means the link never happened (usually one C++
+            # error short-circuits the whole target under `make -k`).  Treat
+            # that as a failed run: a green check with no artifact is exactly
+            # the false success that hid the GUIManager `io` break.
+            echo "::error::no IPA produced - see ror-build.log in the ror-ios-build-logs artifact"
+            exit 1
           fi
 
       - name: Summary
