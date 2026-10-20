@@ -778,6 +778,7 @@ def patch_repository_http(ror):
         "#   include \"ios_platform.h\"\n"
         "#endif // ROR_PLATFORM_IOS\n"
         "\n"
+        "#include <fstream>\n"
         "#include <imgui.h>\n",
         "GUI_RepositorySelector.cpp: include ios_platform.h",
     )
@@ -1049,8 +1050,16 @@ def patch_repository_http(ror):
         "GUI_RepositorySelector.cpp: resource file list transfer",
     )
 
-    # 6) The mod file itself.  On iOS the whole file is fetched into memory
-    #    and then written into the cache stream.
+    # 6) The mod file itself.  On iOS the whole file is written straight to
+    #    the path the installer expects, with a plain file stream.
+    #
+    #    The desktop version hands the bytes to an OGRE resource created in
+    #    the Cache group, and the installer then renames the ".part" file to
+    #    the real name.  On iOS the resource landed somewhere else (the OGRE
+    #    file name is the resource name, and the name here is an absolute
+    #    path), so the rename found nothing to rename and the mod stayed
+    #    "foo.zip.part" forever.  Writing the file directly makes the two
+    #    halves agree.
     text = must_replace(
         text,
         "    CURL *curl = curl_easy_init();\n"
@@ -1084,14 +1093,12 @@ def patch_repository_http(ror):
         "    }\n",
         "    try // We write using Ogre::DataStream which throws exceptions\n"
         "    {\n"
-        "        // smart pointer - closes stream automatically\n"
-        "        Ogre::DataStreamPtr datastream = Ogre::ResourceGroupManager::getSingleton().createResource(part_filepath, RGN_CACHE);\n"
-        "\n"
         "#ifdef ROR_PLATFORM_IOS\n"
-        "        // No curl here: the file is fetched into memory and then written\n"
-        "        // into the cache stream.  The progress window cannot be driven\n"
-        "        // without curl's progress callback, so the download is reported\n"
-        "        // as one step.\n"
+        "        // No curl here, and no OGRE resource either: the bytes go straight\n"
+        "        // into the file the installer is going to rename, so the two\n"
+        "        // halves cannot disagree about where the file is.  (With the\n"
+        "        // OGRE resource the file ended up somewhere else and the mod\n"
+        "        // stayed \"foo.zip.part\" forever.)\n"
         "        std::string payload;\n"
         "        std::string transfer_error;\n"
         "        RepoHttpCode http_code = 0;\n"
@@ -1105,10 +1112,25 @@ def patch_repository_http(ror):
         "        }\n"
         "        else\n"
         "        {\n"
-        "            datastream->write(payload.data(), payload.size());\n"
+        "            std::ofstream out(part_filepath, std::ios::binary | std::ios::trunc);\n"
+        "            if (!out)\n"
+        "            {\n"
+        "                Ogre::LogManager::getSingleton().stream()\n"
+        "                    << \"[RoR|Repository] Cannot write '\" << part_filepath << \"'\";\n"
+        "                App::GetGameContext()->PushMessage(Message(MSG_NET_DOWNLOAD_REPOFILE_FAILURE, new RepoFileInstallRequest(request)));\n"
+        "            }\n"
+        "            else\n"
+        "            {\n"
+        "                out.write(payload.data(), (std::streamsize)payload.size());\n"
+        "                out.close();\n"
+        "                Ogre::LogManager::getSingleton().stream()\n"
+        "                    << \"[RoR|Repository] Downloaded \" << payload.size() << \" bytes to \" << part_filepath;\n"
+        "            }\n"
         "        }\n"
         "#else\n"
-        "        CURL *curl = curl_easy_init();\n"
+        "        // smart pointer - closes stream automatically\n"
+        "        Ogre::DataStreamPtr datastream = Ogre::ResourceGroupManager::getSingleton().createResource(part_filepath, RGN_CACHE);\n"
+        "\n"
         "        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());\n"
         "        curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);\n"
         "#ifdef _WIN32\n"
@@ -2668,9 +2690,10 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
         // The vehicle-systems panel switch, top-right above the pedals.
         // ("ev" is ignored for IOS_PANEL - the field only has to be filled.)
         out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_PANEL, 0.845f, 0.050f, 0.150f, 0.240f, "VEH"});
-        // The mod repository, top-left corner.  ("ev" is ignored for
+        // The mod repository, next to the dashboard's speedometer (which the
+        // iOS dashboard puts in the top left corner).  ("ev" is ignored for
         // IOS_REPO as well - the button opens a panel, it drives no event.)
-        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_REPO, 0.030f, 0.040f, 0.130f, 0.095f, "REPO"});
+        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_REPO, 0.245f, 0.040f, 0.130f, 0.095f, "REPO"});
         // The panel itself: a 5x4 grid over the empty middle of the screen
         // holding every remaining unit of the truck - lights, sound, gearbox,
         // differentials, transfer case, clutch, trailer brake, cruise control
@@ -4431,11 +4454,10 @@ def patch_dashboard_layouts(ror):
     patch_dashboard_size()).  What is left is a small dashboard in the top
     left corner, and the rest of the display belongs to the game.
 
-    The factor is a compromise: at 0.28 the speedometer is 101x70 pixels,
-    which is still readable, and the panel (287x223) no longer reaches the
-    row of turn-signal buttons.
+    The factor is a compromise: at 0.5 the speedometer is 180x125 pixels,
+    which is readable on a phone, and the rest of the cockpit follows it.
     """
-    scale = 0.28
+    scale = 0.5
     directory = os.path.join(ror, "resources", "dashboards")
     if not os.path.isdir(directory):
         sys.exit("ERROR: resources/dashboards is missing from the RoR checkout")
@@ -4461,7 +4483,7 @@ def patch_dashboard_layouts(ror):
 
 
 def patch_dashboard_size(ror):
-    """DashBoardManager.cpp: do not stretch the dashboard over the screen.
+    """DashBoardManager.cpp: put the dashboard in a corner of the phone screen.
 
     ``DashBoard::windowResized()`` sets the dashboard's root widget to the
     size of the screen, which is what makes the panel's background picture
@@ -4470,34 +4492,136 @@ def patch_dashboard_size(ror):
     on-screen pedals.
 
     On iOS the root keeps the size its (already scaled down) layout asks for,
-    so the dashboard is a small panel in the top-left corner.
+    and the whole cockpit is moved so that the speedometer - which the layout
+    puts in the bottom right of the cockpit - ends up in the top left corner of
+    the screen, next to the REPO button and clear of every control.  The
+    cockpit picture around the dials comes along with it.
+
+    The offset is taken from the widget itself rather than hardcoded, so it
+    works for every dashboard (the analog and the digital one put their
+    gauges in different places).
     """
     path = os.path.join(ror, "source", "main", "gui", "DashBoardManager.cpp")
     text = read(path)
+
+    # The gauge's position, remembered while the layout is walked, and the
+    # panel's own move.
     text = must_replace(
         text,
+        "void DashBoard::windowResized()\n"
+        "{\n"
+        "    if (!mainWidget)\n"
+        "        return;\n"
+        "    mainWidget->setPosition(0, 0);\n"
+        "    if (getIsTextureLayer())\n"
+        "    {\n"
+        "        // texture layers are independent from the screen size, but rather from the layer texture size\n"
+        "        TexturePtr tex = TextureManager::getSingleton().getByName(rttLayer->getTextureName());\n"
+        "        if (tex)\n"
+        "            mainWidget->setSize(tex->getWidth(), tex->getHeight());\n"
+        "    }\n"
         "    else\n"
         "    {\n"
         "        MyGUI::IntSize screenSize = MyGUI::RenderManager::getInstance().getViewSize();\n"
         "        mainWidget->setSize(screenSize);\n"
         "    }\n"
         "}\n",
-        "    else\n"
-        "    {\n"
         "#ifdef ROR_PLATFORM_IOS\n"
-        "        // Apple/iOS port: keep the dashboard at the size its layout asks\n"
-        "        // for (the layouts are scaled down for the phone - see\n"
-        "        // patch_dashboard_layouts) instead of stretching it over the whole\n"
-        "        // screen.  Stretching it is what pulls the bottom-right anchored\n"
-        "        // speedometer into the corner, on top of the on-screen pedals.\n"
+        "// Apple/iOS port: the cockpit layout puts the speedometer in the\n"
+        "// bottom right corner of the cockpit; on the phone it has to be in\n"
+        "// the top left one, so the panel is moved by the gauge's own offset.\n"
+        "static MyGUI::IntPoint g_ios_dash_gauge_offset(0, 0);\n"
+        "static bool g_ios_dash_gauge_seen = false;\n"
+        "#endif\n"
+        "\n"
+        "void DashBoard::windowResized()\n"
+        "{\n"
+        "    if (!mainWidget)\n"
+        "        return;\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // The dashboard keeps the size its scaled layout asks for and stays\n"
+        "    // where it was put - the speedometer in the top left corner, clear\n"
+        "    // of every on-screen control.  Stretching the panel over the whole\n"
+        "    // screen is what pulled the bottom-right anchored speedometer into\n"
+        "    // the corner, on top of the pedals.\n"
+        "    if (getIsTextureLayer())\n"
+        "    {\n"
+        "        // texture layers are independent from the screen size, but rather from the layer texture size\n"
+        "        TexturePtr tex = TextureManager::getSingleton().getByName(rttLayer->getTextureName());\n"
+        "        if (tex)\n"
+        "            mainWidget->setSize(tex->getWidth(), tex->getHeight());\n"
+        "    }\n"
+        "    else if (g_ios_dash_gauge_seen)\n"
+        "    {\n"
+        "        mainWidget->setPosition(-g_ios_dash_gauge_offset.left, -g_ios_dash_gauge_offset.top);\n"
+        "    }\n"
         "#else\n"
+        "    mainWidget->setPosition(0, 0);\n"
+        "    if (getIsTextureLayer())\n"
+        "    {\n"
+        "        // texture layers are independent from the screen size, but rather from the layer texture size\n"
+        "        TexturePtr tex = TextureManager::getSingleton().getByName(rttLayer->getTextureName());\n"
+        "        if (tex)\n"
+        "            mainWidget->setSize(tex->getWidth(), tex->getHeight());\n"
+        "    }\n"
+        "    else\n"
+        "    {\n"
         "        MyGUI::IntSize screenSize = MyGUI::RenderManager::getInstance().getViewSize();\n"
         "        mainWidget->setSize(screenSize);\n"
-        "#endif\n"
         "    }\n"
+        "#endif\n"
         "}\n",
-        "DashBoardManager.cpp: keep the dashboard at its own size on iOS",
+        "DashBoardManager.cpp: keep the dashboard in its corner on iOS",
     )
+
+    text = must_replace(
+        text,
+        "        if (prefixLessName == \"_Main\")\n"
+        "        {\n"
+        "            mainWidget = (MyGUI::WindowPtr)w;\n"
+        "            // resize it\n"
+        "            windowResized();\n"
+        "        }\n",
+        "        if (prefixLessName == \"_Main\")\n"
+        "        {\n"
+        "            mainWidget = (MyGUI::WindowPtr)w;\n"
+        "            // resize it\n"
+        "            windowResized();\n"
+        "        }\n"
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "        if (prefixLessName == \"SpeedoGauge\" && !g_ios_dash_gauge_seen)\n"
+        "        {\n"
+        "            g_ios_dash_gauge_offset = w->getPosition();\n"
+        "            g_ios_dash_gauge_seen = true;\n"
+        "        }\n"
+        "#endif\n",
+        "DashBoardManager.cpp: catch the speedometer widget",
+    )
+
+    text = must_replace(
+        text,
+        "    for (MyGUI::VectorWidgetPtr::iterator iter = widgets.begin(); iter != widgets.end(); ++iter)\n"
+        "    {\n"
+        "        loadLayoutRecursive(*iter);\n"
+        "    }\n",
+        "    for (MyGUI::VectorWidgetPtr::iterator iter = widgets.begin(); iter != widgets.end(); ++iter)\n"
+        "    {\n"
+        "        loadLayoutRecursive(*iter);\n"
+        "    }\n"
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Move the cockpit so that the speedometer lands in the top left\n"
+        "    // corner of the screen.\n"
+        "    if (mainWidget && g_ios_dash_gauge_seen)\n"
+        "    {\n"
+        "        mainWidget->setPosition(-g_ios_dash_gauge_offset.left, -g_ios_dash_gauge_offset.top);\n"
+        "    }\n"
+        "    g_ios_dash_gauge_seen = false;\n"
+        "#endif\n",
+        "DashBoardManager.cpp: move the cockpit into the corner",
+    )
+
     write(path, text)
 
 
