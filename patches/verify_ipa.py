@@ -682,6 +682,31 @@ def main(argv):
             print("  ok      managed_mats_vehicles_transparent_nicemetal"
                   ".material: texture_alias is well formed")
 
+    # tracks/character carries a second pass, ColorChange, that tints the body
+    # with the player's colour using fixed-function texture blending.  GLES2
+    # has no fixed function: the RTSS translation of
+    #   colour_op_ex blend_current_alpha src_manual src_current 0 0 0
+    # multiplies the whole mesh by (0,0,0), and the result on the phone is a
+    # solid black character in walking mode.  The pass used to be removed by a
+    # patch that was defined but never called from main(), so this gates on the
+    # file actually shipped in the bundle.
+    mats = [n for n in names
+            if n.split("/")[-1] == "character.material" and "/meshes/" not in n]
+    if not mats:
+        bad.append("no character.material in the bundle - the on-foot body "
+                   "would fall back to OGRE's default material")
+    else:
+        body = ipa.read(mats[0]).decode("utf-8", "replace")
+        if re.search(r"pass\s+ColorChange", body):
+            bad.append(
+                "the shipped character.material still has its ColorChange "
+                "pass - that fixed-function pass is translated into a shader "
+                "that multiplies the whole body by (0,0,0), which is the black "
+                "character seen on the phone (patch_character_material did "
+                "not run)")
+        else:
+            print("  ok      rorres character.material: ColorChange pass removed")
+
     for line in bad:
         print("  MISSING " + line)
         print("::error::" + line)
