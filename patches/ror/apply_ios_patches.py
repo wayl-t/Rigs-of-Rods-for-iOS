@@ -710,6 +710,497 @@ def patch_network_header(ror):
     write(path, text)
 
 
+def patch_repository_http(ror):
+    """GUI_RepositorySelector.cpp: make the mod repository work without libcurl.
+
+    The repository is an HTTPS API (https://v2.api.rigsofrods.org) and this
+    build has no libcurl, so every part of the repository code that talks to
+    the server is behind an ``#if defined(USE_CURL)`` and simply does not
+    exist here: the panel opens and then says "Sorry, the repository isn't
+    available".
+
+    iOS has no curl either, but it does have NSURLSession - the system's own
+    HTTP stack, which does TLS, redirects and gzip without a third-party
+    library.  So the transfers are funnelled through one helper that uses
+    curl on the desktop and NSURLSession on iOS, and the JSON parsing (which
+    is the same either way) is left alone.
+
+    The four transfers that need this:
+      * the resource list      GET  <portal>/resources
+      * the category list      GET  <portal>/resource-categories
+      * one resource's files   GET  <portal>/resources/<id>
+      * the mod file itself    GET  https://forum.rigsofrods.org/resources/<id>/download?file=<id>
+
+    The panel's own entry points (Refresh, OpenResource and the install
+    queue) are guarded by the same macro, so they are enabled here too.
+    """
+    path = os.path.join(ror, "source", "main", "gui", "panels", "GUI_RepositorySelector.cpp")
+    text = read(path)
+
+    # The iOS HTTP helper lives in the platform layer.
+    text = must_replace(
+        text,
+        "#include \"RoRVersion.h\"\n"
+        "\n"
+        "#include <imgui.h>\n",
+        "#include \"RoRVersion.h\"\n"
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "#   include \"ios_platform.h\"\n"
+        "#endif // ROR_PLATFORM_IOS\n"
+        "\n"
+        "#include <imgui.h>\n",
+        "GUI_RepositorySelector.cpp: include ios_platform.h",
+    )
+
+    # 1) The whole block of curl-based transfers becomes available on iOS as
+    #    well; the curl-only helpers stay behind USE_CURL.
+    text = must_replace(
+        text,
+        "#if defined(USE_CURL)\n"
+        "\n"
+        "static size_t CurlWriteFunc(void *ptr, size_t size, size_t nmemb, std::string* data)\n",
+        "#if defined(USE_CURL) || defined(ROR_PLATFORM_IOS)\n"
+        "\n"
+        "#if defined(USE_CURL)\n"
+        "static size_t CurlWriteFunc(void *ptr, size_t size, size_t nmemb, std::string* data)\n",
+        "GUI_RepositorySelector.cpp: enable the repository block on iOS",
+    )
+
+    # 2) Close the curl-only helper guard and add the platform-independent GET.
+    text = must_replace(
+        text,
+        "static size_t CurlOgreDataStreamWriteFunc(char* data_ptr, size_t _unused, size_t data_length, void* userdata)\n"
+        "{\n"
+        "    Ogre::DataStream* ogre_datastream = static_cast<Ogre::DataStream*>(userdata);\n"
+        "    if (data_length > 0 && ogre_datastream->isWriteable())\n"
+        "    {\n"
+        "        return ogre_datastream->write((const void*)data_ptr, data_length);\n"
+        "    }\n"
+        "    else\n"
+        "    {\n"
+        "        return 0;\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "std::vector<GUI::ResourceCategories> GetResourceCategories(std::string portal_url)\n",
+        "static size_t CurlOgreDataStreamWriteFunc(char* data_ptr, size_t _unused, size_t data_length, void* userdata)\n"
+        "{\n"
+        "    Ogre::DataStream* ogre_datastream = static_cast<Ogre::DataStream*>(userdata);\n"
+        "    if (data_length > 0 && ogre_datastream->isWriteable())\n"
+        "    {\n"
+        "        return ogre_datastream->write((const void*)data_ptr, data_length);\n"
+        "    }\n"
+        "    else\n"
+        "    {\n"
+        "        return 0;\n"
+        "    }\n"
+        "}\n"
+        "#endif // defined(USE_CURL)\n"
+        "\n"
+        "// The status of a transfer.  On the desktop it is libcurl's CURLcode;\n"
+        "// a build without libcurl cannot even name that type, so it is a plain\n"
+        "// int there.\n"
+        "#ifdef USE_CURL\n"
+        "typedef CURLcode RepoHttpCode;\n"
+        "#else\n"
+        "typedef int RepoHttpCode;\n"
+        "#endif\n"
+        "\n"
+        "// One GET, whichever HTTP stack this build has.\n"
+        "//\n"
+        "// The desktop build uses libcurl.  This build has none - the repository is\n"
+        "// HTTPS and there is no curl in the SDK - so the transfer goes through\n"
+        "// NSURLSession instead (see ios_platform.h), which is the system's own\n"
+        "// HTTP stack and does TLS without any third-party library.\n"
+        "//\n"
+        "// Returns true when the transfer itself worked; response_code then holds\n"
+        "// the HTTP status and response_payload the body.  transfer_error says what\n"
+        "// went wrong when it did not.\n"
+        "static bool RepoHttpGet(const std::string& url, std::string& response_payload, long& response_code,\n"
+        "                        std::string& transfer_error, RepoHttpCode& code_out)\n"
+        "{\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    code_out = 0;\n"
+        "    if (!RoR_IosHttpGet(url, response_payload, response_code, transfer_error))\n"
+        "    {\n"
+        "        return false;\n"
+        "    }\n"
+        "    return true;\n"
+        "#else\n"
+        "    std::string response_header;\n"
+        "    std::string user_agent = fmt::format(\"{}/{}\", \"Rigs of Rods Client\", ROR_VERSION_STRING);\n"
+        "    // The CURL* handle is not multithreaded, see https://curl.se/libcurl/c/threadsafe.html\n"
+        "    // For simplicity we avoid any reuse during OGRE14 migration.\n"
+        "    CURL *curl = curl_easy_init();\n"
+        "    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());\n"
+        "    curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);\n"
+        "#ifdef _WIN32\n"
+        "    curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);\n"
+        "#endif // _WIN32\n"
+        "    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, \"gzip\");\n"
+        "    curl_easy_setopt(curl, CURLOPT_USERAGENT, user_agent.c_str());\n"
+        "    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteFunc);\n"
+        "    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_payload);\n"
+        "    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &response_header);\n"
+        "\n"
+        "    CURLcode curl_result = curl_easy_perform(curl);\n"
+        "    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);\n"
+        "\n"
+        "    curl_easy_cleanup(curl);\n"
+        "    curl = nullptr;\n"
+        "\n"
+        "    code_out = (RepoHttpCode)curl_result;\n"
+        "    if (curl_result != CURLE_OK)\n"
+        "    {\n"
+        "        transfer_error = curl_easy_strerror(curl_result);\n"
+        "        return false;\n"
+        "    }\n"
+        "    return true;\n"
+        "#endif\n"
+        "}\n"
+        "\n"
+        "std::vector<GUI::ResourceCategories> GetResourceCategories(std::string portal_url)\n",
+        "GUI_RepositorySelector.cpp: add the platform-independent GET helper",
+    )
+
+    # 3) The category list transfer.
+    text = must_replace(
+        text,
+        "    std::string repolist_url = portal_url + \"/resource-categories\";\n"
+        "    std::string response_payload;\n"
+        "    std::string response_header;\n"
+        "    long response_code = 0;\n"
+        "    std::string user_agent = fmt::format(\"{}/{}\", \"Rigs of Rods Client\", ROR_VERSION_STRING);\n"
+        "\n"
+        "    // The CURL* handle is not multithreaded, see https://curl.se/libcurl/c/threadsafe.html\n"
+        "    // For simplicity we avoid any reuse during OGRE14 migration.\n"
+        "    CURL *curl = curl_easy_init();\n"
+        "    curl_easy_setopt(curl, CURLOPT_URL, repolist_url.c_str());\n"
+        "    curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);\n"
+        "#ifdef _WIN32\n"
+        "    curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);\n"
+        "#endif // _WIN32\n"
+        "    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, \"gzip\");\n"
+        "    curl_easy_setopt(curl, CURLOPT_USERAGENT, user_agent.c_str());\n"
+        "    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteFunc);\n"
+        "    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_payload);\n"
+        "    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &response_header);\n"
+        "\n"
+        "    CURLcode curl_result = curl_easy_perform(curl);\n"
+        "    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);\n"
+        "\n"
+        "    curl_easy_cleanup(curl);\n"
+        "    curl = nullptr;\n"
+        "\n"
+        "    std::vector<GUI::ResourceCategories> cat;\n"
+        "    if (curl_result != CURLE_OK || response_code != 200)\n"
+        "    {\n"
+        "        Ogre::LogManager::getSingleton().stream()\n"
+        "            << \"[RoR|Repository] Failed to retrieve category list;\"\n"
+        "            << \" Error: '\" << curl_easy_strerror(curl_result) << \"'; HTTP status code: \" << response_code;\n"
+        "        return cat;\n"
+        "    }\n",
+        "    std::string repolist_url = portal_url + \"/resource-categories\";\n"
+        "    std::string response_payload;\n"
+        "    long response_code = 0;\n"
+        "    std::string transfer_error;\n"
+        "    RepoHttpCode http_code = 0;\n"
+        "\n"
+        "    std::vector<GUI::ResourceCategories> cat;\n"
+        "    if (!RepoHttpGet(repolist_url, response_payload, response_code, transfer_error, http_code) || response_code != 200)\n"
+        "    {\n"
+        "        Ogre::LogManager::getSingleton().stream()\n"
+        "            << \"[RoR|Repository] Failed to retrieve category list;\"\n"
+        "            << \" Error: '\" << transfer_error << \"'; HTTP status code: \" << response_code;\n"
+        "        return cat;\n"
+        "    }\n",
+        "GUI_RepositorySelector.cpp: category list transfer",
+    )
+
+    # 4) The resource list transfer.
+    text = must_replace(
+        text,
+        "    std::string repolist_url = portal_url + \"/resources\";\n"
+        "    std::string response_payload;\n"
+        "    std::string response_header;\n"
+        "    long response_code = 0;\n"
+        "    std::string user_agent = fmt::format(\"{}/{}\", \"Rigs of Rods Client\", ROR_VERSION_STRING);\n"
+        "\n"
+        "    CURL *curl = curl_easy_init();\n"
+        "    curl_easy_setopt(curl, CURLOPT_URL, repolist_url.c_str());\n"
+        "    curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);\n"
+        "#ifdef _WIN32\n"
+        "    curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);\n"
+        "#endif // _WIN32\n"
+        "    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, \"gzip\");\n"
+        "    curl_easy_setopt(curl, CURLOPT_USERAGENT, user_agent.c_str());\n"
+        "    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteFunc);\n"
+        "    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_payload);\n"
+        "    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &response_header);\n"
+        "\n"
+        "    CURLcode curl_result = curl_easy_perform(curl);\n"
+        "    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);\n"
+        "\n"
+        "    curl_easy_cleanup(curl);\n"
+        "    curl = nullptr;\n"
+        "\n"
+        "    if (curl_result != CURLE_OK || response_code != 200)\n"
+        "    {\n"
+        "        Ogre::LogManager::getSingleton().stream()\n"
+        "            << \"[RoR|Repository] Failed to retrieve repolist;\"\n"
+        "            << \" Error: '\"<< curl_easy_strerror(curl_result) << \"'; HTTP status code: \" << response_code;\n"
+        "\n"
+        "        CurlFailInfo* failinfo = new CurlFailInfo();\n"
+        "        failinfo->title = _LC(\"RepositorySelector\", \"Could not connect to server. Please check your connection.\");\n"
+        "        failinfo->curl_result = curl_result;\n"
+        "        failinfo->http_response = response_code;\n",
+        "    std::string repolist_url = portal_url + \"/resources\";\n"
+        "    std::string response_payload;\n"
+        "    long response_code = 0;\n"
+        "    std::string transfer_error;\n"
+        "    RepoHttpCode http_code = 0;\n"
+        "\n"
+        "    if (!RepoHttpGet(repolist_url, response_payload, response_code, transfer_error, http_code) || response_code != 200)\n"
+        "    {\n"
+        "        Ogre::LogManager::getSingleton().stream()\n"
+        "            << \"[RoR|Repository] Failed to retrieve repolist;\"\n"
+        "            << \" Error: '\" << transfer_error << \"'; HTTP status code: \" << response_code;\n"
+        "\n"
+        "        CurlFailInfo* failinfo = new CurlFailInfo();\n"
+        "        failinfo->title = _LC(\"RepositorySelector\", \"Could not connect to server. Please check your connection.\");\n"
+        "#ifdef USE_CURL\n"
+        "        failinfo->curl_result = http_code;\n"
+        "#endif\n"
+        "        failinfo->http_response = response_code;\n",
+        "GUI_RepositorySelector.cpp: resource list transfer",
+    )
+
+    # 5) One resource's file list.
+    text = must_replace(
+        text,
+        "    std::string response_payload;\n"
+        "    std::string resource_url = portal_url + \"/resources/\" + std::to_string(resource_id);\n"
+        "    std::string user_agent = fmt::format(\"{}/{}\", \"Rigs of Rods Client\", ROR_VERSION_STRING);\n"
+        "    long response_code = 0;\n"
+        "\n"
+        "    CURL *curl = curl_easy_init();\n"
+        "    curl_easy_setopt(curl, CURLOPT_URL, resource_url.c_str());\n"
+        "    curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);\n"
+        "#ifdef _WIN32\n"
+        "    curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);\n"
+        "#endif // _WIN32\n"
+        "    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, \"gzip\");\n"
+        "    curl_easy_setopt(curl, CURLOPT_USERAGENT, user_agent.c_str());\n"
+        "    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteFunc);\n"
+        "    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_payload);\n"
+        "\n"
+        "    CURLcode curl_result = curl_easy_perform(curl);\n"
+        "    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);\n"
+        "\n"
+        "    curl_easy_cleanup(curl);\n"
+        "    curl = nullptr;\n"
+        "\n"
+        "    if (curl_result != CURLE_OK || response_code != 200)\n"
+        "    {\n"
+        "        Ogre::LogManager::getSingleton().stream()\n"
+        "            << \"[RoR|Repository] Failed to retrieve resource;\"\n"
+        "            << \" Error: '\" << curl_easy_strerror(curl_result) << \"'; HTTP status code: \" << response_code;\n",
+        "    std::string response_payload;\n"
+        "    std::string resource_url = portal_url + \"/resources/\" + std::to_string(resource_id);\n"
+        "    long response_code = 0;\n"
+        "    std::string transfer_error;\n"
+        "    RepoHttpCode http_code = 0;\n"
+        "\n"
+        "    if (!RepoHttpGet(resource_url, response_payload, response_code, transfer_error, http_code) || response_code != 200)\n"
+        "    {\n"
+        "        Ogre::LogManager::getSingleton().stream()\n"
+        "            << \"[RoR|Repository] Failed to retrieve resource;\"\n"
+        "            << \" Error: '\" << transfer_error << \"'; HTTP status code: \" << response_code;\n",
+        "GUI_RepositorySelector.cpp: resource file list transfer",
+    )
+
+    # 6) The mod file itself.  On iOS the whole file is fetched into memory
+    #    and then written into the cache stream.
+    text = must_replace(
+        text,
+        "    CURL *curl = curl_easy_init();\n"
+        "    try // We write using Ogre::DataStream which throws exceptions\n"
+        "    {\n"
+        "        // smart pointer - closes stream automatically\n"
+        "        Ogre::DataStreamPtr datastream = Ogre::ResourceGroupManager::getSingleton().createResource(part_filepath, RGN_CACHE);\n"
+        "\n"
+        "        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());\n"
+        "        curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);\n"
+        "#ifdef _WIN32\n"
+        "        curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);\n"
+        "#endif // _WIN32\n"
+        "        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlOgreDataStreamWriteFunc);\n"
+        "        curl_easy_setopt(curl, CURLOPT_WRITEDATA, datastream.get());\n"
+        "        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, NULL); // Disable Internal CURL progressmeter\n"
+        "        curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, &progress_context);\n"
+        "        curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, CurlProgressFunc); // Use our progress window\n"
+        "        \n"
+        "        CURLcode curl_result = curl_easy_perform(curl);\n"
+        "        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);\n"
+        "\n"
+        "        if (curl_result != CURLE_OK || response_code != 200)\n"
+        "        {\n"
+        "            Ogre::LogManager::getSingleton().stream()\n"
+        "                << \"[RoR|Repository] Failed to download resource;\"\n"
+        "                << \" Error: '\" << curl_easy_strerror(curl_result) << \"'; HTTP status code: \" << response_code;\n",
+        "    try // We write using Ogre::DataStream which throws exceptions\n"
+        "    {\n"
+        "        // smart pointer - closes stream automatically\n"
+        "        Ogre::DataStreamPtr datastream = Ogre::ResourceGroupManager::getSingleton().createResource(part_filepath, RGN_CACHE);\n"
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "        // No curl here: the file is fetched into memory and then written\n"
+        "        // into the cache stream.  The progress window cannot be driven\n"
+        "        // without curl's progress callback, so the download is reported\n"
+        "        // as one step.\n"
+        "        std::string payload;\n"
+        "        std::string transfer_error;\n"
+        "        RepoHttpCode http_code = 0;\n"
+        "        if (!RepoHttpGet(url, payload, response_code, transfer_error, http_code) || response_code != 200)\n"
+        "        {\n"
+        "            Ogre::LogManager::getSingleton().stream()\n"
+        "                << \"[RoR|Repository] Failed to download resource;\"\n"
+        "                << \" Error: '\" << transfer_error << \"'; HTTP status code: \" << response_code;\n"
+        "\n"
+        "            App::GetGameContext()->PushMessage(Message(MSG_NET_DOWNLOAD_REPOFILE_FAILURE, new RepoFileInstallRequest(request)));\n"
+        "        }\n"
+        "        else\n"
+        "        {\n"
+        "            datastream->write(payload.data(), payload.size());\n"
+        "        }\n"
+        "#else\n"
+        "        CURL *curl = curl_easy_init();\n"
+        "        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());\n"
+        "        curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);\n"
+        "#ifdef _WIN32\n"
+        "        curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);\n"
+        "#endif // _WIN32\n"
+        "        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlOgreDataStreamWriteFunc);\n"
+        "        curl_easy_setopt(curl, CURLOPT_WRITEDATA, datastream.get());\n"
+        "        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, NULL); // Disable Internal CURL progressmeter\n"
+        "        curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, &progress_context);\n"
+        "        curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, CurlProgressFunc); // Use our progress window\n"
+        "        \n"
+        "        CURLcode curl_result = curl_easy_perform(curl);\n"
+        "        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);\n"
+        "\n"
+        "        if (curl_result != CURLE_OK || response_code != 200)\n"
+        "        {\n"
+        "            Ogre::LogManager::getSingleton().stream()\n"
+        "                << \"[RoR|Repository] Failed to download resource;\"\n"
+        "                << \" Error: '\" << curl_easy_strerror(curl_result) << \"'; HTTP status code: \" << response_code;\n",
+        "GUI_RepositorySelector.cpp: mod file download",
+    )
+
+    # 7) The rest of DownloadResourceFile: the curl handle is created before
+    #    the try block and cleaned up after it.
+    text = must_replace(
+        text,
+        "    RepoProgressContext progress_context;\n"
+        "    progress_context.filename = request.rfir_filename;\n"
+        "    progress_context.install_request_id = request.rfir_install_request_id;\n"
+        "    long response_code = 0;\n",
+        "    RepoProgressContext progress_context;\n"
+        "    progress_context.filename = request.rfir_filename;\n"
+        "    progress_context.install_request_id = request.rfir_install_request_id;\n"
+        "    long response_code = 0;\n"
+        "#ifndef ROR_PLATFORM_IOS\n"
+        "    CURL *curl = curl_easy_init();\n"
+        "#endif\n",
+        "GUI_RepositorySelector.cpp: download handle",
+    )
+
+    # 8) ... and the cleanup after the try block.
+    text = must_replace(
+        text,
+        "    curl_easy_cleanup(curl);\n"
+        "    curl = nullptr;\n"
+        "\n"
+        "    App::GetGameContext()->PushMessage(Message(MSG_NET_DOWNLOAD_REPOFILE_SUCCESS, new RepoFileInstallRequest(request)));\n"
+        "}\n"
+        "#endif // defined(USE_CURL)\n",
+        "#ifndef ROR_PLATFORM_IOS\n"
+        "    curl_easy_cleanup(curl);\n"
+        "    curl = nullptr;\n"
+        "#endif\n"
+        "\n"
+        "    App::GetGameContext()->PushMessage(Message(MSG_NET_DOWNLOAD_REPOFILE_SUCCESS, new RepoFileInstallRequest(request)));\n"
+        "}\n"
+        "#endif // defined(USE_CURL) || defined(ROR_PLATFORM_IOS)\n",
+        "GUI_RepositorySelector.cpp: download cleanup",
+    )
+
+    # 9) The three entry points of the panel.
+    text = must_replace(
+        text,
+        "void RepositorySelector::Refresh()\n"
+        "{\n"
+        "#if defined(USE_CURL)\n",
+        "void RepositorySelector::Refresh()\n"
+        "{\n"
+        "#if defined(USE_CURL) || defined(ROR_PLATFORM_IOS)\n",
+        "GUI_RepositorySelector.cpp: Refresh on iOS",
+    )
+    text = must_replace(
+        text,
+        "    std::thread(std::move(task), App::remote_query_url->getStr()).detach();\n"
+        "#endif // defined(USE_CURL)\n"
+        "}\n",
+        "    std::thread(std::move(task), App::remote_query_url->getStr()).detach();\n"
+        "#endif // defined(USE_CURL) || defined(ROR_PLATFORM_IOS)\n"
+        "}\n",
+        "GUI_RepositorySelector.cpp: Refresh end",
+    )
+    text = must_replace(
+        text,
+        "void RepositorySelector::OpenResource(int resource_id)\n"
+        "{\n"
+        "#if defined(USE_CURL)\n",
+        "void RepositorySelector::OpenResource(int resource_id)\n"
+        "{\n"
+        "#if defined(USE_CURL) || defined(ROR_PLATFORM_IOS)\n",
+        "GUI_RepositorySelector.cpp: OpenResource on iOS",
+    )
+    text = must_replace(
+        text,
+        "    std::thread(std::move(task), App::remote_query_url->getStr(), resource_id).detach();\n"
+        "#endif // defined(USE_CURL)\n"
+        "}\n",
+        "    std::thread(std::move(task), App::remote_query_url->getStr(), resource_id).detach();\n"
+        "#endif // defined(USE_CURL) || defined(ROR_PLATFORM_IOS)\n"
+        "}\n",
+        "GUI_RepositorySelector.cpp: OpenResource end",
+    )
+    text = must_replace(
+        text,
+        "        RepoFileInstallRequest next_request = m_queued_install_requests.front();\n"
+        "#if defined(USE_CURL)\n"
+        "        std::packaged_task<void(RepoFileInstallRequest)> task(DownloadResourceFile);\n",
+        "        RepoFileInstallRequest next_request = m_queued_install_requests.front();\n"
+        "#if defined(USE_CURL) || defined(ROR_PLATFORM_IOS)\n"
+        "        std::packaged_task<void(RepoFileInstallRequest)> task(DownloadResourceFile);\n",
+        "GUI_RepositorySelector.cpp: install queue guard",
+    )
+    text = must_replace(
+        text,
+        "        std::packaged_task<void(RepoFileInstallRequest)> task(DownloadResourceFile);\n"
+        "        std::thread(std::move(task), next_request).detach();\n"
+        "#endif // defined(USE_CURL)\n",
+        "        std::packaged_task<void(RepoFileInstallRequest)> task(DownloadResourceFile);\n"
+        "        std::thread(std::move(task), next_request).detach();\n"
+        "#endif // defined(USE_CURL) || defined(ROR_PLATFORM_IOS)\n",
+        "GUI_RepositorySelector.cpp: install queue on iOS",
+    )
+
+    write(path, text)
+
+
 def patch_repo_selector(ror):
     """GUI_RepositorySelector.cpp: two spots use libcurl outside a USE_CURL guard.
 
@@ -999,7 +1490,25 @@ void RoR_IosStartupTick(const char* format, ...);
 void RoR_IosShowFatal(const char* format, ...);
 
 #ifdef __cplusplus
-}
+}   // extern "C"
+
+#include <string>
+
+// Fetches an HTTPS URL into memory with NSURLSession, the system's own HTTP
+// stack, which does the TLS handshake, the redirects and the gzip decoding
+// without any third-party library.
+//
+// The mod repository lives on https://v2.api.rigsofrods.org and this build has
+// no libcurl, so the repository code cannot use curl - this is what it uses
+// instead.
+//
+// Blocking: it waits for the whole transfer to finish.  Call it from a worker
+// thread (the repository code already spawns one), never from the render
+// thread.  Returns true on success, with the HTTP status code in out_code; on
+// failure the reason is in out_error.
+bool RoR_IosHttpGet(const std::string& url, std::string& out_body, long& out_code, std::string& out_error);
+
+extern "C" {
 #endif
 
 #endif // ROR_IOS_PLATFORM_H
@@ -1454,6 +1963,107 @@ int RoR_IosMakeTouchViewCoverWindow(void)
                  (double)touch_view.frame.origin.x, (double)touch_view.frame.origin.y,
                  (double)touch_view.frame.size.width, (double)touch_view.frame.size.height);
     return 1;
+}
+
+// ---------------------------------------------------------------------------
+// A minimal HTTP client
+// ---------------------------------------------------------------------------
+// The mod repository is an HTTPS API and this build has no libcurl, so the
+// repository code cannot use curl.  NSURLSession is the system's own HTTP
+// stack: it does the TLS handshake, the redirects and the gzip decoding, and
+// an https:// URL needs no App Transport Security exception.
+//
+// The call blocks until the transfer is over, with a timeout, so a server that
+// never answers cannot freeze the app.  The repository code calls it from a
+// worker thread, never from the render thread.
+//
+// Everything is copied into C++ storage inside the completion handler: the
+// blocks are autoreleased objects, and the data has to be read before the
+// framework drops it.
+
+// The result is collected in a buffer this function owns, and the completion
+// handler only writes into it.  Capturing it in __block variables would not
+// do: the framework releases the block as soon as the handler returns, which
+// can be before this thread has woken up on the semaphore.
+
+struct RoR_IosHttpResult
+{
+    std::string body;
+    std::string error;
+    long code = 0;
+};
+
+bool RoR_IosHttpGet(const std::string& url, std::string& out_body, long& out_code, std::string& out_error)
+{
+    out_body.clear();
+    out_code = 0;
+    out_error.clear();
+
+    @autoreleasepool
+    {
+        NSString* url_string = [NSString stringWithUTF8String:url.c_str()];
+        NSURL* nsurl = (url_string != nil) ? [NSURL URLWithString:url_string] : nil;
+        if (nsurl == nil)
+        {
+            out_error = "malformed URL";
+            return false;
+        }
+
+        RoR_IosHttpResult* result = new RoR_IosHttpResult();
+        dispatch_semaphore_t done = dispatch_semaphore_create(0);
+
+        NSURLSessionDataTask* task =
+            [[NSURLSession sharedSession] dataTaskWithURL:nsurl
+            completionHandler:^(NSData* data, NSURLResponse* response, NSError* error)
+            {
+                if (data != nil)
+                {
+                    result->body.assign((const char*)[data bytes], (size_t)[data length]);
+                }
+                if (response != nil && [response isKindOfClass:[NSHTTPURLResponse class]])
+                {
+                    result->code = (long)[(NSHTTPURLResponse*)response statusCode];
+                }
+                if (error != nil)
+                {
+                    const char* msg = [[error localizedDescription] UTF8String];
+                    result->error = (msg != nullptr) ? msg : "the request failed";
+                }
+                dispatch_semaphore_signal(done);
+            }];
+
+        if (task == nil)
+        {
+            delete result;
+            out_error = "cannot create the request";
+            return false;
+        }
+
+        [task resume];
+
+        // 90 seconds is far longer than any of the repository's answers and
+        // still short enough that a dead server cannot hang the app.
+        const dispatch_time_t deadline =
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(90 * NSEC_PER_SEC));
+        if (dispatch_semaphore_wait(done, deadline) != 0)
+        {
+            [task cancel];
+            delete result;
+            out_error = "the request timed out";
+            return false;
+        }
+
+        out_body = result->body;
+        out_code = result->code;
+        out_error = result->error;
+        delete result;
+
+        if (!out_error.empty())
+        {
+            return false;
+        }
+        return true;
+    }
 }
 '''
 
@@ -1950,7 +2560,7 @@ bool s_iosPanel = false;
 // sequential pair (EV_TRUCK_SHIFT_UP/DOWN) and the automatic pair
 // (EV_TRUCK_AUTOSHIFT_UP/DOWN) - because Engine.cpp reads only the pair
 // matching the current gearbox mode, and either mode may be active.
-enum IosCtlKind { IOS_STEER, IOS_JOY, IOS_HELD, IOS_TOGGLE, IOS_PANEL, IOS_GUP, IOS_GDN };
+enum IosCtlKind { IOS_STEER, IOS_JOY, IOS_HELD, IOS_TOGGLE, IOS_PANEL, IOS_GUP, IOS_GDN, IOS_REPO };
 
 struct IosCtl {
     RoR::events ev;      // the event this control drives (STEER/JOY drive several)
@@ -1969,6 +2579,9 @@ bool IosControlsActive()
     if (App::GetGuiManager()->MainSelector.IsVisible())     return false;
     if (App::GetGuiManager()->MessageBoxDialog.IsVisible()) return false;
     if (App::GetGuiManager()->LoadingWindow.IsVisible())    return false;
+    // The mod repository is a panel of its own: while it is open the touches
+    // belong to it, not to the driving controls.
+    if (App::GetGuiManager()->RepositorySelector.IsVisible()) return false;
     return true;
 }
 
@@ -2015,6 +2628,9 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
         // The vehicle-systems panel switch, top-right above the pedals.
         // ("ev" is ignored for IOS_PANEL - the field only has to be filled.)
         out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_PANEL, 0.845f, 0.050f, 0.150f, 0.240f, "VEH"});
+        // The mod repository, top-left corner.  ("ev" is ignored for
+        // IOS_REPO as well - the button opens a panel, it drives no event.)
+        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_REPO, 0.030f, 0.040f, 0.130f, 0.095f, "REPO"});
         // The panel itself: a 5x4 grid over the empty middle of the screen
         // holding every remaining unit of the truck - lights, sound, gearbox,
         // differentials, transfer case, clutch, trailer brake, cruise control
@@ -2069,6 +2685,8 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
         out.push_back({RoR::EV_CHARACTER_JUMP,             IOS_HELD,   0.800f, 0.420f, 0.190f, 0.170f, "JUMP"});
         out.push_back({RoR::EV_CHARACTER_RUN,              IOS_HELD,   0.800f, 0.600f, 0.190f, 0.170f, "RUN"});
         out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_TOGGLE, 0.800f, 0.780f, 0.190f, 0.200f, "ENTER"});
+        // The mod repository, top-left corner.
+        out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_REPO, 0.030f, 0.040f, 0.130f, 0.095f, "REPO"});
     }
 }
 
@@ -2165,6 +2783,13 @@ bool IosControlsHandleTouch(int action, float x, float y, int id)
             if (ctls[i].kind == IOS_PANEL)
             {
                 s_iosPanel = !s_iosPanel;      // the VEH switch: pure UI state
+                return true;
+            }
+            if (ctls[i].kind == IOS_REPO)
+            {
+                // The mod repository, right in the game.  The panel is a plain
+                // ImGui window, so opening it is all that is needed here.
+                App::GetGuiManager()->RepositorySelector.SetVisible(true);
                 return true;
             }
             if (ctls[i].kind == IOS_TOGGLE)
@@ -2368,6 +2993,10 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         {
             for (size_t p = 0; p < s_iosPulses.size(); ++p)
                 if (s_iosPulses[p].ev == c.ev) { pressed = true; break; }
+        }
+        else if (c.kind == IOS_REPO)
+        {
+            pressed = App::GetGuiManager()->RepositorySelector.IsVisible();
         }
         else
         {
@@ -3192,13 +3821,12 @@ def patch_rtshader(ror):
     text = read(path)
     text = must_replace(
         text,
-        "#ifdef __cplusplus\n"
-        "}\n"
+        "extern \"C\" {\n"
         "#endif\n"
         "\n"
         "#endif // ROR_IOS_PLATFORM_H\n",
-        "#ifdef __cplusplus\n"
-        "}\n"
+        "extern \"C\" {\n"
+        "#endif\n"
         "\n"
         "namespace Ogre { class SceneManager; }\n"
         "\n"
@@ -3212,7 +3840,6 @@ def patch_rtshader(ror):
         "    void RtssRegisterSceneManager(Ogre::SceneManager* scene_manager);\n"
         "}\n"
         "}\n"
-        "#endif // __cplusplus\n"
         "\n"
         "#endif // ROR_IOS_PLATFORM_H\n",
         "ios_platform.h: declare RoR::Ios::RtssRegisterSceneManager",
@@ -3749,6 +4376,91 @@ def patch_shadows_off_ambient(ror):
         "\t\t\tdiffuse 1 1 1 1\n"
     )
     text = must_replace(text, old, new, "shadows/pssm/off: ambient/diffuse")
+    write(path, text)
+
+
+def patch_dashboard_layouts(ror):
+    """resources/dashboards/*.layout: scale the dashboards down for the phone.
+
+    The dashboards are MyGUI layouts written in pixels for a 1024-wide panel.
+    The stock truck dashboard puts its speedometer in a 360x250 box, anchored
+    to the bottom right - on a 844x390 phone that is a quarter of the display
+    and it lands exactly on top of the on-screen pedals, so the driving
+    controls are under the dial.
+
+    The layout is scaled uniformly, so the panel keeps its proportions and the
+    gauges keep their relation to each other, and the panel is then left at
+    its own size instead of being stretched over the whole screen (see
+    patch_dashboard_size()).  What is left is a small dashboard in the top
+    left corner, and the rest of the display belongs to the game.
+
+    The factor is a compromise: at 0.28 the speedometer is 101x70 pixels,
+    which is still readable, and the panel (287x223) no longer reaches the
+    row of turn-signal buttons.
+    """
+    scale = 0.28
+    directory = os.path.join(ror, "resources", "dashboards")
+    if not os.path.isdir(directory):
+        sys.exit("ERROR: resources/dashboards is missing from the RoR checkout")
+
+    import re
+
+    def scale_position(match):
+        numbers = [int(n) for n in re.findall(r"-?\d+", match.group(1))]
+        scaled = [int(round(n * scale)) for n in numbers]
+        return 'position="%s"' % " ".join(str(n) for n in scaled)
+
+    touched = 0
+    for name in sorted(os.listdir(directory)):
+        if not name.endswith(".layout"):
+            continue
+        path = os.path.join(directory, name)
+        text = read(path)
+        patched = re.sub(r'position="([^"]*)"', scale_position, text)
+        if patched != text:
+            write(path, patched)
+            touched += 1
+    print("    scaled %d dashboard layouts by %.2f" % (touched, scale))
+
+
+def patch_dashboard_size(ror):
+    """DashBoardManager.cpp: do not stretch the dashboard over the screen.
+
+    ``DashBoard::windowResized()`` sets the dashboard's root widget to the
+    size of the screen, which is what makes the panel's background picture
+    cover everything and what pulls the right-bottom anchored gauges (the
+    speedometer) into the bottom-right corner - on the phone, on top of the
+    on-screen pedals.
+
+    On iOS the root keeps the size its (already scaled down) layout asks for,
+    so the dashboard is a small panel in the top-left corner.
+    """
+    path = os.path.join(ror, "source", "main", "gui", "DashBoardManager.cpp")
+    text = read(path)
+    text = must_replace(
+        text,
+        "    else\n"
+        "    {\n"
+        "        MyGUI::IntSize screenSize = MyGUI::RenderManager::getInstance().getViewSize();\n"
+        "        mainWidget->setSize(screenSize);\n"
+        "    }\n"
+        "}\n",
+        "    else\n"
+        "    {\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "        // Apple/iOS port: keep the dashboard at the size its layout asks\n"
+        "        // for (the layouts are scaled down for the phone - see\n"
+        "        // patch_dashboard_layouts) instead of stretching it over the whole\n"
+        "        // screen.  Stretching it is what pulls the bottom-right anchored\n"
+        "        // speedometer into the corner, on top of the on-screen pedals.\n"
+        "#else\n"
+        "        MyGUI::IntSize screenSize = MyGUI::RenderManager::getInstance().getViewSize();\n"
+        "        mainWidget->setSize(screenSize);\n"
+        "#endif\n"
+        "    }\n"
+        "}\n",
+        "DashBoardManager.cpp: keep the dashboard at its own size on iOS",
+    )
     write(path, text)
 
 
@@ -4924,6 +5636,10 @@ def main():
     # Missing guard holes for the supported "SocketW without libcurl" build,
     # which is the configuration we run on iOS.
     patch_network_header(args.ror_dir)
+    # The mod repository is HTTPS and this build has no libcurl, so the whole
+    # repository code was behind USE_CURL and did not exist.  NSURLSession
+    # replaces it.  See patch_repository_http().
+    patch_repository_http(args.ror_dir)
     patch_repo_selector(args.ror_dir)
     patch_multiplayer_selector(args.ror_dir)
     patch_game_settings_alc(args.ror_dir)
@@ -5015,6 +5731,12 @@ def main():
     # That is what draws the on-foot character solid black.  See
     # patch_shadows_off_ambient().
     patch_shadows_off_ambient(args.ror_dir)
+    # The dashboard is a MyGUI layout in pixels for a 1024-wide panel: on the
+    # phone its speedometer is a quarter of the display and sits on top of
+    # the on-screen pedals.  Scale the layouts down and stop stretching the
+    # panel over the whole screen.  See patch_dashboard_layouts().
+    patch_dashboard_layouts(args.ror_dir)
+    patch_dashboard_size(args.ror_dir)
     # Vehicles must not take the Cg 'nicemetal' materials: they carry no
     # technique at all on this GLES2 path, and the spawner's first
     # getTechnique(0)->getPass(0) on one is a null dereference (the device's
