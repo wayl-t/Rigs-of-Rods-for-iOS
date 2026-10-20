@@ -1099,24 +1099,27 @@ def patch_repository_http(ror):
     )
 
     # 7) The rest of DownloadResourceFile: the curl handle is created before
-    #    the try block and cleaned up after it.
+    #    the try block and cleaned up after it.  The progress context is a
+    #    curl-only type, so on iOS the whole thing goes away.
     text = must_replace(
         text,
         "    RepoProgressContext progress_context;\n"
         "    progress_context.filename = request.rfir_filename;\n"
         "    progress_context.install_request_id = request.rfir_install_request_id;\n"
         "    long response_code = 0;\n",
+        "    long response_code = 0;\n"
+        "#ifndef ROR_PLATFORM_IOS\n"
         "    RepoProgressContext progress_context;\n"
         "    progress_context.filename = request.rfir_filename;\n"
         "    progress_context.install_request_id = request.rfir_install_request_id;\n"
-        "    long response_code = 0;\n"
-        "#ifndef ROR_PLATFORM_IOS\n"
         "    CURL *curl = curl_easy_init();\n"
         "#endif\n",
         "GUI_RepositorySelector.cpp: download handle",
     )
 
-    # 8) ... and the cleanup after the try block.
+    # 8) ... and the cleanup after the try block.  Note the two #endifs: one
+    #    closes the iOS/else split of the transfer itself, the other the
+    #    block of curl-based transfers this whole section lives in.
     text = must_replace(
         text,
         "    curl_easy_cleanup(curl);\n"
@@ -1132,6 +1135,7 @@ def patch_repository_http(ror):
         "\n"
         "    App::GetGameContext()->PushMessage(Message(MSG_NET_DOWNLOAD_REPOFILE_SUCCESS, new RepoFileInstallRequest(request)));\n"
         "}\n"
+        "#endif // ROR_PLATFORM_IOS\n"
         "#endif // defined(USE_CURL) || defined(ROR_PLATFORM_IOS)\n",
         "GUI_RepositorySelector.cpp: download cleanup",
     )
