@@ -3683,7 +3683,7 @@ def patch_character_diagnostic(ror):
         "#ifdef ROR_PLATFORM_IOS\n"
         "    {\n"
         "        Ogre::MaterialPtr mat1 = MaterialManager::getSingleton().getByName(\"tracks/character\");\n"
-        "        const Ogre::AxisAlignedBox& bb = entity->getMesh()->getBoundingBox();\n"
+        "        const Ogre::AxisAlignedBox& bb = entity->getBoundingBox();\n"
         "        const int n_tech = mat1.get() ? (int)mat1->getNumTechniques() : -1;\n"
         "        const int n_pass = (mat1.get() && n_tech > 0) ? (int)mat1->getTechnique(0)->getNumPasses() : -1;\n"
         "        LOGSTREAM << \"[RoR|iOS] character '\" << m_instance_name.c_str()\n"
@@ -3692,8 +3692,7 @@ def patch_character_diagnostic(ror):
         "            << \" skeleton=\" << (entity->getMesh()->hasSkeleton() ? 1 : 0)\n"
         "            << \" skeleton_name='\" << entity->getMesh()->getSkeletonName().c_str() << \"'\"\n"
         "            << \" bones=\" << (entity->getMesh()->hasSkeleton() ? entity->getMesh()->getSkeleton()->getNumBones() : 0)\n"
-        "            << \" bone_weights=\" << entity->getMesh()->getNumBoneWeights()\n"
-        "            << \" vcol=\" << (entity->getMesh()->hasVertexColors() ? 1 : 0)\n"
+        "            << \" bone_assignments=\" << entity->getMesh()->getBoneAssignments().size()\n"
         "            << \" material='\" << (mat1.get() ? mat1->getName().c_str() : \"none\") << \"'\"\n"
         "            << \" techniques=\" << n_tech << \" passes=\" << n_pass\n"
         '            << "\\n";\n'
