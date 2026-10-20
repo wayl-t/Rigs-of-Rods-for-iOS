@@ -3635,6 +3635,48 @@ def patch_gamechatbox(ror):
     write(path, text)
 
 
+def patch_character_diagnostic(ror):
+    """Character.cpp: report what the character is actually drawn with.
+
+    The black-body bug was never reproducible without the device, and the only
+    two things that can paint a mesh solid black on GLES2 are its material's
+    shading path and its skeleton.  This prints, once per spawned character,
+    everything needed to tell them apart:
+
+    * whether the mesh has a skeleton and which one - a mesh whose skinning
+      the renderer cannot honour renders as garbage geometry (the spiky blob
+      the device shows), while a skinning-free mesh cannot;
+    * how many techniques/passes the material resolved to - which is what
+      proves the ColorChange removal in patch_character_material() actually
+      landed, and not merely that the script compiled.
+    """
+    path = os.path.join(ror, "source", "main", "gameplay", "Character.cpp")
+    text = read(path)
+
+    anchor = (
+        "    // setup colour\n"
+        "    MaterialPtr mat1 = MaterialManager::getSingleton().getByName(\"tracks/character\");\n"
+    )
+    probe = (
+        "    // setup colour\n"
+        "    MaterialPtr mat1 = MaterialManager::getSingleton().getByName(\"tracks/character\");\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    {\n"
+        "        const int n_tech = (int)mat1->getNumTechniques();\n"
+        "        LOGSTREAM << \"[RoR|iOS] character '\" << m_instance_name\n"
+        "            << \"' skeleton=\" << (entity->getMesh()->hasSkeleton() ? 1 : 0)\n"
+        "            << \" skeleton_name='\" << entity->getMesh()->getSkeletonName()\n"
+        "            << \"' material='\" << mat1->getName()\n"
+        "            << \"' techniques=\" << n_tech\n"
+        "            << \" passes=\" << (n_tech > 0 ? (int)mat1->getTechnique(0)->getNumPasses() : -1)\n"
+        "            << std::endl;\n"
+        "    }\n"
+        "#endif\n"
+    )
+    text = must_replace(text, anchor, probe, "Character.cpp: character material/skeleton trace")
+    write(path, text)
+
+
 def patch_ogreimgui(ror):
     """OgreImGui.cpp: trace whether the ImGui overlay ever reaches the queue.
 
@@ -4823,6 +4865,10 @@ def main():
     # See patch_character_material() / patch_gamechatbox() for the reasoning.
     patch_character_material(args.ror_dir)
     patch_gamechatbox(args.ror_dir)
+    # Not a fix but a probe: the only way to tell "bad shading" from "bad
+    # skinning" for the black body without a device in hand.  See
+    # patch_character_diagnostic().
+    patch_character_diagnostic(args.ror_dir)
     # The menu is drawn by ImGui, but it is *queued* for drawing by
     # OgreImGui::renderQueueStarted(), which silently skips the overlay when the
     # active viewport is not the app viewport.  That is the difference between
