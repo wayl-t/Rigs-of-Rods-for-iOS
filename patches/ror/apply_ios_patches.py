@@ -3619,17 +3619,24 @@ def patch_gamechatbox(ror):
     path = os.path.join(ror, "source", "main", "gui", "panels", "GUI_GameChatBox.cpp")
     text = read(path)
 
+    # The anchor is the whole putMessage() statement, not just the fmt::format
+    # call: the third argument of putMessage is the message and the fourth is
+    # the icon, and a #ifdef/#endif pair cannot sit in the middle of an
+    # argument list.  Replacing only the message expression left the trailing
+    # `, "lightbulb.png")` dangling after #endif, which does not compile.
     old = (
-        'fmt::format(_LC("ChatBox", "Press {} to spawn a vehicle"),\n'
-        '                   App::GetInputEngine()->getEventCommandTrimmed(EV_COMMON_GET_NEW_VEHICLE))'
+        '        App::GetConsole()->putMessage(Console::CONSOLE_MSGTYPE_INFO, Console::CONSOLE_SYSTEM_NOTICE,\n'
+        '                                      fmt::format(_LC("ChatBox", "Press {} to spawn a vehicle"),\n'
+        '                   App::GetInputEngine()->getEventCommandTrimmed(EV_COMMON_GET_NEW_VEHICLE)), "lightbulb.png");\n'
     )
     new = (
+        '        App::GetConsole()->putMessage(Console::CONSOLE_MSGTYPE_INFO, Console::CONSOLE_SYSTEM_NOTICE,\n'
         '#ifdef ROR_PLATFORM_IOS\n'
-        '                                      std::string("Use the on-screen buttons")\n'
+        '                                      std::string("Use the on-screen buttons"), "lightbulb.png");\n'
         '#else\n'
         '                                      fmt::format(_LC("ChatBox", "Press {} to spawn a vehicle"),\n'
-        '                   App::GetInputEngine()->getEventCommandTrimmed(EV_COMMON_GET_NEW_VEHICLE))\n'
-        '#endif'
+        '                   App::GetInputEngine()->getEventCommandTrimmed(EV_COMMON_GET_NEW_VEHICLE)), "lightbulb.png");\n'
+        '#endif\n'
     )
     text = must_replace(text, old, new, "GUI_GameChatBox.cpp: spawn hint")
     write(path, text)
@@ -3663,13 +3670,14 @@ def patch_character_diagnostic(ror):
         "#ifdef ROR_PLATFORM_IOS\n"
         "    {\n"
         "        const int n_tech = (int)mat1->getNumTechniques();\n"
-        "        LOGSTREAM << \"[RoR|iOS] character '\" << m_instance_name\n"
+        "        const int n_pass  = (n_tech > 0) ? (int)mat1->getTechnique(0)->getNumPasses() : -1;\n"
+        "        LOGSTREAM << \"[RoR|iOS] character '\" << m_instance_name.c_str()\n"
         "            << \"' skeleton=\" << (entity->getMesh()->hasSkeleton() ? 1 : 0)\n"
-        "            << \" skeleton_name='\" << entity->getMesh()->getSkeletonName()\n"
-        "            << \"' material='\" << mat1->getName()\n"
+        "            << \" skeleton_name='\" << entity->getMesh()->getSkeletonName().c_str()\n"
+        "            << \"' material='\" << mat1->getName().c_str()\n"
         "            << \"' techniques=\" << n_tech\n"
-        "            << \" passes=\" << (n_tech > 0 ? (int)mat1->getTechnique(0)->getNumPasses() : -1)\n"
-        "            << std::endl;\n"
+        "            << \"' passes=\" << n_pass\n"
+        '            << "\\n";\n'
         "    }\n"
         "#endif\n"
     )
