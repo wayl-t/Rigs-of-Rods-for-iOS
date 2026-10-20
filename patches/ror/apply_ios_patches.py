@@ -2823,6 +2823,17 @@ def patch_inputengine(ror):
         "    }\n"
         "\n"
         "    const BitMask_t btnmask = 1 << OIS::MB_Left;\n"
+        "    // The orbit camera only ever looks at the RIGHT mouse button:\n"
+        "    //   CameraManager::CameraBehaviorOrbitMouseMoved() starts with\n"
+        "    //   `if (ms.buttonDown(OIS::MB_Right))`, and it is what both the\n"
+        "    //   truck camera and the third-person on-foot camera use.  A\n"
+        "    //   touchscreen has no buttons and the touch -> mouse bridge can\n"
+        "    //   only offer a left-button drag, so the camera never moved at all\n"
+        "    //   on the phone.  A drag that is not on an on-screen control is\n"
+        "    //   therefore reported as a right-button drag as well.  The camera is\n"
+        "    //   the only consumer of MB_Right here, and ImGui still only ever\n"
+        "    //   sees the left button (the listener calls below say MB_Left).\n"
+        "    const BitMask_t rbtnmask = 1 << OIS::MB_Right;\n"
         "    const OIS::MouseEvent evt(nullptr, mouseState);\n"
         "\n"
         "    // Publish the position before the button, always.\n"
@@ -2844,11 +2855,13 @@ def patch_inputengine(ror):
         "    if (action == OIS::MT_Pressed)\n"
         "    {\n"
         "        BITMASK_SET_1(mouseState.buttons, btnmask);\n"
+        "        BITMASK_SET_1(mouseState.buttons, rbtnmask);\n"
         "        if (mMouseListener) { mMouseListener->mousePressed(evt, OIS::MB_Left); }\n"
         "    }\n"
         "    else if (action == OIS::MT_Released || action == OIS::MT_Cancelled)\n"
         "    {\n"
         "        BITMASK_SET_0(mouseState.buttons, btnmask);\n"
+        "        BITMASK_SET_0(mouseState.buttons, rbtnmask);\n"
         "        if (mMouseListener) { mMouseListener->mouseReleased(evt, OIS::MB_Left); }\n"
         "    }\n"
         "}\n"
@@ -3645,43 +3658,98 @@ def patch_gamechatbox(ror):
 def patch_character_diagnostic(ror):
     """Character.cpp: report what the character is actually drawn with.
 
-    The black-body bug was never reproducible without the device, and the only
-    two things that can paint a mesh solid black on GLES2 are its material's
-    shading path and its skeleton.  This prints, once per spawned character,
-    everything needed to tell them apart:
+    The body is drawn black on the device and the only way to tell why is to
+    see the numbers.  This prints, once per spawned character:
 
-    * whether the mesh has a skeleton and which one - a mesh whose skinning
-      the renderer cannot honour renders as garbage geometry (the spiky blob
-      the device shows), while a skinning-free mesh cannot;
-    * how many techniques/passes the material resolved to - which is what
-      proves the ColorChange removal in patch_character_material() actually
-      landed, and not merely that the script compiled.
+    * the mesh's own bounding box, captured *before* SetupGfx() replaces it
+      with an infinite one - the real size says whether the 0.02 node scale
+      is doing anything, and how big the body is supposed to be;
+    * whether the mesh carries a skeleton, how many bones it has and how
+      many bone weights a vertex can carry - a skinned mesh whose skinning
+      the renderer cannot honour renders as garbage geometry;
+    * the material's technique and pass count - the number that proves the
+      ColorChange removal in patch_character_material() actually landed.
     """
     path = os.path.join(ror, "source", "main", "gameplay", "Character.cpp")
     text = read(path)
 
     anchor = (
-        "    // setup colour\n"
-        "    MaterialPtr mat1 = MaterialManager::getSingleton().getByName(\"tracks/character\");\n"
+        "    Entity* entity = App::GetGfxScene()->GetSceneManager()->createEntity("
+        "m_instance_name + \"_mesh\", \"character.mesh\");\n"
     )
     probe = (
-        "    // setup colour\n"
-        "    MaterialPtr mat1 = MaterialManager::getSingleton().getByName(\"tracks/character\");\n"
+        "    Entity* entity = App::GetGfxScene()->GetSceneManager()->createEntity("
+        "m_instance_name + \"_mesh\", \"character.mesh\");\n"
         "#ifdef ROR_PLATFORM_IOS\n"
         "    {\n"
-        "        const int n_tech = (int)mat1->getNumTechniques();\n"
-        "        const int n_pass  = (n_tech > 0) ? (int)mat1->getTechnique(0)->getNumPasses() : -1;\n"
+        "        Ogre::MaterialPtr mat1 = MaterialManager::getSingleton().getByName(\"tracks/character\");\n"
+        "        const Ogre::AxisAlignedBox& bb = entity->getMesh()->getBoundingBox();\n"
+        "        const int n_tech = mat1.get() ? (int)mat1->getNumTechniques() : -1;\n"
+        "        const int n_pass = (mat1.get() && n_tech > 0) ? (int)mat1->getTechnique(0)->getNumPasses() : -1;\n"
         "        LOGSTREAM << \"[RoR|iOS] character '\" << m_instance_name.c_str()\n"
-        "            << \"' skeleton=\" << (entity->getMesh()->hasSkeleton() ? 1 : 0)\n"
-        "            << \" skeleton_name='\" << entity->getMesh()->getSkeletonName().c_str()\n"
-        "            << \"' material='\" << mat1->getName().c_str()\n"
-        "            << \"' techniques=\" << n_tech\n"
-        "            << \"' passes=\" << n_pass\n"
+        "            << \"' bbox_min=(\" << bb.getMinimum().x << \",\" << bb.getMinimum().y << \",\" << bb.getMinimum().z << \")\"\n"
+        "            << \" bbox_max=(\" << bb.getMaximum().x << \",\" << bb.getMaximum().y << \",\" << bb.getMaximum().z << \")\"\n"
+        "            << \" skeleton=\" << (entity->getMesh()->hasSkeleton() ? 1 : 0)\n"
+        "            << \" skeleton_name='\" << entity->getMesh()->getSkeletonName().c_str() << \"'\"\n"
+        "            << \" bones=\" << (entity->getMesh()->hasSkeleton() ? entity->getMesh()->getSkeleton()->getNumBones() : 0)\n"
+        "            << \" bone_weights=\" << entity->getMesh()->getNumBoneWeights()\n"
+        "            << \" vcol=\" << (entity->getMesh()->hasVertexColors() ? 1 : 0)\n"
+        "            << \" material='\" << (mat1.get() ? mat1->getName().c_str() : \"none\") << \"'\"\n"
+        "            << \" techniques=\" << n_tech << \" passes=\" << n_pass\n"
         '            << "\\n";\n'
         "    }\n"
         "#endif\n"
     )
     text = must_replace(text, anchor, probe, "Character.cpp: character material/skeleton trace")
+    write(path, text)
+
+
+def patch_shadows_off_ambient(ror):
+    """resources/managed_materials/shadows/pssm/off/shadows.material: light it.
+
+    On iOS the shadow type is forced to NONE (see patch_cvar_shadow_default()),
+    so ContentManager mounts ``shadows/pssm/off`` instead of ``shadows/pssm/on``
+    and every material that derives from ``RoR/Managed_Mats/Base`` inherits
+    ``Shadows/managed/base_receiver`` from there.
+
+    The "on" variant of that abstract technique says:
+
+        pass BaseRender
+        {
+                ambient 1 1 1 1
+                diffuse 1 1 1 1
+                ... shadow textures and programs ...
+        }
+
+    while the "off" variant - the one that is actually used on the device -
+    has an *empty* pass.  OGRE's default ambient is black, so every material
+    built on that technique (the on-foot character, for one) is rendered with
+    zero ambient and comes out solid black on the phone.  The textures are
+    fine; the lighting constants are missing.
+
+    So the fix is to give the no-shadow variant the same ambient/diffuse the
+    shadow variant has, minus everything shadow-specific.  Nothing else about
+    the technique changes.
+    """
+    path = os.path.join(ror, "resources", "managed_materials", "shadows",
+                        "pssm", "off", "shadows.material")
+    text = read(path)
+
+    old = (
+        "abstract technique Shadows/managed/base_receiver\n"
+        "{\n"
+        "\tpass BaseRender\n"
+        "\t{\n"
+    )
+    new = (
+        "abstract technique Shadows/managed/base_receiver\n"
+        "{\n"
+        "\tpass BaseRender\n"
+        "\t{\n"
+        "\t\t\tambient 1 1 1 1\n"
+        "\t\t\tdiffuse 1 1 1 1\n"
+    )
+    text = must_replace(text, old, new, "shadows/pssm/off: ambient/diffuse")
     write(path, text)
 
 
@@ -4942,6 +5010,12 @@ def main():
     patch_cvar_sky_default(args.ror_dir)
     # patch_cvar_shadow_default().
     patch_cvar_shadow_default(args.ror_dir)
+    # Shadows are off on iOS, so the "pssm/off" variant of the shared
+    # shadow technique is the one that is actually used - and it has an empty
+    # pass, which leaves every material built on it with a black ambient.
+    # That is what draws the on-foot character solid black.  See
+    # patch_shadows_off_ambient().
+    patch_shadows_off_ambient(args.ror_dir)
     # Vehicles must not take the Cg 'nicemetal' materials: they carry no
     # technique at all on this GLES2 path, and the spawner's first
     # getTechnique(0)->getPass(0) on one is a null dereference (the device's

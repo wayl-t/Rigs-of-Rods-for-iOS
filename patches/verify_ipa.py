@@ -690,22 +690,52 @@ def main(argv):
     # solid black character in walking mode.  The pass used to be removed by a
     # patch that was defined but never called from main(), so this gates on the
     # file actually shipped in the bundle.
+    #
+    # The material is not loose in the bundle: it lives inside
+    # rorres/materials.zip (the same archive also holds general.material,
+    # ror.material and friends).  Look in both places.
+    body = None
     mats = [n for n in names
             if n.split("/")[-1] == "character.material" and "/meshes/" not in n]
-    if not mats:
-        bad.append("no character.material in the bundle - the on-foot body "
-                   "would fall back to OGRE's default material")
-    else:
+    if mats:
         body = ipa.read(mats[0]).decode("utf-8", "replace")
-        if re.search(r"pass\s+ColorChange", body):
+    else:
+        matzip = [n for n in names if n.endswith("/rorres/materials.zip")]
+        if matzip:
+            inner = zipfile.ZipFile(io.BytesIO(ipa.read(matzip[0])))
+            if "character.material" in inner.namelist():
+                body = inner.read("character.material").decode("utf-8", "replace")
+    if body is None:
+        bad.append("no character.material in the bundle (neither loose nor in "
+                   "rorres/materials.zip) - the on-foot body would fall back to "
+                   "OGRE's default material")
+    elif re.search(r"pass\s+ColorChange", body):
+        bad.append(
+            "the shipped character.material still has its ColorChange "
+            "pass - that fixed-function pass is translated into a shader "
+            "that multiplies the whole body by (0,0,0), which is the black "
+            "character seen on the phone (patch_character_material did not "
+            "run)")
+    else:
+        print("  ok      rorres character.material: ColorChange pass removed")
+
+    # The shadow type is NONE on iOS, so the "pssm/off" variant of the shared
+    # shadow technique is the one that gets mounted - and it has an empty
+    # pass.  Every material derived from RoR/Managed_Mats/Base inherits it,
+    # which leaves them with OGRE's default ambient of black: the on-foot
+    # character comes out solid black even though its texture is fine.
+    shadows = [n for n in names
+               if n.endswith("/rorres/managed_materials/shadows/pssm/off/shadows.material")]
+    if shadows:
+        sbody = ipa.read(shadows[0]).decode("utf-8", "replace")
+        if "ambient" not in sbody:
             bad.append(
-                "the shipped character.material still has its ColorChange "
-                "pass - that fixed-function pass is translated into a shader "
-                "that multiplies the whole body by (0,0,0), which is the black "
-                "character seen on the phone (patch_character_material did "
-                "not run)")
+                "the shipped shadows/pssm/off/shadows.material has an empty "
+                "base_receiver pass - the materials that inherit it get a black "
+                "ambient and render solid black on the phone "
+                "(patch_shadows_off_ambient did not run)")
         else:
-            print("  ok      rorres character.material: ColorChange pass removed")
+            print("  ok      rorres shadows/pssm/off: base_receiver is lit")
 
     for line in bad:
         print("  MISSING " + line)
