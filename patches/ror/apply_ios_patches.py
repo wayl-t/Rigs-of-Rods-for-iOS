@@ -1861,7 +1861,7 @@ def patch_inputengine_header(ror):
         "    bool                touchReleased(const OIS::MultiTouchEvent& arg) override;\n"
         "    bool                touchCancelled(const OIS::MultiTouchEvent& arg) override;\n"
         "    // Translates one touch into RoR's ordinary mouse path.\n"
-        "    void                IosHandleTouch(int action, float x, float y);\n"
+        "    void                IosHandleTouch(int action, float x, float y, int id = 0);\n"
         "    // Apple/iOS port: draws the on-screen touch controls and applies their state.\n"
         "    void                IosDrawTouchControls(float dt);\n"
         "    // Creates the accelerometer-as-joystick and the multitouch device.\n"
@@ -1929,7 +1929,7 @@ IOS_TOUCH_CONTROLS_HELPERS = r"""#ifdef ROR_PLATFORM_IOS
 namespace {
 
 // A touch that began on a control and keeps driving it until it lifts.
-struct IosTouchPt { float x, y; };
+struct IosTouchPt { float x, y; int id; };
 std::vector<IosTouchPt> s_iosCtlTouches;
 
 // A one-shot ("tap") control: the event is held at 1 briefly so the game's
@@ -2089,8 +2089,17 @@ void IosPanelRect(float& x0, float& y0, float& x1, float& y1)
 // The already-tracked control-touch nearest to (px,py), or -1.  The match
 // radius is tied to the display, not to any one control, so a finger only
 // ever pairs with a touch genuinely close by - and the controls never overlap.
-int IosFindTouch(float W, float H, float px, float py)
+int IosFindTouch(float W, float H, float px, float py, int id)
 {
+    // Exact finger identity first - if OIS carries the UITouch id, use it.
+    if (id != 0)
+    {
+        for (size_t i = 0; i < s_iosCtlTouches.size(); ++i)
+        {
+            if (s_iosCtlTouches[i].id == id)
+                return (int)i;
+        }
+    }
     const float rad  = 0.08f * ((W < H) ? W : H);
     const float rad2 = rad * rad;
     int   best = -1;
@@ -2102,6 +2111,10 @@ int IosFindTouch(float W, float H, float px, float py)
         const float d2 = dx * dx + dy * dy;
         if (d2 <= best_d) { best_d = d2; best = (int)i; }
     }
+    // If no match within the radius but there's exactly one tracked control
+    // touch, claim it - this prevents sticking after fast drags.
+    if (best < 0 && s_iosCtlTouches.size() == 1)
+        return 0;
     return best;
 }
 
@@ -2118,7 +2131,7 @@ void IosPulseEvent(RoR::events ev)
 
 // Track one touch event against the control regions.  Returns true when the
 // touch belongs to a control and must NOT go on to the mouse/ImGui/camera path.
-bool IosControlsHandleTouch(int action, float x, float y)
+bool IosControlsHandleTouch(int action, float x, float y, int id)
 {
     if (!IosControlsActive())
     {
@@ -2159,7 +2172,7 @@ bool IosControlsHandleTouch(int action, float x, float y)
                 IosPulseEvent(RoR::EV_TRUCK_AUTOSHIFT_DOWN);
             }
             else
-                s_iosCtlTouches.push_back({x, y});
+                s_iosCtlTouches.push_back({x, y, id});
             return true;
         }
         // With the panel open, a tap that missed every one of its buttons
@@ -2174,16 +2187,29 @@ bool IosControlsHandleTouch(int action, float x, float y)
         return false;
     }
 
-    const int idx = IosFindTouch(W, H, x, y);
+    const int idx = IosFindTouch(W, H, x, y, id);
     if (action == OIS::MT_Moved)
     {
         if (idx < 0) return false;     // a camera/ImGui finger, not ours
         s_iosCtlTouches[idx].x = x;    // stays a control-finger for its whole life
         s_iosCtlTouches[idx].y = y;
+        if (s_iosCtlTouches[idx].id == 0 && id != 0)
+            s_iosCtlTouches[idx].id = id; // upgrade to exact identity on first move
         return true;
     }
     // Release or cancel.
-    if (idx < 0) return false;
+    if (idx < 0)
+    {
+        // If the finger id is known but we failed to match by id/position, it
+        // still likely belongs to a control finger (stuck tracking). Release the
+        // only tracked touch when there's ambiguity to avoid permanent sticking.
+        if (s_iosCtlTouches.size() == 1)
+        {
+            s_iosCtlTouches.clear();
+            return true;
+        }
+        return false;
+    }
     s_iosCtlTouches.erase(s_iosCtlTouches.begin() + idx);
     return true;
 }
@@ -2702,29 +2728,29 @@ def patch_inputengine(ror):
         "// already handles: MyGUI listens for those, and so does the camera.\n"
         "bool InputEngine::touchMoved(const OIS::MultiTouchEvent& arg)\n"
         "{\n"
-        "    this->IosHandleTouch(OIS::MT_Moved, (float)arg.state.X.abs, (float)arg.state.Y.abs);\n"
+        "    this->IosHandleTouch(OIS::MT_Moved, (float)arg.state.X.abs, (float)arg.state.Y.abs, (int)arg.state.Z.abs);\n"
         "    return true;\n"
         "}\n"
         "\n"
         "bool InputEngine::touchPressed(const OIS::MultiTouchEvent& arg)\n"
         "{\n"
-        "    this->IosHandleTouch(OIS::MT_Pressed, (float)arg.state.X.abs, (float)arg.state.Y.abs);\n"
+        "    this->IosHandleTouch(OIS::MT_Pressed, (float)arg.state.X.abs, (float)arg.state.Y.abs, (int)arg.state.Z.abs);\n"
         "    return true;\n"
         "}\n"
         "\n"
         "bool InputEngine::touchReleased(const OIS::MultiTouchEvent& arg)\n"
         "{\n"
-        "    this->IosHandleTouch(OIS::MT_Released, (float)arg.state.X.abs, (float)arg.state.Y.abs);\n"
+        "    this->IosHandleTouch(OIS::MT_Released, (float)arg.state.X.abs, (float)arg.state.Y.abs, (int)arg.state.Z.abs);\n"
         "    return true;\n"
         "}\n"
         "\n"
         "bool InputEngine::touchCancelled(const OIS::MultiTouchEvent& arg)\n"
         "{\n"
-        "    this->IosHandleTouch(OIS::MT_Cancelled, (float)arg.state.X.abs, (float)arg.state.Y.abs);\n"
+        "    this->IosHandleTouch(OIS::MT_Cancelled, (float)arg.state.X.abs, (float)arg.state.Y.abs, (int)arg.state.Z.abs);\n"
         "    return true;\n"
         "}\n"
         "\n"
-        "void InputEngine::IosHandleTouch(int action, float x, float y)\n"
+        "void InputEngine::IosHandleTouch(int action, float x, float y, int id)\n"
         "{\n"
         "    // The very first touch is the single most useful datum when someone\n"
         "    // reports that the UI does not react at all: it says whether touches\n"
@@ -2747,7 +2773,7 @@ def patch_inputengine(ror):
         "    // Apple/iOS port: touches that land on an on-screen control are\n"
         "    // consumed there (they become input events, not mouse motion); every\n"
         "    // other touch keeps its old meaning below - the camera and ImGui.\n"
-        "    if (IosControlsHandleTouch(action, x, y))\n"
+        "    if (IosControlsHandleTouch(action, x, y, id))\n"
         "    {\n"
         "        return;\n"
         "    }\n"
@@ -3502,6 +3528,8 @@ def patch_gui_manager(ror):
         "    // with the font scale in patch_ogreimgui_overlay (OgreImGuiOverlay.cpp\n"
         "    // addFont) so panels keep the proportions the upstream design used.\n"
         "    style.ScaleAllSizes(1.0f);\n"
+        "    // No system cursor on a touchscreen - hide ImGui's software cursor.\n"
+        "    io.MouseDrawCursor = false;\n"
         "#endif\n"
         "\n"
         "    App::GetGfxScene()->GetSceneManager()->addRenderQueueListener(&m_imgui);\n",
@@ -3509,6 +3537,73 @@ def patch_gui_manager(ror):
     )
 
     write(path, text)
+
+
+def patch_character_material(ror):
+    """resources/materials/character.material: drop ColorChange pass on iOS."""
+    path = os.path.join(ror, "resources", "materials", "character.material")
+    try:
+        text = read(path)
+    except FileNotFoundError:
+        # Try meshes version? probably not needed
+        path = os.path.join(ror, "resources", "meshes", "character.material")
+        try:
+            text = read(path)
+        except FileNotFoundError:
+            return
+    # Replace with single-pass version (keep BaseRender, drop ColorChange)
+    new_text = """import * from "managed_mats.material"
+
+material tracks/character: RoR/Managed_Mats/Base
+{
+\ttechnique BaseTechnique
+\t{
+\t\tpass BaseRender
+\t\t{
+\t\t\tdepth_bias -20
+\t\t\ttexture_unit Diffuse_Map
+\t\t\t{
+\t\t\t\ttexture character.dds
+\t\t\t}
+\t\t}
+\t}
+}
+"""
+    # Only replace if it contains the ColorChange pass
+    if "ColorChange" in text:
+        write(path, new_text)
+        return
+    # If it's already simplified, do nothing
+    if "tracks/character" in text:
+        write(path, new_text)
+        return
+
+
+def patch_gamechatbox(ror):
+    """source/main/gui/panels/GUI_GameChatBox.cpp: iOS-friendly hint."""
+    path = os.path.join(ror, "source", "main", "gui", "panels", "GUI_GameChatBox.cpp")
+    try:
+        text = read(path)
+    except FileNotFoundError:
+        return
+    # Replace the spawn hint
+    old = 'fmt::format(_LC("ChatBox", "Press {} to spawn a vehicle"),\n                   App::GetInputEngine()->getEventCommandTrimmed(EV_COMMON_GET_NEW_VEHICLE))'
+    new = '''#ifdef ROR_PLATFORM_IOS
+                                      std::string("Use the on-screen buttons")
+#else
+                                      fmt::format(_LC("ChatBox", "Press {} to spawn a vehicle"),
+                   App::GetInputEngine()->getEventCommandTrimmed(EV_COMMON_GET_NEW_VEHICLE))
+#endif'''
+    if old in text:
+        text = text.replace(old, new)
+        write(path, text)
+        return
+    # Alternative spacing
+    old2 = 'fmt::format(_LC("ChatBox", "Press {} to spawn a vehicle"),\n                                      App::GetInputEngine()->getEventCommandTrimmed(EV_COMMON_GET_NEW_VEHICLE))'
+    if old2 in text:
+        text = text.replace(old2, new)
+        write(path, text)
+        return
 
 
 def patch_ogreimgui(ror):

@@ -722,6 +722,53 @@ jobs:
             -DOGRE_BUILD_PLATFORM_APPLE_IOS=TRUE \
             2>&1 | tee logs/ois-configure.log
 
+      # OIS's iPhone backend throws the finger identity away.              #
+      #                                                                   #
+      # Each of _touchBegan/_touchEnded/_touchMoved/_touchCancelled      #
+      # builds a fresh MultiTouchState and fills in only X and Y, so      #
+      # the app sees an anonymous coordinate stream: a finger that began  #
+      # on one widget and a finger that began on another are             #
+      # indistinguishable once they have moved.  RoR has to guess which   #
+      # live touch a move or a release belongs to, and a guess that      #
+      # goes wrong leaves an on-screen control stuck down (the release    #
+      # finds nothing to release) while the same finger goes on to swing  #
+      # the camera.                                                       #
+      #                                                                   #
+      # MultiTouchState has an unused Z axis, and this backend never      #
+      # touches it, so carry the UITouch pointer there as a stable        #
+      # per-touch id.  A UITouch object lives exactly as long as the      #
+      # touch it represents, so its address identifies the finger for     #
+      # its whole lifetime; successive touches may reuse an address, but  #
+      # never two that are down at the same time.  RoR reads it back as   #
+      # arg.state.Z.abs and only falls back to proximity matching when it #
+      # is absent, so an old libOIS.a still works, just less well.        #
+      - name: Patch OIS (carry the finger id in MultiTouchState::Z)
+        continue-on-error: true
+        run: |
+          python3 - <<'PY'
+          import io, sys
+
+          path = "ois/src/iphone/iPhoneMultiTouch.mm"
+          src = io.open(path, encoding="utf-8").read()
+
+          needle = "        MultiTouchState newState;\n"
+          inject = (
+              "        MultiTouchState newState;\n"
+              "        // Rigs of Rods iOS port: identify the finger.  See the\n"
+              "        // 'Patch OIS' step in build-ios-deps.yml for the why.\n"
+              "        newState.Z.abs = (int)(intptr_t)touch;\n"
+          )
+
+          count = src.count(needle)
+          if count != 4:
+              sys.exit("expected 4 'MultiTouchState newState;' lines, found %d" % count)
+
+          src = src.replace(needle, inject)
+          io.open(path, "w", encoding="utf-8", newline="").write(src)
+          print("patched %d touch methods" % count)
+          PY
+          grep -c 'newState.Z.abs' ois/src/iphone/iPhoneMultiTouch.mm
+
       - name: Build + install OIS
         continue-on-error: true
         run: |
