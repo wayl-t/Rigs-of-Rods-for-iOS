@@ -779,6 +779,8 @@ def patch_repository_http(ror):
         "#endif // ROR_PLATFORM_IOS\n"
         "\n"
         "#include <fstream>\n"
+        "#include <filesystem>\n"
+        "#include <filesystem>\n"
         "#include <imgui.h>\n",
         "GUI_RepositorySelector.cpp: include ios_platform.h",
     )
