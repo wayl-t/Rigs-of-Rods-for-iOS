@@ -194,11 +194,8 @@ def patch_main_cmake(ror):
         "    target_compile_definitions(${BINNAME} PRIVATE ROR_PLATFORM_IOS)\n"
         "    target_include_directories(${BINNAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ios)\n"
         "    target_sources(${BINNAME} PRIVATE ios/ios_main.mm ios/ios_platform.mm)\n"
-        "    # C++17 is required for std::filesystem used by the repo\n"
-        "    # .part -> .zip installer (patch_repo_selector).\n"
-        "    set_target_properties(${BINNAME} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)\n"
         "endif ()\n",
-        "main/CMakeLists.txt OIS include/link + iOS platform layer + C++17",
+        "main/CMakeLists.txt OIS include/link + iOS platform layer",
     )
     write(path, text)
 
@@ -782,8 +779,6 @@ def patch_repository_http(ror):
         "#endif // ROR_PLATFORM_IOS\n"
         "\n"
         "#include <fstream>\n"
-        "#include <filesystem>\n"
-        "#include <filesystem>\n"
         "#include <imgui.h>\n",
         "GUI_RepositorySelector.cpp: include ios_platform.h",
     )
@@ -1277,18 +1272,18 @@ def patch_repo_selector(ror):
     """
     path = os.path.join(ror, "source", "main", "gui", "panels", "GUI_RepositorySelector.cpp")
     text = read(path)
-    # Add filesystem includes for robust rename on iOS.
-    # Upstream has no <fstream> include, so add them after the header include.
-    if "#include <filesystem>" not in text:
+    # Add cstdio include for std::remove() used by the robust .part->zip
+    # installer on iOS (no std::filesystem - that requires C++17 which breaks
+    # OIS headers that still use std::unary_function, removed in C++17).
+    if "#include <cstdio>" not in text:
         text = must_replace(
             text,
             '#include "GUI_RepositorySelector.h"\n'
             '#include "Application.h"\n',
             '#include "GUI_RepositorySelector.h"\n'
             '#include "Application.h"\n'
-            '#include <filesystem>\n'
-            '#include <system_error>\n',
-            "GUI_RepositorySelector.cpp filesystem includes",
+            '#include <cstdio>\n',
+            "GUI_RepositorySelector.cpp cstdio include",
         )
     # 1) ShowError(): the message itself is fine without cURL, only the
     #    curl_result/curl_easy_strerror bits are not.
@@ -1381,25 +1376,16 @@ def patch_repo_selector(ror):
         "            }\n"
         "#ifdef ROR_PLATFORM_IOS\n"
         "            {\n"
-        "                std::error_code ec;\n"
-        "                if (!FileExists(request->rfir_filepath) && std::filesystem::exists(part_path))\n"
+        "                if (!FileExists(request->rfir_filepath) && FileExists(part_path))\n"
         "                {\n"
-        "                    std::filesystem::rename(part_path, request->rfir_filepath, ec);\n"
-        "                    if (ec || !FileExists(request->rfir_filepath))\n"
+        "                    Ogre::FileSystemLayer::renameFile(part_path, request->rfir_filepath);\n"
+        "                    if (!FileExists(request->rfir_filepath) && FileExists(part_path))\n"
         "                    {\n"
-        "                        ec.clear();\n"
-        "                        if (std::filesystem::exists(part_path))\n"
-        "                        {\n"
-        "                            try\n"
-        "                            {\n"
-        "                                std::filesystem::copy_file(part_path, request->rfir_filepath, std::filesystem::copy_options::overwrite_existing, ec);\n"
-        "                                if (!ec && FileExists(request->rfir_filepath))\n"
-        "                                {\n"
-        "                                    std::filesystem::remove(part_path, ec);\n"
-        "                                }\n"
-        "                            }\n"
-        "                            catch (...) {}\n"
-        "                        }\n"
+        "                        // rename failed: copy+delete fallback\n"
+        "                        std::ifstream src(part_path, std::ios::binary);\n"
+        "                        std::ofstream dst(request->rfir_filepath, std::ios::binary);\n"
+        "                        dst << src.rdbuf();\n"
+        "                        std::remove(part_path.c_str());\n"
         "                    }\n"
         "                }\n"
         "                if (!FileExists(request->rfir_filepath))\n"
@@ -1407,7 +1393,7 @@ def patch_repo_selector(ror):
         "                    Ogre::FileSystemLayer::renameFile(part_path, request->rfir_filepath);\n"
         "                }\n"
         "                Ogre::LogManager::getSingleton().stream()\n"
-        "                    << \"[RoR|Repository] install: part_exists=\" << (std::filesystem::exists(part_path) ? 1 : 0)\n"
+        "                    << \"[RoR|Repository] install: part_exists=\" << (FileExists(part_path) ? 1 : 0)\n"
         "                    << \" zip_exists=\" << (FileExists(request->rfir_filepath) ? 1 : 0);\n"
         "            }\n"
         "#else\n"
