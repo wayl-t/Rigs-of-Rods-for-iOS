@@ -2821,7 +2821,7 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
         out.push_back({RoR::EV_CHARACTER_RUN,              IOS_HELD,   0.800f, 0.600f, 0.190f, 0.170f, "RUN"});
         out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_TOGGLE, 0.800f, 0.780f, 0.190f, 0.200f, "ENTER"});
         // The mod repository, top-left corner.
-        out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_REPO, 0.030f, 0.040f, 0.130f, 0.095f, "REPO"});
+        out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_REPO, 0.030f, 0.160f, 0.130f, 0.095f, "REPO"});
     }
 }
 
