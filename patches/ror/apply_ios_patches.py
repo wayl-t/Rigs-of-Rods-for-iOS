@@ -4349,35 +4349,13 @@ def patch_ffplib_lighting(ror):
 
 
 def patch_character_material(ror):
-    """resources/materials/character.material: drop the ColorChange pass on iOS.
-
-    ``tracks/character`` derives from ``RoR/Managed_Mats/Base``, and that
-    inheritance is what supplies the technique (``Shadows/managed/base_receiver``)
-    and therefore the RTSS shader generation every other material in the scene
-    uses.  So the file is edited surgically - only the offending pass is
-    removed - instead of being rewritten, which would silently change the
-    shading path along with the fix.
-
-    The pass that has to go is ``ColorChange``:
-
-        pass ColorChange
-        {
-            scene_blend alpha_blend
-            texture_unit { texture character-alpha.png }
-            texture_unit { colour_op_ex blend_current_alpha src_manual src_current 0 0 0 }
-        }
-
-    Its job is to tint the body with the player's chosen colour, and it does it
-    with fixed-function texture blending.  GLES2 has no fixed function at all -
-    the RTSS translation of ``colour_op_ex ... src_manual 0 0 0`` multiplies the
-    whole mesh by (0,0,0), which is exactly the solid black character seen on
-    the device (the nearest black object always wins the depth test, so the
-    body reads as a black silhouette).  The tint is cosmetic; losing it is the
-    fix.
-    """
+    """resources/materials/character.material: fix character lighting on iOS."""
     path = os.path.join(ror, "resources", "materials", "character.material")
+    if not os.path.exists(path):
+        return
     text = read(path)
-
+    
+    # Remove ColorChange pass if present
     color_pass = (
         "\t\tpass ColorChange\n"
         "\t\t{\n"
@@ -4392,27 +4370,27 @@ def patch_character_material(ror):
         "\t\t\t}\n"
         "\t\t}\n"
     )
-    text = must_replace(text, color_pass, "", "character.material: ColorChange pass")
-    # Ensure base pass is fully lit to avoid black character on iOS/GLES2
-    try:
-        text = text.replace(
-            "\tmaterial tracks/character : RoR/Managed_Mats/Base\n"
-            "\t{\n",
-            "\tmaterial tracks/character : RoR/Managed_Mats/Base\n"
-            "\t{\n"
-            "\t\ttechnique\n"
-            "\t\t{\n"
-            "\t\t\tpass\n"
-            "\t\t\t{\n"
-            "\t\t\t\tlighting off\n"
-            "\t\t\t\tambient 1 1 1 1\n"
-            "\t\t\t\tdiffuse 1 1 1 1\n"
-            "\t\t\t\temissive 1 1 1 1\n"
-            "\t\t\t}\n"
-            "\t\t}\n"
-        )
-    except Exception:
-        pass
+    if color_pass in text:
+        text = text.replace(color_pass, "")
+    
+    # Make character fully self-lit for iOS/GLES2
+    text = text.replace(
+        "\tmaterial tracks/character : RoR/Managed_Mats/Base\n"
+        "\t{\n",
+        "\tmaterial tracks/character : RoR/Managed_Mats/Base\n"
+        "\t{\n"
+        "\t\ttechnique\n"
+        "\t\t{\n"
+        "\t\t\tpass\n"
+        "\t\t\t{\n"
+        "\t\t\t\tlighting off\n"
+        "\t\t\t\tambient 1 1 1\n"
+        "\t\t\t\tdiffuse 1 1 1\n"
+        "\t\t\t\temissive 1 1 1\n"
+        "\t\t\t\tscene_blend alpha_blend\n"
+        "\t\t\t}\n"
+        "\t\t}\n"
+    )
     write(path, text)
 
 
