@@ -2459,10 +2459,11 @@ def patch_main_cpp(ror):
          "                            (int)App::app_state->getEnum<AppState>());\n"
          "#endif\n",
          "MSG_GUI_CLOSE_MENU_REQUESTED"),
-        ("App::GetGuiManager()->MainSelector.Show(*type, std::string());\n",
+        ("App::GetGuiManager()->MainSelector.Show(*type, m.description);\n",
          "#ifdef ROR_PLATFORM_IOS\n"
          '                        RoR_IosTrace("[RoR|GUI] handler OPEN_SELECTOR: MainSelector.Show(type=%d), state=%d",\n'
          "                            (int)*type, (int)App::app_state->getEnum<AppState>());\n"
+         "                        App::GetGuiManager()->MainSelector.Show(*type, std::string());\n"
          "#endif\n",
          "MSG_GUI_OPEN_SELECTOR_REQUESTED"),
         ("                case MSG_GUI_CLOSE_SELECTOR_REQUESTED:\n"
