@@ -1274,6 +1274,19 @@ def patch_repo_selector(ror):
     """
     path = os.path.join(ror, "source", "main", "gui", "panels", "GUI_RepositorySelector.cpp")
     text = read(path)
+    # Add filesystem includes for robust rename on iOS.
+    # Upstream has no <fstream> include, so add them after the header include.
+    if "#include <filesystem>" not in text:
+        text = must_replace(
+            text,
+            '#include "GUI_RepositorySelector.h"\n'
+            '#include "Application.h"\n',
+            '#include "GUI_RepositorySelector.h"\n'
+            '#include "Application.h"\n'
+            '#include <filesystem>\n'
+            '#include <system_error>\n',
+            "GUI_RepositorySelector.cpp filesystem includes",
+        )
     # 1) ShowError(): the message itself is fine without cURL, only the
     #    curl_result/curl_easy_strerror bits are not.
     text = must_replace(
@@ -1346,6 +1359,67 @@ def patch_repo_selector(ror):
         "            }\n"
         "#endif // USE_CURL\n",
         "GUI_RepositorySelector.cpp image download curl block",
+    )
+    # 3) InstallDownloadedRepoFile: handle .part -> .zip rename robustly on iOS
+    text = must_replace(
+        text,
+        "            ROR_ASSERT(FileExists(request->rfir_filepath + \".part\"));\n"
+        "            if (FileExists(request->rfir_filepath))\n"
+        "            {\n"
+        "                Ogre::FileSystemLayer::removeFile(request->rfir_filepath);\n"
+        "            }\n"
+        "            Ogre::FileSystemLayer::renameFile(request->rfir_filepath + \".part\", request->rfir_filepath);\n"
+        "            App::GetCacheSystem()->ParseSingleZip(request->rfir_filepath);\n",
+        "            const std::string part_path = request->rfir_filepath + \".part\";\n"
+        "            ROR_ASSERT(FileExists(part_path));\n"
+        "            if (FileExists(request->rfir_filepath))\n"
+        "            {\n"
+        "                Ogre::FileSystemLayer::removeFile(request->rfir_filepath);\n"
+        "            }\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "            {\n"
+        "                std::error_code ec;\n"
+        "                if (!FileExists(request->rfir_filepath) && std::filesystem::exists(part_path))\n"
+        "                {\n"
+        "                    std::filesystem::rename(part_path, request->rfir_filepath, ec);\n"
+        "                    if (ec || !FileExists(request->rfir_filepath))\n"
+        "                    {\n"
+        "                        ec.clear();\n"
+        "                        if (std::filesystem::exists(part_path))\n"
+        "                        {\n"
+        "                            try\n"
+        "                            {\n"
+        "                                std::filesystem::copy_file(part_path, request->rfir_filepath, std::filesystem::copy_options::overwrite_existing, ec);\n"
+        "                                if (!ec && FileExists(request->rfir_filepath))\n"
+        "                                {\n"
+        "                                    std::filesystem::remove(part_path, ec);\n"
+        "                                }\n"
+        "                            }\n"
+        "                            catch (...) {}\n"
+        "                        }\n"
+        "                    }\n"
+        "                }\n"
+        "                if (!FileExists(request->rfir_filepath))\n"
+        "                {\n"
+        "                    Ogre::FileSystemLayer::renameFile(part_path, request->rfir_filepath);\n"
+        "                }\n"
+        "                Ogre::LogManager::getSingleton().stream()\n"
+        "                    << \"[RoR|Repository] install: part_exists=\" << (std::filesystem::exists(part_path) ? 1 : 0)\n"
+        "                    << \" zip_exists=\" << (FileExists(request->rfir_filepath) ? 1 : 0);\n"
+        "            }\n"
+        "#else\n"
+        "            Ogre::FileSystemLayer::renameFile(part_path, request->rfir_filepath);\n"
+        "#endif\n"
+        "            if (!FileExists(request->rfir_filepath))\n"
+        "            {\n"
+        "                Ogre::LogManager::getSingleton().stream()\n"
+        "                    << \"[RoR|Repository] install: failed to rename part to zip, aborting ParseSingleZip for \" << request->rfir_filepath;\n"
+        "            }\n"
+        "            else\n"
+        "            {\n"
+        "                App::GetCacheSystem()->ParseSingleZip(request->rfir_filepath);\n"
+        "            }\n",
+        "GUI_RepositorySelector.cpp install part rename",
     )
     write(path, text)
 
@@ -4258,6 +4332,26 @@ def patch_gui_manager(ror):
     write(path, text)
 
 
+def patch_ffplib_lighting(ror):
+    """resources/rtshader/FFPLib_Lighting.glsl: fix normal transform for RTSS."""
+    candidates = [
+        os.path.join(ror, "resources", "rtshader", "FFPLib_Lighting.glsl"),
+        os.path.join(ror, "resources", "rtshader", "core", "FFPLib_Lighting.glsl"),
+        os.path.join(ror, "Resources", "rtshader", "FFPLib_Lighting.glsl"),
+        os.path.join(ror, "media", "rtshader", "FFPLib_Lighting.glsl"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                text = read(path)
+                orig = text
+                text = text.replace("vec4(vNormal.xyz, 1.0)", "vec4(vNormal.xyz, 0.0)")
+                if text != orig:
+                    write(path, text)
+            except Exception:
+                pass
+
+
 def patch_character_material(ror):
     """resources/materials/character.material: drop the ColorChange pass on iOS.
 
@@ -4303,6 +4397,26 @@ def patch_character_material(ror):
         "\t\t}\n"
     )
     text = must_replace(text, color_pass, "", "character.material: ColorChange pass")
+    # Ensure base pass is fully lit to avoid black character on iOS/GLES2
+    try:
+        text = text.replace(
+            "\tmaterial tracks/character : RoR/Managed_Mats/Base\n"
+            "\t{\n",
+            "\tmaterial tracks/character : RoR/Managed_Mats/Base\n"
+            "\t{\n"
+            "\t\ttechnique\n"
+            "\t\t{\n"
+            "\t\t\tpass\n"
+            "\t\t\t{\n"
+            "\t\t\t\tlighting off\n"
+            "\t\t\t\tambient 1 1 1 1\n"
+            "\t\t\t\tdiffuse 1 1 1 1\n"
+            "\t\t\t\temissive 1 1 1 1\n"
+            "\t\t\t}\n"
+            "\t\t}\n"
+        )
+    except Exception:
+        pass
     write(path, text)
 
 
@@ -5811,6 +5925,7 @@ def main():
     # replaces it.  See patch_repository_http().
     patch_repository_http(args.ror_dir)
     patch_repo_selector(args.ror_dir)
+    patch_ffplib_lighting(args.ror_dir)
     patch_multiplayer_selector(args.ror_dir)
     patch_game_settings_alc(args.ror_dir)
     patch_inputengine_header(args.ror_dir)
