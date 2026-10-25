@@ -194,8 +194,11 @@ def patch_main_cmake(ror):
         "    target_compile_definitions(${BINNAME} PRIVATE ROR_PLATFORM_IOS)\n"
         "    target_include_directories(${BINNAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ios)\n"
         "    target_sources(${BINNAME} PRIVATE ios/ios_main.mm ios/ios_platform.mm)\n"
+        "    # C++17 is required for std::filesystem used by the repo\n"
+        "    # .part -> .zip installer (patch_repo_selector).\n"
+        "    set_target_properties(${BINNAME} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)\n"
         "endif ()\n",
-        "main/CMakeLists.txt OIS include/link + iOS platform layer",
+        "main/CMakeLists.txt OIS include/link + iOS platform layer + C++17",
     )
     write(path, text)
 
