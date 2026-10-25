@@ -70,6 +70,13 @@ def must_replace(text, old, new, what):
     return text.replace(old, new, 1)
 
 
+def try_replace(text, old, new, what):
+    if old not in text:
+        print("WARNING: expected source text not found: %s" % what, file=sys.stderr)
+        return text
+    return text.replace(old, new, 1)
+
+
 def patch_conanfile(ror, minimal_deps=False):
     path = os.path.join(ror, "conanfile.py")
     text = read(path)
@@ -1271,20 +1278,20 @@ def patch_repo_selector(ror):
     work without libcurl anyway.
     """
     path = os.path.join(ror, "source", "main", "gui", "panels", "GUI_RepositorySelector.cpp")
+    if not os.path.exists(path):
+        print("WARNING: GUI_RepositorySelector.cpp not found, skipping repo selector patches", file=sys.stderr)
+        return
     text = read(path)
     # Add cstdio include for std::remove() used by the robust .part->zip
     # installer on iOS (no std::filesystem - that requires C++17 which breaks
     # OIS headers that still use std::unary_function, removed in C++17).
     if "#include <cstdio>" not in text:
-        text = must_replace(
-            text,
-            '#include "GUI_RepositorySelector.h"\n'
-            '#include "Application.h"\n',
-            '#include "GUI_RepositorySelector.h"\n'
-            '#include "Application.h"\n'
-            '#include <cstdio>\n',
-            "GUI_RepositorySelector.cpp cstdio include",
-        )
+        old = '#include "GUI_RepositorySelector.h"\n' '#include "Application.h"\n'
+        new = '#include "GUI_RepositorySelector.h"\n' '#include "Application.h"\n' '#include <cstdio>\n'
+        if old in text:
+            text = text.replace(old, new, 1)
+        else:
+            text = '#include <cstdio>\n' + text
     # 1) ShowError(): the message itself is fine without cURL, only the
     #    curl_result/curl_easy_strerror bits are not.
     text = must_replace(
