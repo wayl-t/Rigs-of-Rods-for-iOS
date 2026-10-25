@@ -1,10 +1,14 @@
-# Rigs of Rods — iOS
+# Rigs of Rods for iOS
 
 [![Latest Release](https://img.shields.io/github/v/release/wayl-t/ror-ios?label=latest&color=blue)](https://github.com/wayl-t/ror-ios/releases)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/wayl-t/ror-ios/build-ror-ios.yml?branch=main)](https://github.com/wayl-t/ror-ios/actions)
 [![License](https://img.shields.io/badge/license-GPLv3-green.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-**Нативный порт [Rigs of Rods](https://www.rigsofrods.org/) на iPhone.** Полный исходный код игры, адаптированный под iOS с нуля. Не ремейк и не эмулятор.
+This is an **unofficial native iOS port** of [**Rigs of Rods**](https://www.rigsofrods.org/), the open source soft-body physics vehicle simulator. 
+
+**All credit for the original game goes to the [Rigs of Rods Team](https://www.rigsofrods.org/credits).** This repository adapts the full upstream game codebase for iOS (arm64) with touch controls, a custom build pipeline, and sideloadable IPA distribution.
+
+> This is not a remake. The full Rigs of Rods source is compiled here with iOS-specific patches (`patches/ror/apply_ios_patches.py`).
 
 Сборка полностью автоматизирована на **бесплатных** macOS-раннерах GitHub Actions — без Mac, без платного Apple Developer аккаунта. Установка через сайдлоад (SideStore, ESIGN, Sideloadly).
 
@@ -252,7 +256,11 @@ ror-ios/
 - [ ] Тени: PSSM на GLES2 или альтернатива
 - [ ] Раскладка под iPad (иконки уже есть)
 
-## Лицензия
+## Credits
 
-Rigs of Rods распространяется под **GPLv3**: в App Store такое приложение
-не опубликовать, а сайдлоад на свой телефон — можно.
+- **Original game:** [Rigs of Rods](https://www.rigsofrods.org/) by the [Rigs of Rods Team](https://www.rigsofrods.org/credits) — licensed under GPLv3
+- **iOS port & build pipeline:** this repository
+
+## License
+
+Rigs of Rods is distributed under the **GPLv3** license. This iOS port follows the same license. Distribution via App Store is not possible due to licensing restrictions, but sideloading is permitted.
