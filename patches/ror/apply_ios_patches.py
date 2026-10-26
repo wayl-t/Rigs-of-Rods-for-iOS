@@ -4379,8 +4379,8 @@ def patch_character_material(ror):
     # str.replace(), so the mismatch silently left the default lit technique in
     # place and RTSS generated lighting=1 for the avatar on the device.
     material_anchor = (
-        "\tmaterial tracks/character: RoR/Managed_Mats/Base\n"
-        "\t{\n"
+        "material tracks/character: RoR/Managed_Mats/Base\n"
+        "{\n"
     )
     material_replacement = material_anchor + (
         "\t\ttechnique\n"
