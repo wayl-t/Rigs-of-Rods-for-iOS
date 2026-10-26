@@ -2667,6 +2667,9 @@ def patch_inputengine_header(ror):
 # calls straight into it and C++ needs every helper declared before first use.
 IOS_TOUCH_CONTROLS_HELPERS = r"""#ifdef ROR_PLATFORM_IOS
 #include <imgui.h> // drawn with ImGui's foreground draw list
+#include <cstdio>
+#include "Actor.h"
+#include "Engine.h"
 // App::GetGameContext()->GetPlayerActor() needs the complete GameContext type;
 // nothing else in this translation unit pulls this header in.
 #include "GameContext.h"
@@ -2689,13 +2692,14 @@ float s_iosJoyY  = 0.f;   // -1 = up (forward) .. +1 = down (back)
 
 // The vehicle-systems panel opened by the "VEH" button - open or closed.
 bool s_iosPanel = false;
+int s_iosPanelPage = 0;
 
 // IOS_PANEL: the VEH button itself - a pure UI toggle, drives no event.
 // IOS_GUP / IOS_GDN: gear buttons that pulse TWO events each - both the
 // sequential pair (EV_TRUCK_SHIFT_UP/DOWN) and the automatic pair
 // (EV_TRUCK_AUTOSHIFT_UP/DOWN) - because Engine.cpp reads only the pair
 // matching the current gearbox mode, and either mode may be active.
-enum IosCtlKind { IOS_STEER, IOS_JOY, IOS_HELD, IOS_TOGGLE, IOS_PANEL, IOS_GUP, IOS_GDN, IOS_REPO };
+enum IosCtlKind { IOS_STEER, IOS_JOY, IOS_HELD, IOS_TOGGLE, IOS_PANEL, IOS_GUP, IOS_GDN, IOS_REPO, IOS_MENU, IOS_TAB0, IOS_TAB1, IOS_TAB2 };
 
 struct IosCtl {
     RoR::events ev;      // the event this control drives (STEER/JOY drive several)
@@ -2744,7 +2748,7 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
     {
         // Steering: an absolute-position bar.  Left of centre = steer left,
         // right of centre = steer right, amount = distance from centre.
-        out.push_back({RoR::EV_TRUCK_STEER_LEFT, IOS_STEER, 0.030f, 0.720f, 0.400f, 0.250f, "<  STEER  >"});
+        out.push_back({RoR::EV_TRUCK_STEER_LEFT, IOS_STEER, 0.045f, 0.590f, 0.150f, 0.360f, "STEER"});
         // Pedals under the right thumb.
         out.push_back({RoR::EV_TRUCK_ACCELERATE, IOS_HELD,   0.845f, 0.360f, 0.150f, 0.300f, "GAS"});
         out.push_back({RoR::EV_TRUCK_BRAKE,      IOS_HELD,   0.845f, 0.680f, 0.150f, 0.300f, "BRK"});
@@ -2756,71 +2760,53 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
         out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_TOGGLE, ux + 3.f * uw, uy, uw, uh, "EXIT"});
         out.push_back({RoR::EV_TRUCK_STARTER,              IOS_HELD,   ux + 4.f * uw, uy, uw, uh, "STRT"});
         // Turn signals and hazard flasher - the left-thumb zone above the bar.
-        const float bx = 0.030f, bw = 0.115f, by = 0.560f, bh = 0.130f;
+        const float bx = 0.030f, bw = 0.115f, by = 0.405f, bh = 0.120f;
         out.push_back({RoR::EV_TRUCK_BLINK_LEFT,  IOS_TOGGLE, bx,                          by, bw, bh, "BL<"});
         out.push_back({RoR::EV_TRUCK_BLINK_WARN,  IOS_TOGGLE, bx + (bw + 0.010f),          by, bw, bh, "HAZ"});
         out.push_back({RoR::EV_TRUCK_BLINK_RIGHT, IOS_TOGGLE, bx + 2.f * (bw + 0.010f),    by, bw, bh, "BL>"});
         // The vehicle-systems panel switch, top-right above the pedals.
         // ("ev" is ignored for IOS_PANEL - the field only has to be filled.)
-        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_PANEL, 0.845f, 0.050f, 0.150f, 0.240f, "VEH"});
+        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_PANEL, 0.840f, 0.045f, 0.125f, 0.090f, "VEH"});
+        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_MENU, 0.030f, 0.045f, 0.120f, 0.090f, "MENU"});
         // The mod repository, next to the dashboard's speedometer (which the
         // iOS dashboard puts in the top left corner).  ("ev" is ignored for
         // IOS_REPO as well - the button opens a panel, it drives no event.)
         out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_REPO, 0.245f, 0.040f, 0.130f, 0.095f, "REPO"});
-        // The panel itself: a 5x4 grid over the empty middle of the screen
-        // holding every remaining unit of the truck - lights, sound, gearbox,
-        // differentials, transfer case, clutch, trailer brake, cruise control
-        // and the truck's own command functions - shown while "VEH" is on.
+        // Three pages keep each vehicle control large enough for touch.
         if (s_iosPanel)
         {
             struct IosPanelCell { RoR::events ev; IosCtlKind kind; const char* label; };
-            static const IosPanelCell cells[] =
-            {   // lights / sound / camera
-                {RoR::EV_TRUCK_LIGHTTOGGLE01,             IOS_TOGGLE, "L1"},
-                {RoR::EV_TRUCK_LIGHTTOGGLE02,             IOS_TOGGLE, "L2"},
-                {RoR::EV_COMMON_TOGGLE_TRUCK_BEACONS,     IOS_TOGGLE, "BCN"},
-                {RoR::EV_TRUCK_HORN,                      IOS_HELD,   "HRN"},
-                {RoR::EV_CAMERA_CHANGE,                   IOS_TOGGLE, "CAM"},
-                // gearbox: mode, up, down, neutral, reverse
-                {RoR::EV_TRUCK_SWITCH_SHIFT_MODES,        IOS_TOGGLE, "A/M"},
-                {RoR::EV_TRUCK_SHIFT_UP,                  IOS_GUP,    "G+"},
-                {RoR::EV_TRUCK_SHIFT_DOWN,                IOS_GDN,    "G-"},
-                {RoR::EV_TRUCK_SHIFT_NEUTRAL,             IOS_TOGGLE, "N"},
-                {RoR::EV_TRUCK_SHIFT_GEAR_REVERSE,        IOS_TOGGLE, "RVS"},
-                // drivetrain: differentials, transfer case, clutch, trailer brake
-                {RoR::EV_TRUCK_TOGGLE_INTER_AXLE_DIFF,    IOS_TOGGLE, "AXD"},
-                {RoR::EV_TRUCK_TOGGLE_INTER_WHEEL_DIFF,   IOS_TOGGLE, "WHD"},
-                {RoR::EV_TRUCK_TOGGLE_TCASE_4WD_MODE,     IOS_TOGGLE, "T4W"},
-                {RoR::EV_TRUCK_MANUAL_CLUTCH,             IOS_HELD,   "CLT"},
-                {RoR::EV_TRUCK_TRAILER_PARKING_BRAKE,     IOS_TOGGLE, "TPK"},
-                // cruise control and the truck's own command functions
-                {RoR::EV_TRUCK_CRUISE_CONTROL,            IOS_TOGGLE, "CRZ"},
-                {RoR::EV_TRUCK_CRUISE_CONTROL_ACCL,       IOS_HELD,   "CR+"},
-                {RoR::EV_TRUCK_CRUISE_CONTROL_DECL,       IOS_HELD,   "CR-"},
-                {RoR::EV_COMMANDS_01,                     IOS_HELD,   "C1"},
-                {RoR::EV_COMMANDS_02,                     IOS_HELD,   "C2"},
-            };
-            const float px0 = 0.442f, pw = 0.070f, pgap  = 0.008f;
-            const float py0 = 0.075f, ph = 0.140f, pgapy = 0.012f;
-            for (size_t i = 0; i < sizeof(cells) / sizeof(cells[0]); ++i)
+            static const IosPanelCell pages[3][9] =
             {
-                const float col = (float)(i % 5);
-                const float row = (float)(i / 5);
-                out.push_back({cells[i].ev, cells[i].kind,
-                               px0 + col * (pw + pgap),
-                               py0 + row * (ph + pgapy),
-                               pw, ph, cells[i].label});
+                { {RoR::EV_TRUCK_LIGHTTOGGLE01, IOS_TOGGLE, "LIGHT 1"}, {RoR::EV_TRUCK_LIGHTTOGGLE02, IOS_TOGGLE, "LIGHT 2"}, {RoR::EV_COMMON_TOGGLE_TRUCK_BEACONS, IOS_TOGGLE, "BEACONS"}, {RoR::EV_TRUCK_HORN, IOS_HELD, "HORN"}, {RoR::EV_CAMERA_CHANGE, IOS_TOGGLE, "CAMERA"}, {RoR::EV_TRUCK_BLINK_LEFT, IOS_TOGGLE, "SIGNAL L"}, {RoR::EV_TRUCK_BLINK_WARN, IOS_TOGGLE, "HAZARDS"}, {RoR::EV_TRUCK_BLINK_RIGHT, IOS_TOGGLE, "SIGNAL R"}, {RoR::EV_TRUCK_LIGHTTOGGLE03, IOS_TOGGLE, "LIGHT 3"} },
+                { {RoR::EV_TRUCK_SWITCH_SHIFT_MODES, IOS_TOGGLE, "AUTO / MAN"}, {RoR::EV_TRUCK_SHIFT_UP, IOS_GUP, "GEAR +"}, {RoR::EV_TRUCK_SHIFT_DOWN, IOS_GDN, "GEAR -"}, {RoR::EV_TRUCK_SHIFT_NEUTRAL, IOS_TOGGLE, "NEUTRAL"}, {RoR::EV_TRUCK_SHIFT_GEAR_REVERSE, IOS_TOGGLE, "REVERSE"}, {RoR::EV_TRUCK_TOGGLE_INTER_AXLE_DIFF, IOS_TOGGLE, "AXLE DIFF"}, {RoR::EV_TRUCK_TOGGLE_INTER_WHEEL_DIFF, IOS_TOGGLE, "WHEEL DIFF"}, {RoR::EV_TRUCK_TOGGLE_TCASE_4WD_MODE, IOS_TOGGLE, "4WD"}, {RoR::EV_TRUCK_PARKING_BRAKE, IOS_TOGGLE, "PARKING"} },
+                { {RoR::EV_TRUCK_MANUAL_CLUTCH, IOS_HELD, "CLUTCH"}, {RoR::EV_TRUCK_TRAILER_PARKING_BRAKE, IOS_TOGGLE, "TRAILER"}, {RoR::EV_TRUCK_CRUISE_CONTROL, IOS_TOGGLE, "CRUISE"}, {RoR::EV_TRUCK_CRUISE_CONTROL_ACCL, IOS_HELD, "CRUISE +"}, {RoR::EV_TRUCK_CRUISE_CONTROL_DECL, IOS_HELD, "CRUISE -"}, {RoR::EV_COMMANDS_01, IOS_HELD, "COMMAND 1"}, {RoR::EV_COMMANDS_02, IOS_HELD, "COMMAND 2"}, {RoR::EV_TRUCK_TOGGLE_CONTACT, IOS_TOGGLE, "IGNITION"}, {RoR::EV_TRUCK_STARTER, IOS_HELD, "START"} }
+            };
+            const char* tab_names[] = {"LIGHTS", "DRIVE", "EXTRAS"};
+            const IosCtlKind tab_kinds[] = {IOS_TAB0, IOS_TAB1, IOS_TAB2};
+            const float px0 = 0.375f, pw = 0.132f, pgap = 0.012f;
+            const float py0 = 0.310f, ph = 0.145f, pgapy = 0.018f;
+            for (int col = 0; col < 3; ++col)
+                out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, tab_kinds[col], px0 + col * (pw + pgap), 0.185f, pw, 0.085f, tab_names[col]});
+            for (size_t i = 0; i < 9; ++i)
+            {
+                const float col = (float)(i % 3);
+                const float row = (float)(i / 3);
+                out.push_back({pages[s_iosPanelPage][i].ev, pages[s_iosPanelPage][i].kind,
+                               px0 + col * (pw + pgap), py0 + row * (ph + pgapy),
+                               pw, ph, pages[s_iosPanelPage][i].label});
             }
         }
     }
     else
     {
-        // On foot: a walking/turning joystick under the left thumb...
-        out.push_back({RoR::EV_CHARACTER_FORWARD, IOS_JOY, 0.040f, 0.470f, 0.340f, 0.500f, "FLY"});
+        // Compact virtual stick under the left thumb.
+        out.push_back({RoR::EV_CHARACTER_FORWARD, IOS_JOY, 0.045f, 0.620f, 0.150f, 0.330f, "FLY"});
         // Free-camera altitude controls under the right thumb.
-        out.push_back({RoR::EV_CAMERA_UP,                IOS_HELD,   0.800f, 0.420f, 0.190f, 0.170f, "UP"});
-        out.push_back({RoR::EV_CAMERA_DOWN,              IOS_HELD,   0.800f, 0.600f, 0.190f, 0.170f, "DOWN"});
-        out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_TOGGLE, 0.800f, 0.780f, 0.190f, 0.200f, "ENTER"});
+        out.push_back({RoR::EV_CAMERA_UP,                IOS_HELD,   0.835f, 0.510f, 0.125f, 0.145f, "UP"});
+        out.push_back({RoR::EV_CAMERA_DOWN,              IOS_HELD,   0.835f, 0.680f, 0.125f, 0.145f, "DOWN"});
+        out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_TOGGLE, 0.835f, 0.850f, 0.125f, 0.120f, "ENTER"});
+        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_MENU, 0.030f, 0.045f, 0.120f, 0.090f, "MENU"});
         // The mod repository, top-left corner.
         out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_REPO, 0.030f, 0.160f, 0.130f, 0.095f, "REPO"});
     }
@@ -2837,7 +2823,7 @@ bool IosPtIn(const IosCtl& c, float W, float H, float px, float py)
 // inside are swallowed so they can't swing the camera behind the panel).
 void IosPanelRect(float& x0, float& y0, float& x1, float& y1)
 {
-    x0 = 0.432f; y0 = 0.025f; x1 = 0.834f; y1 = 0.690f;
+    x0 = 0.360f; y0 = 0.145f; x1 = 0.810f; y1 = 0.820f;
 }
 
 // The already-tracked control-touch nearest to (px,py), or -1.  The match
@@ -2921,11 +2907,21 @@ bool IosControlsHandleTouch(int action, float x, float y, int id)
                 s_iosPanel = !s_iosPanel;      // the VEH switch: pure UI state
                 return true;
             }
+            if (ctls[i].kind == IOS_TAB0 || ctls[i].kind == IOS_TAB1 || ctls[i].kind == IOS_TAB2)
+            {
+                s_iosPanelPage = (ctls[i].kind == IOS_TAB0) ? 0 : (ctls[i].kind == IOS_TAB1) ? 1 : 2;
+                return true;
+            }
             if (ctls[i].kind == IOS_REPO)
             {
                 // The mod repository, right in the game.  The panel is a plain
                 // ImGui window, so opening it is all that is needed here.
                 App::GetGuiManager()->RepositorySelector.SetVisible(true);
+                return true;
+            }
+            if (ctls[i].kind == IOS_MENU)
+            {
+                App::GetGuiManager()->GameMainMenu.SetVisible(true);
                 return true;
             }
             if (ctls[i].kind == IOS_TOGGLE)
@@ -3027,7 +3023,8 @@ void IosApplyHeldEvents(float W, float H, const std::vector<IosCtl>& ctls)
         const IosCtl& c = ctls[i];
         // One-shots are handled by pulses; the panel and gear buttons never
         // carry an analog position or a level value.
-        if (c.kind == IOS_TOGGLE || c.kind == IOS_PANEL ||
+        if (c.kind == IOS_TOGGLE || c.kind == IOS_PANEL || c.kind == IOS_MENU ||
+            c.kind == IOS_TAB0 || c.kind == IOS_TAB1 || c.kind == IOS_TAB2 ||
             c.kind == IOS_GUP    || c.kind == IOS_GDN) continue;
 
         // A control is live while some control-finger rests inside its region.
@@ -3129,6 +3126,15 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         {
             pressed = s_iosPanel;            // the VEH switch lights while open
         }
+        else if (c.kind == IOS_TAB0 || c.kind == IOS_TAB1 || c.kind == IOS_TAB2)
+        {
+            const int page = (c.kind == IOS_TAB0) ? 0 : (c.kind == IOS_TAB1) ? 1 : 2;
+            pressed = s_iosPanelPage == page;
+        }
+        else if (c.kind == IOS_MENU)
+        {
+            pressed = App::GetGuiManager()->GameMainMenu.IsVisible();
+        }
         else if (c.kind == IOS_TOGGLE || c.kind == IOS_GUP || c.kind == IOS_GDN)
         {
             for (size_t p = 0; p < s_iosPulses.size(); ++p)
@@ -3144,10 +3150,30 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
                 if (IosPtIn(c, W, H, s_iosCtlTouches[t].x, s_iosCtlTouches[t].y)) { pressed = true; break; }
         }
 
-        const ImU32 fill   = pressed ? IM_COL32(30, 130, 255, 135) : IM_COL32(15, 15, 15, 95);
-        const ImU32 border = pressed ? IM_COL32(130, 205, 255, 235) : IM_COL32(255, 255, 255, 125);
-        dl->AddRectFilled(p0, p1, fill, 10.f, ImDrawCornerFlags_All);
-        dl->AddRect(p0, p1, border, 10.f, ImDrawCornerFlags_All, 2.f);
+        const float control_w = p1.x - p0.x;
+        const float control_h = p1.y - p0.y;
+        const float control_r = 0.5f * std::min(control_w, control_h);
+        const ImU32 fill   = pressed ? IM_COL32(32, 142, 255, 170) : IM_COL32(9, 18, 31, 115);
+        const ImU32 border = pressed ? IM_COL32(130, 210, 255, 245) : IM_COL32(220, 236, 255, 135);
+        if (c.kind == IOS_JOY || c.kind == IOS_STEER)
+        {
+            const ImVec2 center((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
+            const float pad_r = (c.kind == IOS_JOY) ? 0.48f * std::min(control_w, control_h) : 0.46f * control_h;
+            dl->AddCircleFilled(center, pad_r, IM_COL32(7, 14, 24, 105), 36);
+            dl->AddCircle(center, pad_r, IM_COL32(230, 242, 255, 135), 36, 2.f);
+            if (c.kind == IOS_JOY)
+            {
+                dl->AddCircle(center, pad_r * 0.55f, IM_COL32(230, 242, 255, 45), 32, 1.f);
+                dl->AddLine(ImVec2(center.x - pad_r * 0.72f, center.y), ImVec2(center.x + pad_r * 0.72f, center.y), IM_COL32(230, 242, 255, 40), 1.f);
+                dl->AddLine(ImVec2(center.x, center.y - pad_r * 0.72f), ImVec2(center.x, center.y + pad_r * 0.72f), IM_COL32(230, 242, 255, 40), 1.f);
+            }
+        }
+        else if (c.kind == IOS_HELD || c.kind == IOS_TOGGLE || c.kind == IOS_GUP || c.kind == IOS_GDN || c.kind == IOS_PANEL || c.kind == IOS_MENU || c.kind == IOS_REPO || c.kind == IOS_TAB0 || c.kind == IOS_TAB1 || c.kind == IOS_TAB2)
+        {
+            const float rounding = std::min(18.f, control_r * 0.55f);
+            dl->AddRectFilled(p0, p1, fill, rounding, ImDrawCornerFlags_All);
+            dl->AddRect(p0, p1, border, rounding, ImDrawCornerFlags_All, 1.5f);
+        }
 
         // Centred label.
         const ImVec2 ts = font->CalcTextSizeA(lfs, 1e6f, 0.f, c.label);
@@ -3159,21 +3185,46 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         {
             const float mid  = (p0.x + p1.x) * 0.5f;
             const float mark = mid + s_iosSteer * 0.5f * (p1.x - p0.x);
-            dl->AddLine(ImVec2(mid, p0.y + 5.f), ImVec2(mid, p1.y - 5.f),
-                        IM_COL32(255, 255, 255, 80), 1.f);
-            dl->AddCircleFilled(ImVec2(mark, (p0.y + p1.y) * 0.5f), 13.f,
-                                IM_COL32(130, 205, 255, 235), 20);
+            const ImVec2 center((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
+            const float radius = 0.46f * control_h;
+            dl->AddCircleFilled(ImVec2(mark, center.y), radius * 0.34f, IM_COL32(88, 177, 255, 225), 28);
         }
         else if (c.kind == IOS_JOY)
         {
             const float kx = (p0.x + p1.x) * 0.5f + s_iosJoyX * 0.5f * (p1.x - p0.x);
             const float ky = (p0.y + p1.y) * 0.5f + s_iosJoyY * 0.5f * (p1.y - p0.y);
-            dl->AddCircleFilled(ImVec2((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f),
-                                0.16f * (p1.y - p0.y), IM_COL32(255, 255, 255, 45), 24);
+            const float pad_r = 0.48f * std::min(p1.x - p0.x, p1.y - p0.y);
             dl->AddCircleFilled(ImVec2(kx, ky),
-                                0.12f * (p1.y - p0.y), IM_COL32(130, 205, 255, 210), 24);
+                                pad_r * 0.34f, IM_COL32(88, 177, 255, 225), 24);
         }
     }
+
+    // A compact mobile HUD replaces desktop clutter with one clear mode/speed card.
+    const float hud_x = 0.5f * W;
+    const float hud_y = 0.045f * H;
+    const char* mode = IosInTruck() ? "DRIVING" : "FREE CAMERA";
+    char value[48] = {};
+    if (IosInTruck())
+    {
+        RoR::ActorPtr actor = App::GetGameContext()->GetPlayerActor();
+        const float speed = actor->getSpeed() * 3.6f;
+        const int gear = actor->ar_engine ? actor->ar_engine->getGear() : 0;
+        char gear_text[8] = {};
+        if (gear < 0) std::snprintf(gear_text, sizeof(gear_text), "R");
+        else if (gear == 0) std::snprintf(gear_text, sizeof(gear_text), "N");
+        else std::snprintf(gear_text, sizeof(gear_text), "%d", gear);
+        std::snprintf(value, sizeof(value), "%.0f km/h  ·  %s", speed, gear_text);
+    }
+    const ImVec2 mode_size = font->CalcTextSizeA(lfs, 1e6f, 0.f, mode);
+    const ImVec2 value_size = font->CalcTextSizeA(lfs, 1e6f, 0.f, value);
+    const float card_w = std::max(mode_size.x, value_size.x) + 28.f;
+    const ImVec2 card_min(hud_x - card_w * 0.5f, hud_y);
+    const ImVec2 card_max(hud_x + card_w * 0.5f, hud_y + 2.f * lfs + 20.f);
+    dl->AddRectFilled(card_min, card_max, IM_COL32(7, 14, 24, 145), 14.f, ImDrawCornerFlags_All);
+    dl->AddRect(card_min, card_max, IM_COL32(215, 234, 255, 85), 14.f, ImDrawCornerFlags_All, 1.f);
+    dl->AddText(font, lfs * 0.86f, ImVec2(hud_x - mode_size.x * 0.5f, card_min.y + 6.f), IM_COL32(175, 205, 235, 235), mode);
+    if (IosInTruck())
+        dl->AddText(font, lfs, ImVec2(hud_x - value_size.x * 0.5f, card_min.y + 7.f + lfs), IM_COL32(255, 255, 255, 245), value);
 }
 
 } // namespace
@@ -4582,6 +4633,20 @@ def patch_ios_free_camera(ror):
         '    App::GetCameraManager()->GetCameraNode()->lookAt(spawn_pos + Ogre::Vector3(0.f, 1.f, 0.f), Ogre::Node::TS_WORLD);\n',
         "GameContext.cpp: initialize free camera above player spawn",
     )
+    text = must_replace(
+        text,
+        '        m_player_actor->ar_dashboard->setVisible3d(true);\n',
+        '        m_player_actor->ar_dashboard->setVisible3d(true);\n'
+        '        m_player_actor->ar_dashboard->setVisible(false); // iOS uses its compact touch HUD.\n',
+        "GameContext.cpp: replace desktop dashboard with mobile HUD",
+    )
+    text = must_replace(
+        text,
+        '        App::GetOverlayWrapper()->showDashboardOverlays(\n'
+        '            !App::GetGuiManager()->IsGuiHidden(), m_player_actor);\n',
+        '        App::GetOverlayWrapper()->showDashboardOverlays(false, m_player_actor);\n',
+        "GameContext.cpp: hide desktop dashboard overlays on iOS",
+    )
     write(path, text)
 
     path = os.path.join(ror, "source", "main", "gfx", "camera", "CameraManager.cpp")
@@ -4610,6 +4675,134 @@ def patch_ios_free_camera(ror):
         '    m_local_character->SetupGfx();\n'
         '    LOG("[RoR|iOS] player avatar hidden; free camera mode active");\n',
         "CharacterFactory.cpp: do not register the broken local avatar for rendering",
+    )
+    write(path, text)
+
+
+def patch_ios_game_menu(ror):
+    """Make the in-game/menu screens full-size, responsive touch panels."""
+    path = os.path.join(ror, "source", "main", "gui", "panels", "GUI_GameMainMenu.h")
+    text = read(path)
+    text = must_replace(
+        text,
+        '    const float   WINDOW_WIDTH          = 200.f;\n'
+        '    const ImVec4  WINDOW_BG_COLOR       = ImVec4(0.1f, 0.1f, 0.1f, 0.8f);\n'
+        '    const ImVec4  BUTTON_BG_COLOR       = ImVec4(0.25f, 0.25f, 0.24f, 0.6f); // Drawn on top of a transparent panel; make it just a shade\n'
+        '    const ImVec2  BUTTON_PADDING        = ImVec2(4.f, 6.f);\n',
+        '    const float   WINDOW_WIDTH          = 360.f;\n'
+        '    const ImVec4  WINDOW_BG_COLOR       = ImVec4(0.025f, 0.045f, 0.070f, 0.96f);\n'
+        '    const ImVec4  BUTTON_BG_COLOR       = ImVec4(0.08f, 0.15f, 0.24f, 0.98f);\n'
+        '    const ImVec2  BUTTON_PADDING        = ImVec2(12.f, 12.f);\n',
+        "GUI_GameMainMenu.h: mobile menu dimensions and theme",
+    )
+    write(path, text)
+
+    path = os.path.join(ror, "source", "main", "gui", "panels", "GUI_GameMainMenu.cpp")
+    text = read(path)
+    old = (
+        '    // Display in bottom left corner for single-screen setups and centered for multi-screen (typically 3-screen) setups.\n'
+        '    ImVec2 display_size = ImGui::GetIO().DisplaySize;\n'
+        '    if ((display_size.x > 2200.f) && (display_size.y < 1100.f)) // Silly approximate values\n'
+        '    {\n'
+        '        ImGui::SetNextWindowPosCenter();\n'
+        '    }\n'
+        '    else\n'
+        '    {\n'
+        '        const float btn_height = ImGui::GetTextLineHeight() + (BUTTON_PADDING.y * 2);\n'
+        '        const float window_height = (m_num_buttons*btn_height) + (m_num_buttons*ImGui::GetStyle().ItemSpacing.y) + (2*ImGui::GetStyle().WindowPadding.y); // buttons + titlebar; 2x spacing around separator\n'
+        '        const float margin = display_size.y / 15.f;\n'
+        '        const float top = display_size.y - window_height - margin;\n'
+        '        ImGui::SetNextWindowPos(ImVec2(margin, top));\n'
+        '    }\n'
+        '    ImGui::SetNextWindowContentWidth(WINDOW_WIDTH);\n'
+        '    int flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize;\n'
+    )
+    new = (
+        '    // iOS: a centered, safe-area-sized card with large two-column touch targets.\n'
+        '    const ImVec2 display_size = ImGui::GetIO().DisplaySize;\n'
+        '    const float margin = std::max(12.f, display_size.y * 0.04f);\n'
+        '    const float window_width = std::min(520.f, display_size.x - 2.f * margin);\n'
+        '    const float window_height = std::min(620.f, display_size.y - 2.f * margin);\n'
+        '    ImGui::SetNextWindowPos(ImVec2((display_size.x - window_width) * 0.5f, (display_size.y - window_height) * 0.5f));\n'
+        '    ImGui::SetNextWindowSize(ImVec2(window_width, window_height));\n'
+        '    ImGui::SetNextWindowContentWidth(window_width - 2.f * ImGui::GetStyle().WindowPadding.x);\n'
+        '    int flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;\n'
+    )
+    text = must_replace(text, old, new, "GUI_GameMainMenu.cpp: responsive centered mobile menu")
+    text = must_replace(
+        text,
+        '    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, BUTTON_PADDING);\n',
+        '    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, BUTTON_PADDING);\n'
+        '    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 12.f);\n',
+        "GUI_GameMainMenu.cpp: rounded mobile menu buttons",
+    )
+    text = must_replace(
+        text,
+        '    ImGui::PopStyleVar();\n',
+        '    ImGui::PopStyleVar(2);\n',
+        "GUI_GameMainMenu.cpp: restore mobile menu style",
+    )
+    text = must_replace(
+        text,
+        '    std::string button_txt = (m_kb_focus_index == index) ? fmt::format("--> {} <--", txt) : txt;\n'
+        '    return ImGui::Button(button_txt.c_str(), btn_size) || (m_kb_enter_index == index);\n',
+        '    std::string button_txt = (m_kb_focus_index == index) ? fmt::format("{}  ✓", txt) : txt;\n'
+        '    const float gap = ImGui::GetStyle().ItemSpacing.x;\n'
+        '    const float content_width = ImGui::GetWindowWidth() - 2.f * ImGui::GetStyle().WindowPadding.x;\n'
+        '    const float width = std::max(120.f, (content_width - gap) * 0.5f);\n'
+        '    const ImVec2 mobile_size(width, 52.f);\n'
+        '    const bool clicked = ImGui::Button(button_txt.c_str(), mobile_size) || (m_kb_enter_index == index);\n'
+        '    if ((index % 2) == 0 && index < m_num_buttons - 1) ImGui::SameLine();\n'
+        '    return clicked;\n',
+        "GUI_GameMainMenu.cpp: large two-column touch buttons",
+    )
+    write(path, text)
+
+    path = os.path.join(ror, "source", "main", "gui", "panels", "GUI_MainSelector.cpp")
+    text = read(path)
+    text = must_replace(
+        text,
+        '    ImGui::SetNextWindowSize(ImVec2((ImGui::GetIO().DisplaySize.x / 1.4), (ImGui::GetIO().DisplaySize.y / 1.2)), ImGuiCond_FirstUseEver);\n',
+        '    ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x * 0.94f, ImGui::GetIO().DisplaySize.y * 0.90f), ImGuiCond_Always);\n',
+        "GUI_MainSelector.cpp: enlarge vehicle/terrain picker for phone",
+    )
+    text = must_replace(
+        text,
+        '    ImGui::SetNextWindowPosCenter(ImGuiCond_FirstUseEver);\n',
+        '    ImGui::SetNextWindowPosCenter(ImGuiCond_Always);\n',
+        "GUI_MainSelector.cpp: center selector on phone",
+    )
+    write(path, text)
+
+    path = os.path.join(ror, "source", "main", "gui", "panels", "GUI_GameSettings.cpp")
+    text = read(path)
+    text = must_replace(
+        text,
+        '    ImGui::SetNextWindowSize(ImVec2(670.f, 400.f), ImGuiCond_FirstUseEver);\n',
+        '    ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x * 0.94f, ImGui::GetIO().DisplaySize.y * 0.90f), ImGuiCond_Always);\n',
+        "GUI_GameSettings.cpp: fit settings to phone screen",
+    )
+    write(path, text)
+
+    path = os.path.join(ror, "source", "main", "gui", "panels", "GUI_GameControls.cpp")
+    text = read(path)
+    text = must_replace(
+        text,
+        '        ImGui::SetNextWindowPosCenter(ImGuiCond_FirstUseEver);\n'
+        '        ImGui::SetNextWindowSize(ImVec2(800.f, 600.f), ImGuiCond_FirstUseEver);\n',
+        '        ImGui::SetNextWindowPosCenter(ImGuiCond_Always);\n'
+        '        ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x * 0.94f, ImGui::GetIO().DisplaySize.y * 0.90f), ImGuiCond_Always);\n',
+        "GUI_GameControls.cpp: fit controls screen to phone",
+    )
+    write(path, text)
+
+    path = os.path.join(ror, "source", "main", "gui", "panels", "GUI_RepositorySelector.cpp")
+    text = read(path)
+    text = must_replace(
+        text,
+        '    ImGui::SetNextWindowSize(ImVec2((ImGui::GetIO().DisplaySize.x / 1.4), (ImGui::GetIO().DisplaySize.y / 1.2)), ImGuiCond_FirstUseEver);\n',
+        '    ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x * 0.94f, ImGui::GetIO().DisplaySize.y * 0.90f), ImGuiCond_Always);\n',
+        "GUI_RepositorySelector.cpp: fit mod repository to phone",
     )
     write(path, text)
 
@@ -6061,6 +6254,9 @@ def main():
     # object for game logic, hide its graphics, and use OGRE's native free
     # camera with touch-look and mobile joystick translation instead.
     patch_ios_free_camera(args.ror_dir)
+    # The stock RoR menus and dialogs assume desktop pointer precision and
+    # desktop sizing; give the menu and terrain/vehicle selector mobile panels.
+    patch_ios_game_menu(args.ror_dir)
     # The menu is drawn by ImGui, but it is *queued* for drawing by
     # OgreImGui::renderQueueStarted(), which silently skips the overlay when the
     # active viewport is not the app viewport.  That is the difference between
