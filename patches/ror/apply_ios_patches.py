@@ -2816,10 +2816,10 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
     else
     {
         // On foot: a walking/turning joystick under the left thumb...
-        out.push_back({RoR::EV_CHARACTER_FORWARD, IOS_JOY, 0.040f, 0.470f, 0.340f, 0.500f, "MOVE"});
-        // ...and the actions under the right thumb.
-        out.push_back({RoR::EV_CHARACTER_JUMP,             IOS_HELD,   0.800f, 0.420f, 0.190f, 0.170f, "JUMP"});
-        out.push_back({RoR::EV_CHARACTER_RUN,              IOS_HELD,   0.800f, 0.600f, 0.190f, 0.170f, "RUN"});
+        out.push_back({RoR::EV_CHARACTER_FORWARD, IOS_JOY, 0.040f, 0.470f, 0.340f, 0.500f, "FLY"});
+        // Free-camera altitude controls under the right thumb.
+        out.push_back({RoR::EV_CAMERA_UP,                IOS_HELD,   0.800f, 0.420f, 0.190f, 0.170f, "UP"});
+        out.push_back({RoR::EV_CAMERA_DOWN,              IOS_HELD,   0.800f, 0.600f, 0.190f, 0.170f, "DOWN"});
         out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_TOGGLE, 0.800f, 0.780f, 0.190f, 0.200f, "ENTER"});
         // The mod repository, top-left corner.
         out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_REPO, 0.030f, 0.160f, 0.130f, 0.095f, "REPO"});
@@ -3006,6 +3006,10 @@ void IosApplyHeldEvents(float W, float H, const std::vector<IosCtl>& ctls)
     ie->setEventSimulatedValue(RoR::EV_CHARACTER_BACKWARDS, 0.f);
     ie->setEventSimulatedValue(RoR::EV_CHARACTER_LEFT,      0.f);
     ie->setEventSimulatedValue(RoR::EV_CHARACTER_RIGHT,     0.f);
+    ie->setEventSimulatedValue(RoR::EV_CHARACTER_SIDESTEP_LEFT,  0.f);
+    ie->setEventSimulatedValue(RoR::EV_CHARACTER_SIDESTEP_RIGHT, 0.f);
+    ie->setEventSimulatedValue(RoR::EV_CAMERA_UP,            0.f);
+    ie->setEventSimulatedValue(RoR::EV_CAMERA_DOWN,          0.f);
     ie->setEventSimulatedValue(RoR::EV_CHARACTER_RUN,       0.f);
     ie->setEventSimulatedValue(RoR::EV_CHARACTER_JUMP,      0.f);
     ie->setEventSimulatedValue(RoR::EV_TRUCK_HORN,                 0.f);
@@ -3075,8 +3079,8 @@ void IosApplyHeldEvents(float W, float H, const std::vector<IosCtl>& ctls)
             s_iosJoyY = jy;
             if (jy < 0.f) ie->setEventSimulatedValue(RoR::EV_CHARACTER_FORWARD, -jy);
             if (jy > 0.f) ie->setEventSimulatedValue(RoR::EV_CHARACTER_BACKWARDS, jy);
-            if (jx < 0.f) ie->setEventSimulatedValue(RoR::EV_CHARACTER_LEFT, -jx);
-            if (jx > 0.f) ie->setEventSimulatedValue(RoR::EV_CHARACTER_RIGHT, jx);
+            if (jx < 0.f) ie->setEventSimulatedValue(RoR::EV_CHARACTER_SIDESTEP_LEFT, -jx);
+            if (jx > 0.f) ie->setEventSimulatedValue(RoR::EV_CHARACTER_SIDESTEP_RIGHT, jx);
         }
         else // IOS_HELD
         {
@@ -4561,6 +4565,55 @@ def patch_character_software_skinning(ror):
     write(path, text)
 
 
+def patch_ios_free_camera(ror):
+    """Use the built-in free camera as the iOS on-foot/spectator mode.
+
+    The device's avatar mesh is malformed, so iOS keeps the logical player
+    object required by gameplay code but never displays its graphics. The
+    stock free camera already supports touch-look and translation; this patch
+    starts it after terrain load and places it above/behind the spawn point.
+    """
+    path = os.path.join(ror, "source", "main", "GameContext.cpp")
+    text = read(path)
+    text = must_replace(
+        text,
+        '    App::GetCameraManager()->GetCameraNode()->setPosition(this->GetPlayerCharacter()->getPosition());\n',
+        '    App::GetCameraManager()->GetCameraNode()->setPosition(spawn_pos + Ogre::Vector3(0.f, 3.f, 9.f));\n'
+        '    App::GetCameraManager()->GetCameraNode()->lookAt(spawn_pos + Ogre::Vector3(0.f, 1.f, 0.f), Ogre::Node::TS_WORLD);\n',
+        "GameContext.cpp: initialize free camera above player spawn",
+    )
+    write(path, text)
+
+    path = os.path.join(ror, "source", "main", "gfx", "camera", "CameraManager.cpp")
+    text = read(path)
+    text = must_replace(
+        text,
+        '        switchBehavior(CAMERA_BEHAVIOR_CHARACTER);\n    }\n\n    // camera FOV settings',
+        '        switchBehavior(CAMERA_BEHAVIOR_FREE);\n    }\n\n    // camera FOV settings',
+        "CameraManager.cpp: default iOS camera behavior is free camera",
+    )
+    text = must_replace(
+        text,
+        '            this->switchBehavior(CAMERA_BEHAVIOR_CHARACTER);\n        }\n        return;\n    }\n\n    // Getting in vehicle',
+        '            this->switchBehavior(CAMERA_BEHAVIOR_FREE);\n        }\n        return;\n    }\n\n    // Getting in vehicle',
+        "CameraManager.cpp: keep free camera when exiting a vehicle",
+    )
+    write(path, text)
+
+    path = os.path.join(ror, "source", "main", "gameplay", "CharacterFactory.cpp")
+    text = read(path)
+    text = must_replace(
+        text,
+        '    App::GetGfxScene()->RegisterGfxCharacter(m_local_character->SetupGfx());\n',
+        '    // Keep the logical player object for game code, but leave its graphics unregistered.\n'
+        '    // Its scene node stays hidden, so the broken avatar mesh is never submitted for rendering.\n'
+        '    m_local_character->SetupGfx();\n'
+        '    LOG("[RoR|iOS] player avatar hidden; free camera mode active");\n',
+        "CharacterFactory.cpp: do not register the broken local avatar for rendering",
+    )
+    write(path, text)
+
+
 def patch_shadows_off_ambient(ror):
     """resources/managed_materials/shadows/pssm/off/shadows.material: light it.
 
@@ -6004,6 +6057,10 @@ def main():
     # shows it as enormous spikes.  Force OGRE's software skinning on GLES2 so
     # generated GPU skinning cannot corrupt the avatar's vertex positions.
     patch_character_software_skinning(args.ror_dir)
+    # The player avatar renders as a broken mesh on device. Keep the player
+    # object for game logic, hide its graphics, and use OGRE's native free
+    # camera with touch-look and mobile joystick translation instead.
+    patch_ios_free_camera(args.ror_dir)
     # The menu is drawn by ImGui, but it is *queued* for drawing by
     # OgreImGui::renderQueueStarted(), which silently skips the overlay when the
     # active viewport is not the app viewport.  That is the difference between
