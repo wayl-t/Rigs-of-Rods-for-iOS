@@ -3098,7 +3098,9 @@ void IosApplyHeldEvents(float W, float H, const std::vector<IosCtl>& ctls)
     }
 }
 
-// A generated PNG atlas supplies the mobile icons with baked lighting/depth.
+// Small code-native pictograms keep the HUD sharp at every phone scale.  They
+// deliberately use only ImDrawList primitives, so there is no texture lifetime
+// or colour-space dependency in the touch layer.
 int IosIconCell(const IosCtl& c)
 {
     if (c.kind == IOS_MENU) return 0;
@@ -3120,16 +3122,23 @@ int IosIconCell(const IosCtl& c)
 
 void IosDrawIcon(ImDrawList* dl, const IosCtl& c, const ImVec2& p0, const ImVec2& p1, ImU32 color)
 {
-    static Ogre::TexturePtr atlas;
-    if (atlas.isNull()) atlas = RoR::FetchIcon("mobile_controls_atlas.png");
-    const int cell = IosIconCell(c);
-    const float u0 = (float)(cell % 4) * 0.25f;
-    const float v0 = (float)(cell / 4) * 0.25f;
-    const float inset = 0.07f;
-    const ImVec2 margin(0.10f * (p1.x - p0.x), 0.10f * (p1.y - p0.y));
-    dl->AddImage(reinterpret_cast<ImTextureID>(atlas->getHandle()), p0 + margin, p1 - margin,
-        ImVec2(u0 + inset * 0.25f, v0 + inset * 0.25f),
-        ImVec2(u0 + (1.f - inset) * 0.25f, v0 + (1.f - inset) * 0.25f), color);
+    const ImVec2 cc((p0.x + p1.x) * .5f, (p0.y + p1.y) * .5f);
+    const float s = .24f * std::min(p1.x - p0.x, p1.y - p0.y);
+    const float t = std::max(1.5f, s * .13f);
+    const int k = IosIconCell(c);
+    auto line = [&](ImVec2 a, ImVec2 b) { dl->AddLine(a, b, color, t); };
+    if (k == 0) { line({cc.x-s,cc.y-s*.65f},{cc.x+s,cc.y-s*.65f}); line({cc.x-s,cc.y},{cc.x+s,cc.y}); line({cc.x-s,cc.y+s*.65f},{cc.x+s,cc.y+s*.65f}); return; }
+    if (k == 1) { dl->AddRect({cc.x-s,cc.y-s*.35f},{cc.x+s*.35f,cc.y+s*.45f},color,2.f,t); dl->AddRect({cc.x+s*.35f,cc.y-s*.15f},{cc.x+s,cc.y+s*.45f},color,2.f,t); line({cc.x-s*.65f,cc.y+s*.45f},{cc.x+s*.65f,cc.y+s*.45f}); line({cc.x+s*.55f,cc.y-s*.8f},{cc.x+s*.55f,cc.y-s*.2f}); line({cc.x+s*.25f,cc.y-s*.5f},{cc.x+s*.85f,cc.y-s*.5f}); return; }
+    if (k == 2) { dl->AddRect({cc.x-s,cc.y-s*.65f},{cc.x+s,cc.y+s*.65f},color,3.f,t); line({cc.x-s,cc.y-s*.1f},{cc.x+s,cc.y-s*.1f}); line({cc.x-s*.45f,cc.y-s*.65f},{cc.x-s*.45f,cc.y+s*.65f}); return; }
+    if (k == 3) { for (int iy=0;iy<2;iy++) for (int ix=0;ix<2;ix++) dl->AddRect({cc.x-s+ix*s,cc.y-s+iy*s},{cc.x-.15f*s+ix*s,cc.y-.15f*s+iy*s},color,2.f,t); return; }
+    if (k == 4) { dl->AddCircle(cc,s*.95f,color,32,t); dl->AddCircle(cc,s*.18f,color,20,t); line({cc.x-s*.85f,cc.y-s*.35f},{cc.x-s*.35f,cc.y+s*.05f}); line({cc.x+s*.85f,cc.y-s*.35f},{cc.x+s*.35f,cc.y+s*.05f}); line({cc.x,cc.y+s*.18f},{cc.x,cc.y+s*.75f}); return; }
+    if (k == 5 || k == 6) { const float d = (k==5) ? -1.f : 1.f; dl->AddTriangleFilled({cc.x,cc.y+d*s},{cc.x-s*.75f,cc.y-d*s*.15f},{cc.x+s*.75f,cc.y-d*s*.15f},color); line({cc.x,cc.y-d*s*.1f},{cc.x,cc.y-d*s*.85f}); return; }
+    if (k == 7) { dl->AddCircle({cc.x-s*.2f,cc.y},s*.55f,color,24,t); line({cc.x+s*.3f,cc.y-s*.35f},{cc.x+s,cc.y-s*.8f}); line({cc.x+s*.3f,cc.y+s*.35f},{cc.x+s,cc.y+s*.8f}); return; }
+    if (k == 8) { dl->AddCircle(cc,s*.9f,color,28,t); line({cc.x-s*.55f,cc.y},{cc.x+s*.55f,cc.y}); line({cc.x,cc.y-s*.55f},{cc.x,cc.y+s*.55f}); return; }
+    if (k == 9) { dl->AddCircle(cc,s*.78f,color,28,t); dl->AddCircleFilled(cc,s*.22f,color,20); line({cc.x+s*.45f,cc.y-s*.6f},{cc.x+s,cc.y-s*.95f}); return; }
+    if (k == 10 || k == 12) { const float d=(k==10)?-1.f:1.f; line({cc.x+d*s*.85f,cc.y},{cc.x-d*s*.1f,cc.y}); dl->AddTriangleFilled({cc.x+d*s*.85f,cc.y},{cc.x+d*s*.25f,cc.y-s*.45f},{cc.x+d*s*.25f,cc.y+s*.45f},color); return; }
+    if (k == 11) { dl->AddTriangleFilled({cc.x,cc.y-s},{cc.x-s*.2f,cc.y+s*.65f},{cc.x+s*.2f,cc.y+s*.65f},color); dl->AddLine({cc.x-s*.65f,cc.y-s*.65f},{cc.x+s*.65f,cc.y+s*.65f},color,t); return; }
+    dl->AddCircle(cc,s*.72f,color,24,t); line({cc.x-s*.45f,cc.y},{cc.x+s*.45f,cc.y}); line({cc.x,cc.y-s*.45f},{cc.x,cc.y+s*.45f});
 }
 
 // The on-screen controls themselves, drawn on the foreground draw list so they
@@ -4712,6 +4721,25 @@ def patch_ios_free_camera(ror):
     )
     text = must_replace(
         text,
+        '    m_cct_trans_scale  = ROTATE_SPEED * dt;\n\n    // Handle forced cinecam',
+        '    m_cct_trans_scale  = ROTATE_SPEED * dt;\n\n'
+        '#ifdef ROR_PLATFORM_IOS\n'
+        '    // A vehicle spawned from the mobile selector seats the player via a\n'
+        '    // queued message.  NotifyVehicleChanged intentionally leaves FREE\n'
+        '    // mode alone, so explicitly attach the vehicle camera once the\n'
+        '    // player actor appears.\n'
+        '    if (m_cct_player_actor && m_current_behavior == CAMERA_BEHAVIOR_FREE &&\n'
+        '        m_cct_player_actor->ar_driveable != NOT_DRIVEABLE)\n'
+        '    {\n'
+        '        this->SwitchBehaviorOnVehicleChange(CAMERA_BEHAVIOR_VEHICLE, m_cct_player_actor);\n'
+        '        RoR::LogFormat("[RoR|iOS] vehicle camera attached actor=%d", m_cct_player_actor->ar_instance_id);\n'
+        '    }\n'
+        '#endif\n\n'
+        '    // Handle forced cinecam',
+        "CameraManager.cpp: attach vehicle camera after iOS spawn",
+    )
+    text = must_replace(
+        text,
         '            this->switchBehavior(CAMERA_BEHAVIOR_CHARACTER);\n        }\n        return;\n    }\n\n    // Getting in vehicle',
         '            this->switchBehavior(CAMERA_BEHAVIOR_FREE);\n        }\n        return;\n    }\n\n    // Getting in vehicle',
         "CameraManager.cpp: keep free camera when exiting a vehicle",
@@ -5570,15 +5598,6 @@ def patch_mygui_resources(ror):
         else:
             print("  WARNING: resources/icons/ror.png is missing, "
                   "FlagsRG will still fail to resolve ror.png")
-
-    atlas_src = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ios", "mobile_controls_atlas.png")
-    atlas_dst = os.path.join(ror, "resources", "icons", "mobile_controls_atlas.png")
-    if os.path.exists(atlas_src):
-        shutil.copyfile(atlas_src, atlas_dst)
-        print("  copied generated mobile control atlas -> resources/icons/mobile_controls_atlas.png")
-    else:
-        sys.exit("ERROR: generated mobile_controls_atlas.png is missing")
-
 
 # The RTSS function library is *data*, and it is version locked to the library
 # that generates the shaders: the sub-render-states call FFP_*/SGX_* functions
