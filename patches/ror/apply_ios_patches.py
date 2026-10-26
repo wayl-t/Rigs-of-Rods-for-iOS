@@ -2718,7 +2718,6 @@ bool IosControlsActive()
 {
     if (App::app_state->getEnum<AppState>() != AppState::SIMULATION)
         return false;
-    if (App::GetGuiManager()->GameMainMenu.IsVisible())     return false;
     if (App::GetGuiManager()->MainSelector.IsVisible())     return false;
     if (App::GetGuiManager()->MessageBoxDialog.IsVisible()) return false;
     if (App::GetGuiManager()->LoadingWindow.IsVisible())    return false;
@@ -2748,6 +2747,14 @@ void IosDisplaySize(float& W, float& H)
 void IosLayout(float W, float H, std::vector<IosCtl>& out)
 {
     out.clear();
+    // Keep one unmistakable close button above the stock menu.  The old path
+    // disabled the whole mobile layer as soon as GameMainMenu became visible,
+    // leaving no reliable way to dismiss it with touch.
+    if (App::GetGuiManager()->GameMainMenu.IsVisible())
+    {
+        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_MENU, 0.025f, 0.040f, 0.085f, 0.090f, "MENU"});
+        return;
+    }
     if (IosInTruck())
     {
         // Steering: an absolute-position bar.  Left of centre = steer left,
@@ -2872,12 +2879,9 @@ int IosFindTouch(float W, float H, float px, float py, int id)
         const float d2 = dx * dx + dy * dy;
         if (d2 <= best_d) { best_d = d2; best = (int)i; }
     }
-    // If no match within the radius but there's exactly one tracked control
-    // touch, claim it - this prevents sticking after fast drags.  Only used
-    // when ids are unavailable: with real ids a second finger must not be
-    // allowed to join a control that is already driven by another finger.
-    if (best < 0 && s_iosCtlTouches.size() == 1 && s_iosCtlTouches[0].id == 0)
-        return 0;
+    // Never claim an unrelated point merely because only one control finger
+    // exists. OIS may report id=0 for every touch; that old fallback therefore
+    // stole the second (camera) finger whenever steering/a pedal was held.
     return best;
 }
 
@@ -2945,7 +2949,10 @@ bool IosControlsHandleTouch(int action, float x, float y, int id)
             }
             if (ctls[i].kind == IOS_MENU)
             {
-                App::GetGuiManager()->GameMainMenu.SetVisible(true);
+                // The same button is a reliable close/open action.  The old
+                // one-way SetVisible(true) left the mobile controls disabled
+                // whenever the desktop menu was opened accidentally.
+                App::GetGuiManager()->GameMainMenu.SetVisible(!App::GetGuiManager()->GameMainMenu.IsVisible());
                 return true;
             }
             if (ctls[i].kind == IOS_SPAWN)
@@ -3006,11 +3013,6 @@ bool IosControlsHandleTouch(int action, float x, float y, int id)
         // camera finger must not be allowed to tear down a control that a
         // *different* finger is still holding - that used to kill the joystick
         // (or the pedal) mid-press.
-        if (id == 0 && s_iosCtlTouches.size() == 1 && s_iosCtlTouches[0].id == 0)
-        {
-            s_iosCtlTouches.clear();
-            return true;
-        }
         return false;
     }
     s_iosCtlTouches.erase(s_iosCtlTouches.begin() + idx);
@@ -3128,13 +3130,28 @@ int IosIconCell(const IosCtl& c)
 {
     if (c.label && std::strcmp(c.label, "TOP") == 0) return 13;
     if (c.label && std::strcmp(c.label, "HUD") == 0) return 14;
-    if (c.label && (std::strcmp(c.label, "LIGHTS") == 0 || std::strcmp(c.label, "LIGHT 1") == 0 || std::strcmp(c.label, "LIGHT 2") == 0 || std::strcmp(c.label, "LIGHT 3") == 0)) return 8;
+    if (c.label && std::strcmp(c.label, "LIGHTS") == 0) return 8;
+    if (c.label && std::strcmp(c.label, "LIGHT 1") == 0) return 8;
+    if (c.label && std::strcmp(c.label, "LIGHT 2") == 0) return 15;
+    if (c.label && std::strcmp(c.label, "LIGHT 3") == 0) return 9;
     if (c.label && (std::strcmp(c.label, "P") == 0 || std::strcmp(c.label, "PARKING") == 0)) return 9;
     if (c.label && (std::strcmp(c.label, "IGN") == 0 || std::strcmp(c.label, "IGNITION") == 0)) return 9;
     if (c.label && (std::strcmp(c.label, "EXIT") == 0 || std::strcmp(c.label, "ENTER") == 0)) return 1;
-    if (c.label && (std::strcmp(c.label, "NEUTRAL") == 0 || std::strcmp(c.label, "REVERSE") == 0 || std::strcmp(c.label, "GEAR +") == 0 || std::strcmp(c.label, "GEAR -") == 0)) return 5;
-    if (c.label && (std::strcmp(c.label, "AUTO / MAN") == 0 || std::strcmp(c.label, "4WD") == 0 || std::strcmp(c.label, "AXLE DIFF") == 0 || std::strcmp(c.label, "WHEEL DIFF") == 0)) return 3;
-    if (c.label && (std::strcmp(c.label, "CLUTCH") == 0 || std::strcmp(c.label, "TRAILER") == 0)) return 2;
+    if (c.label && std::strcmp(c.label, "GEAR +") == 0) return 5;
+    if (c.label && std::strcmp(c.label, "GEAR -") == 0) return 6;
+    if (c.label && std::strcmp(c.label, "NEUTRAL") == 0) return 16;
+    if (c.label && std::strcmp(c.label, "REVERSE") == 0) return 17;
+    if (c.label && std::strcmp(c.label, "AUTO / MAN") == 0) return 18;
+    if (c.label && std::strcmp(c.label, "AXLE DIFF") == 0) return 19;
+    if (c.label && std::strcmp(c.label, "WHEEL DIFF") == 0) return 20;
+    if (c.label && std::strcmp(c.label, "4WD") == 0) return 21;
+    if (c.label && std::strcmp(c.label, "CLUTCH") == 0) return 22;
+    if (c.label && std::strcmp(c.label, "TRAILER") == 0) return 23;
+    if (c.label && std::strcmp(c.label, "CRUISE") == 0) return 24;
+    if (c.label && (std::strcmp(c.label, "CRUISE +") == 0 || std::strcmp(c.label, "CRUISE -") == 0)) return 25;
+    if (c.label && std::strcmp(c.label, "COMMAND 1") == 0) return 26;
+    if (c.label && std::strcmp(c.label, "COMMAND 2") == 0) return 27;
+    if (c.label && std::strcmp(c.label, "BEACONS") == 0) return 28;
     if (c.kind == IOS_MENU) return 0;
     if (c.kind == IOS_TOP) return 13;
     if (c.kind == IOS_HUD) return 14;
@@ -3174,6 +3191,18 @@ void IosDrawIcon(ImDrawList* dl, const IosCtl& c, const ImVec2& p0, const ImVec2
     if (k == 11) { dl->AddTriangleFilled({cc.x,cc.y-s},{cc.x-s*.2f,cc.y+s*.65f},{cc.x+s*.2f,cc.y+s*.65f},color); dl->AddLine({cc.x-s*.65f,cc.y-s*.65f},{cc.x+s*.65f,cc.y+s*.65f},color,t); return; }
     if (k == 13) { dl->AddRect({cc.x-s,cc.y-s*.65f},{cc.x+s,cc.y+s*.65f},color,3.f,t); line({cc.x-s*.65f,cc.y},{cc.x+s*.65f,cc.y}); line({cc.x,cc.y-s*.65f},{cc.x,cc.y+s*.65f}); return; }
     if (k == 14) { dl->AddRect({cc.x-s,cc.y-s*.7f},{cc.x+s,cc.y+s*.7f},color,3.f,t); line({cc.x-s*.55f,cc.y-s*.25f},{cc.x+s*.55f,cc.y-s*.25f}); line({cc.x-s*.55f,cc.y+s*.2f},{cc.x+s*.55f,cc.y+s*.2f}); return; }
+    if (k == 15) { dl->AddCircle(cc,s*.75f,color,28,t); line({cc.x-s*.75f,cc.y},{cc.x+s*.75f,cc.y}); line({cc.x,cc.y-s*.75f},{cc.x,cc.y+s*.75f}); return; }
+    if (k == 16) { dl->AddCircle(cc,s*.65f,color,24,t); line({cc.x-s*.9f,cc.y},{cc.x-s*.25f,cc.y}); line({cc.x+s*.25f,cc.y},{cc.x+s*.9f,cc.y}); return; }
+    if (k == 17) { line({cc.x-s*.7f,cc.y-s*.55f},{cc.x+s*.7f,cc.y-s*.55f}); line({cc.x+s*.7f,cc.y-s*.55f},{cc.x+s*.25f,cc.y+s*.55f}); line({cc.x+s*.25f,cc.y+s*.55f},{cc.x-s*.7f,cc.y+s*.55f}); return; }
+    if (k == 18) { line({cc.x-s*.75f,cc.y-s*.55f},{cc.x+s*.75f,cc.y-s*.55f}); line({cc.x-s*.75f,cc.y+s*.55f},{cc.x+s*.75f,cc.y+s*.55f}); line({cc.x,cc.y-s*.55f},{cc.x,cc.y+s*.55f}); return; }
+    if (k == 19 || k == 20) { dl->AddCircle(cc,s*.75f,color,24,t); dl->AddCircle(cc,s*.25f,color,16,t); line({cc.x-s*.75f,cc.y},{cc.x-s*.25f,cc.y}); line({cc.x+s*.25f,cc.y},{cc.x+s*.75f,cc.y}); return; }
+    if (k == 21) { line({cc.x-s*.7f,cc.y-s*.55f},{cc.x+s*.7f,cc.y+s*.55f}); line({cc.x+s*.7f,cc.y-s*.55f},{cc.x-s*.7f,cc.y+s*.55f}); dl->AddCircle(cc,s*.2f,color,16,t); return; }
+    if (k == 22) { dl->AddCircle(cc,s*.7f,color,24,t); line({cc.x-s*.4f,cc.y-s*.55f},{cc.x+s*.55f,cc.y+s*.2f}); line({cc.x+s*.55f,cc.y+s*.2f},{cc.x-s*.1f,cc.y+s*.65f}); return; }
+    if (k == 23) { dl->AddRect({cc.x-s,cc.y-s*.45f},{cc.x+s*.3f,cc.y+s*.45f},color,2.f,t); dl->AddCircle({cc.x+s*.65f,cc.y+s*.42f},s*.23f,color,20,t); return; }
+    if (k == 24) { dl->AddCircle(cc,s*.75f,color,24,t); line({cc.x,cc.y},{cc.x+s*.55f,cc.y-s*.3f}); line({cc.x,cc.y},{cc.x-s*.25f,cc.y+s*.55f}); return; }
+    if (k == 25) { line({cc.x-s*.8f,cc.y},{cc.x+s*.8f,cc.y}); dl->AddTriangleFilled({cc.x+s*.8f,cc.y},{cc.x+s*.25f,cc.y-s*.4f},{cc.x+s*.25f,cc.y+s*.4f},color); return; }
+    if (k == 26 || k == 27) { dl->AddRect({cc.x-s*.8f,cc.y-s*.65f},{cc.x+s*.8f,cc.y+s*.65f},color,2.f,t); line({cc.x-s*.45f,cc.y},{cc.x+s*.45f,cc.y}); line({cc.x,cc.y-s*.4f},{cc.x,cc.y+s*.4f}); return; }
+    if (k == 28) { dl->AddCircleFilled({cc.x,cc.y-s*.35f},s*.18f,color,16); line({cc.x,cc.y-s*.15f},{cc.x-s*.55f,cc.y+s*.6f}); line({cc.x,cc.y-s*.15f},{cc.x+s*.55f,cc.y+s*.6f}); return; }
     dl->AddCircle(cc,s*.72f,color,24,t); line({cc.x-s*.45f,cc.y},{cc.x+s*.45f,cc.y}); line({cc.x,cc.y-s*.45f},{cc.x,cc.y+s*.45f});
 }
 
@@ -3281,7 +3310,10 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         // Every direct manipulation button is pictographic. Text remains only
         // in the panel title and HUD, where it communicates state rather than
         // occupying a tap target.
-        IosDrawIcon(dl, c, p0, p1, IM_COL32(245, 250, 255, 245));
+        if (c.kind != IOS_JOY)
+        {
+            IosDrawIcon(dl, c, p0, p1, IM_COL32(245, 250, 255, 245));
+        }
 
         // Live marker for the two analog controls.
         if (c.kind == IOS_STEER)
@@ -3302,6 +3334,13 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
             const float pad_r = 0.48f * std::min(p1.x - p0.x, p1.y - p0.y);
             dl->AddCircleFilled(ImVec2(kx, ky),
                                 pad_r * 0.34f, IM_COL32(88, 177, 255, 225), 24);
+            // The directional pictogram belongs to the movable knob, not to
+            // the static joystick well.  This keeps the icon visually locked
+            // to the control while the finger moves.
+            const ImVec2 icon_half(pad_r * .25f, pad_r * .25f);
+            IosDrawIcon(dl, c, ImVec2(kx - icon_half.x, ky - icon_half.y),
+                        ImVec2(kx + icon_half.x, ky + icon_half.y),
+                        IM_COL32(245, 250, 255, 245));
         }
     }
 
@@ -3343,10 +3382,9 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
 IOS_TOUCH_CONTROLS_DRAW = r"""#ifdef ROR_PLATFORM_IOS
 void InputEngine::IosDrawTouchControls(float dt)
 {
-    if (IosInTruck())
-        App::GetGuiManager()->VehicleInfoTPanel.SetVisible(
-            s_iosHudVisible ? RoR::GUI::VehicleInfoTPanel::TPANELMODE_TRANSLUCENT
-                            : RoR::GUI::VehicleInfoTPanel::TPANELMODE_HIDDEN);
+    App::GetGuiManager()->VehicleInfoTPanel.SetVisible(
+        (IosInTruck() && s_iosHudVisible) ? RoR::GUI::VehicleInfoTPanel::TPANELMODE_TRANSLUCENT
+                                          : RoR::GUI::VehicleInfoTPanel::TPANELMODE_HIDDEN);
 
     // Let any one-shot ("tap") press expire first, whatever else is going on.
     for (size_t i = 0; i < s_iosPulses.size(); )
