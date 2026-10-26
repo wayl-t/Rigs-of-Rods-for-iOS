@@ -2699,7 +2699,7 @@ int s_iosPanelPage = 0;
 // sequential pair (EV_TRUCK_SHIFT_UP/DOWN) and the automatic pair
 // (EV_TRUCK_AUTOSHIFT_UP/DOWN) - because Engine.cpp reads only the pair
 // matching the current gearbox mode, and either mode may be active.
-enum IosCtlKind { IOS_STEER, IOS_JOY, IOS_HELD, IOS_TOGGLE, IOS_PANEL, IOS_GUP, IOS_GDN, IOS_REPO, IOS_MENU, IOS_TAB0, IOS_TAB1, IOS_TAB2 };
+enum IosCtlKind { IOS_STEER, IOS_JOY, IOS_HELD, IOS_TOGGLE, IOS_PANEL, IOS_GUP, IOS_GDN, IOS_REPO, IOS_MENU, IOS_SPAWN, IOS_TAB0, IOS_TAB1, IOS_TAB2 };
 
 struct IosCtl {
     RoR::events ev;      // the event this control drives (STEER/JOY drive several)
@@ -2764,14 +2764,13 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
         out.push_back({RoR::EV_TRUCK_BLINK_LEFT,  IOS_TOGGLE, bx,                          by, bw, bh, "BL<"});
         out.push_back({RoR::EV_TRUCK_BLINK_WARN,  IOS_TOGGLE, bx + (bw + 0.010f),          by, bw, bh, "HAZ"});
         out.push_back({RoR::EV_TRUCK_BLINK_RIGHT, IOS_TOGGLE, bx + 2.f * (bw + 0.010f),    by, bw, bh, "BL>"});
-        // The vehicle-systems panel switch, top-right above the pedals.
-        // ("ev" is ignored for IOS_PANEL - the field only has to be filled.)
-        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_PANEL, 0.840f, 0.045f, 0.125f, 0.090f, "VEH"});
-        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_MENU, 0.030f, 0.045f, 0.120f, 0.090f, "MENU"});
-        // The mod repository, next to the dashboard's speedometer (which the
-        // iOS dashboard puts in the top left corner).  ("ev" is ignored for
-        // IOS_REPO as well - the button opens a panel, it drives no event.)
-        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_REPO, 0.245f, 0.040f, 0.130f, 0.095f, "REPO"});
+        // Persistent top action strip: menu, vehicle spawn, repository and
+        // vehicle systems.  The selector itself is the original RoR selector,
+        // opened through its standard input event, so it keeps all spawn modes.
+        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_MENU,  0.025f, 0.040f, 0.085f, 0.090f, "MENU"});
+        out.push_back({RoR::EV_COMMON_GET_NEW_VEHICLE, IOS_SPAWN, 0.120f, 0.040f, 0.085f, 0.090f, "SPAWN"});
+        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_REPO, 0.215f, 0.040f, 0.085f, 0.090f, "REPO"});
+        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_PANEL, 0.890f, 0.040f, 0.085f, 0.090f, "VEH"});
         // Three pages keep each vehicle control large enough for touch.
         if (s_iosPanel)
         {
@@ -2806,9 +2805,10 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
         out.push_back({RoR::EV_CAMERA_UP,                IOS_HELD,   0.835f, 0.510f, 0.125f, 0.145f, "UP"});
         out.push_back({RoR::EV_CAMERA_DOWN,              IOS_HELD,   0.835f, 0.680f, 0.125f, 0.145f, "DOWN"});
         out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_TOGGLE, 0.835f, 0.850f, 0.125f, 0.120f, "ENTER"});
-        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_MENU, 0.030f, 0.045f, 0.120f, 0.090f, "MENU"});
-        // The mod repository, top-left corner.
-        out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_REPO, 0.030f, 0.160f, 0.130f, 0.095f, "REPO"});
+        // The same top strip stays present in free camera, including spawn.
+        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_MENU, 0.025f, 0.040f, 0.085f, 0.090f, "MENU"});
+        out.push_back({RoR::EV_COMMON_GET_NEW_VEHICLE, IOS_SPAWN, 0.120f, 0.040f, 0.085f, 0.090f, "SPAWN"});
+        out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_REPO, 0.215f, 0.040f, 0.085f, 0.090f, "REPO"});
     }
 }
 
@@ -2924,6 +2924,13 @@ bool IosControlsHandleTouch(int action, float x, float y, int id)
                 App::GetGuiManager()->GameMainMenu.SetVisible(true);
                 return true;
             }
+            if (ctls[i].kind == IOS_SPAWN)
+            {
+                // Use RoR's regular spawn action. Its message handler opens
+                // the full vehicle/terrain selector, including all stock modes.
+                IosPulseEvent(RoR::EV_COMMON_GET_NEW_VEHICLE);
+                return true;
+            }
             if (ctls[i].kind == IOS_TOGGLE)
                 IosPulseEvent(ctls[i].ev);
             else if (ctls[i].kind == IOS_GUP)
@@ -3023,7 +3030,7 @@ void IosApplyHeldEvents(float W, float H, const std::vector<IosCtl>& ctls)
         const IosCtl& c = ctls[i];
         // One-shots are handled by pulses; the panel and gear buttons never
         // carry an analog position or a level value.
-        if (c.kind == IOS_TOGGLE || c.kind == IOS_PANEL || c.kind == IOS_MENU ||
+        if (c.kind == IOS_TOGGLE || c.kind == IOS_PANEL || c.kind == IOS_MENU || c.kind == IOS_SPAWN ||
             c.kind == IOS_TAB0 || c.kind == IOS_TAB1 || c.kind == IOS_TAB2 ||
             c.kind == IOS_GUP    || c.kind == IOS_GDN) continue;
 
@@ -3086,6 +3093,41 @@ void IosApplyHeldEvents(float W, float H, const std::vector<IosCtl>& ctls)
     }
 }
 
+// Draw compact vector pictograms. They stay crisp at every Retina scale and
+// avoid a separate texture atlas just for the mobile controls.
+void IosDrawIcon(ImDrawList* dl, const IosCtl& c, const ImVec2& p0, const ImVec2& p1, ImU32 color)
+{
+    const ImVec2 q((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
+    const float r = 0.22f * std::min(p1.x - p0.x, p1.y - p0.y);
+    const float t = std::max(2.f, r * 0.18f);
+    const auto line = [&](float ax, float ay, float bx, float by) { dl->AddLine(ImVec2(q.x + ax * r, q.y + ay * r), ImVec2(q.x + bx * r, q.y + by * r), color, t); };
+    const auto arrow = [&](float dx, float dy) {
+        line(-dx, -dy, dx, dy);
+        line(dx, dy, dx - 0.55f * (dx + dy), dy - 0.55f * (dy - dx));
+        line(dx, dy, dx - 0.55f * (dx - dy), dy - 0.55f * (dy + dx));
+    };
+
+    if (c.kind == IOS_MENU) { line(-1.2f, -0.75f, 1.2f, -0.75f); line(-1.2f, 0.f, 1.2f, 0.f); line(-1.2f, 0.75f, 1.2f, 0.75f); }
+    else if (c.kind == IOS_SPAWN) { dl->AddRect(ImVec2(q.x - 1.15f*r, q.y - 0.35f*r), ImVec2(q.x + 1.15f*r, q.y + 0.80f*r), color, 0.f, ImDrawCornerFlags_All, t); dl->AddCircleFilled(ImVec2(q.x - 0.65f*r, q.y + 0.82f*r), 0.25f*r, color, 12); dl->AddCircleFilled(ImVec2(q.x + 0.65f*r, q.y + 0.82f*r), 0.25f*r, color, 12); line(0.f, -1.25f, 0.f, -0.45f); line(-0.4f, -0.85f, 0.4f, -0.85f); }
+    else if (c.kind == IOS_REPO) { dl->AddRect(ImVec2(q.x - 1.0f*r, q.y + 0.05f*r), ImVec2(q.x + 1.0f*r, q.y + 0.95f*r), color, 0.f, ImDrawCornerFlags_All, t); arrow(0.f, -1.f); }
+    else if (c.kind == IOS_PANEL) { for (int y = 0; y < 2; ++y) for (int x = 0; x < 2; ++x) dl->AddRectFilled(ImVec2(q.x + (-1.0f + 1.1f*x)*r, q.y + (-1.0f + 1.1f*y)*r), ImVec2(q.x + (-0.25f + 1.1f*x)*r, q.y + (-0.25f + 1.1f*y)*r), color, 2.f); }
+    else if (c.kind == IOS_TAB0) { dl->AddCircle(q, 0.55f*r, color, 14, t); line(0.f, -1.3f, 0.f, -0.85f); line(0.f, 0.85f, 0.f, 1.3f); line(-1.3f, 0.f, -0.85f, 0.f); line(0.85f, 0.f, 1.3f, 0.f); }
+    else if (c.kind == IOS_TAB1) { dl->AddCircle(q, 0.42f*r, color, 14, t); line(-1.15f, 0.f, -0.72f, 0.f); line(0.72f, 0.f, 1.15f, 0.f); line(0.f, -1.15f, 0.f, -0.72f); line(0.f, 0.72f, 0.f, 1.15f); }
+    else if (c.kind == IOS_TAB2) { line(-1.15f, -0.75f, 1.15f, -0.75f); line(-1.15f, 0.f, 1.15f, 0.f); line(-1.15f, 0.75f, 1.15f, 0.75f); dl->AddCircleFilled(ImVec2(q.x - 0.35f*r, q.y - 0.75f*r), 0.20f*r, color, 10); dl->AddCircleFilled(ImVec2(q.x + 0.45f*r, q.y), 0.20f*r, color, 10); dl->AddCircleFilled(ImVec2(q.x - 0.15f*r, q.y + 0.75f*r), 0.20f*r, color, 10); }
+    else if (c.kind == IOS_STEER) { dl->AddCircle(q, 1.10f*r, color, 20, t); dl->AddCircle(q, 0.36f*r, color, 16, t); line(-1.0f, -0.25f, -0.28f, 0.f); line(1.0f, -0.25f, 0.28f, 0.f); line(0.f, 1.05f, 0.f, 0.35f); }
+    else if (c.kind == IOS_JOY) { arrow(0.f, -1.f); arrow(1.f, 0.f); arrow(0.f, 1.f); arrow(-1.f, 0.f); }
+    else if (c.kind == IOS_GUP || c.ev == RoR::EV_TRUCK_ACCELERATE || c.ev == RoR::EV_CAMERA_UP) arrow(0.f, -1.f);
+    else if (c.kind == IOS_GDN || c.ev == RoR::EV_TRUCK_BRAKE || c.ev == RoR::EV_CAMERA_DOWN) arrow(0.f, 1.f);
+    else if (c.ev == RoR::EV_TRUCK_HORN) { dl->AddTriangleFilled(ImVec2(q.x - 1.0f*r, q.y - 0.55f*r), ImVec2(q.x - 1.0f*r, q.y + 0.55f*r), ImVec2(q.x + 0.35f*r, q.y + 0.85f*r), color); line(0.75f, -0.6f, 1.15f, -0.9f); line(0.75f, 0.6f, 1.15f, 0.9f); }
+    else if (c.ev == RoR::EV_CAMERA_CHANGE) { dl->AddCircle(q, 0.85f*r, color, 16, t); dl->AddCircleFilled(q, 0.30f*r, color, 12); }
+    else if (c.ev == RoR::EV_TRUCK_STARTER || c.ev == RoR::EV_TRUCK_TOGGLE_CONTACT) { dl->PathClear(); dl->PathArcTo(q, 0.95f*r, -2.4f, 2.4f, 18); dl->PathStroke(color, false, t); line(0.f, -1.25f, 0.f, -0.15f); }
+    else if (c.ev == RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK) { dl->AddRect(ImVec2(q.x - 0.95f*r, q.y - 1.0f*r), ImVec2(q.x + 0.15f*r, q.y + 1.0f*r), color, 0.f, ImDrawCornerFlags_All, t); arrow(1.f, 0.f); }
+    else if (c.ev == RoR::EV_TRUCK_BLINK_LEFT) arrow(-1.f, 0.f);
+    else if (c.ev == RoR::EV_TRUCK_BLINK_RIGHT) arrow(1.f, 0.f);
+    else if (c.ev == RoR::EV_TRUCK_BLINK_WARN) { arrow(0.f, -1.f); arrow(0.f, 1.f); }
+    else { dl->AddCircle(q, 0.90f*r, color, 16, t); dl->AddCircleFilled(q, 0.20f*r, color, 12); }
+}
+
 // The on-screen controls themselves, drawn on the foreground draw list so they
 // stay readable over the 3D scene and the dashboard.
 void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
@@ -3108,7 +3150,8 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         const ImVec2 q1(bx1 * W, by1 * H);
         dl->AddRectFilled(q0, q1, IM_COL32(8, 10, 14, 190), 14.f, ImDrawCornerFlags_All);
         dl->AddRect(q0, q1, IM_COL32(255, 255, 255, 70), 14.f, ImDrawCornerFlags_All, 2.f);
-        const char*  title = "VEHICLE";
+        const char* page_titles[] = {"LIGHTS", "DRIVE", "EXTRAS"};
+        const char*  title = page_titles[s_iosPanelPage];
         const float  tfs   = fs * 0.5f;
         const ImVec2 ts    = font->CalcTextSizeA(tfs, 1e6f, 0.f, title);
         dl->AddText(font, tfs, ImVec2((q0.x + q1.x - ts.x) * 0.5f, q0.y + 2.f),
@@ -3135,7 +3178,7 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         {
             pressed = App::GetGuiManager()->GameMainMenu.IsVisible();
         }
-        else if (c.kind == IOS_TOGGLE || c.kind == IOS_GUP || c.kind == IOS_GDN)
+        else if (c.kind == IOS_TOGGLE || c.kind == IOS_GUP || c.kind == IOS_GDN || c.kind == IOS_SPAWN)
         {
             for (size_t p = 0; p < s_iosPulses.size(); ++p)
                 if (s_iosPulses[p].ev == c.ev) { pressed = true; break; }
@@ -3168,17 +3211,17 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
                 dl->AddLine(ImVec2(center.x, center.y - pad_r * 0.72f), ImVec2(center.x, center.y + pad_r * 0.72f), IM_COL32(230, 242, 255, 40), 1.f);
             }
         }
-        else if (c.kind == IOS_HELD || c.kind == IOS_TOGGLE || c.kind == IOS_GUP || c.kind == IOS_GDN || c.kind == IOS_PANEL || c.kind == IOS_MENU || c.kind == IOS_REPO || c.kind == IOS_TAB0 || c.kind == IOS_TAB1 || c.kind == IOS_TAB2)
+        else if (c.kind == IOS_HELD || c.kind == IOS_TOGGLE || c.kind == IOS_GUP || c.kind == IOS_GDN || c.kind == IOS_PANEL || c.kind == IOS_MENU || c.kind == IOS_SPAWN || c.kind == IOS_REPO || c.kind == IOS_TAB0 || c.kind == IOS_TAB1 || c.kind == IOS_TAB2)
         {
             const float rounding = std::min(18.f, control_r * 0.55f);
             dl->AddRectFilled(p0, p1, fill, rounding, ImDrawCornerFlags_All);
             dl->AddRect(p0, p1, border, rounding, ImDrawCornerFlags_All, 1.5f);
         }
 
-        // Centred label.
-        const ImVec2 ts = font->CalcTextSizeA(lfs, 1e6f, 0.f, c.label);
-        const ImVec2 tp((p0.x + p1.x - ts.x) * 0.5f, (p0.y + p1.y - ts.y) * 0.5f);
-        dl->AddText(font, lfs, tp, IM_COL32(255, 255, 255, 240), c.label);
+        // Every direct manipulation button is pictographic. Text remains only
+        // in the panel title and HUD, where it communicates state rather than
+        // occupying a tap target.
+        IosDrawIcon(dl, c, p0, p1, IM_COL32(245, 250, 255, 245));
 
         // Live marker for the two analog controls.
         if (c.kind == IOS_STEER)
