@@ -2757,9 +2757,11 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
     }
     if (IosInTruck())
     {
-        // Steering: an absolute-position bar.  Left of centre = steer left,
-        // right of centre = steer right, amount = distance from centre.
-        out.push_back({RoR::EV_TRUCK_STEER_LEFT, IOS_STEER, 0.045f, 0.590f, 0.150f, 0.360f, "STEER"});
+        // Steering uses two independent arrow buttons.  They are easier to
+        // read than a hidden analog bar and leave the right thumb free for
+        // camera look while driving.
+        out.push_back({RoR::EV_TRUCK_STEER_LEFT,  IOS_HELD, 0.035f, 0.615f, 0.125f, 0.185f, "STEER_L"});
+        out.push_back({RoR::EV_TRUCK_STEER_RIGHT, IOS_HELD, 0.180f, 0.615f, 0.125f, 0.185f, "STEER_R"});
         // Pedals under the right thumb.
         out.push_back({RoR::EV_TRUCK_ACCELERATE, IOS_HELD,   0.845f, 0.360f, 0.150f, 0.300f, "GAS"});
         out.push_back({RoR::EV_TRUCK_BRAKE,      IOS_HELD,   0.845f, 0.680f, 0.150f, 0.300f, "BRK"});
@@ -3135,6 +3137,8 @@ int IosIconCell(const IosCtl& c)
     if (c.label && std::strcmp(c.label, "LIGHT 2") == 0) return 15;
     if (c.label && std::strcmp(c.label, "LIGHT 3") == 0) return 9;
     if (c.label && (std::strcmp(c.label, "P") == 0 || std::strcmp(c.label, "PARKING") == 0)) return 9;
+    if (c.label && std::strcmp(c.label, "STEER_L") == 0) return 29;
+    if (c.label && std::strcmp(c.label, "STEER_R") == 0) return 30;
     if (c.label && (std::strcmp(c.label, "IGN") == 0 || std::strcmp(c.label, "IGNITION") == 0)) return 9;
     if (c.label && (std::strcmp(c.label, "EXIT") == 0 || std::strcmp(c.label, "ENTER") == 0)) return 1;
     if (c.label && std::strcmp(c.label, "GEAR +") == 0) return 5;
@@ -3203,6 +3207,7 @@ void IosDrawIcon(ImDrawList* dl, const IosCtl& c, const ImVec2& p0, const ImVec2
     if (k == 25) { line({cc.x-s*.8f,cc.y},{cc.x+s*.8f,cc.y}); dl->AddTriangleFilled({cc.x+s*.8f,cc.y},{cc.x+s*.25f,cc.y-s*.4f},{cc.x+s*.25f,cc.y+s*.4f},color); return; }
     if (k == 26 || k == 27) { dl->AddRect({cc.x-s*.8f,cc.y-s*.65f},{cc.x+s*.8f,cc.y+s*.65f},color,2.f,t); line({cc.x-s*.45f,cc.y},{cc.x+s*.45f,cc.y}); line({cc.x,cc.y-s*.4f},{cc.x,cc.y+s*.4f}); return; }
     if (k == 28) { dl->AddCircleFilled({cc.x,cc.y-s*.35f},s*.18f,color,16); line({cc.x,cc.y-s*.15f},{cc.x-s*.55f,cc.y+s*.6f}); line({cc.x,cc.y-s*.15f},{cc.x+s*.55f,cc.y+s*.6f}); return; }
+    if (k == 29 || k == 30) { const float d = k == 29 ? -1.f : 1.f; line({cc.x-d*s*.7f,cc.y},{cc.x+d*s*.45f,cc.y}); dl->AddTriangleFilled({cc.x+d*s*.78f,cc.y},{cc.x+d*s*.15f,cc.y-s*.5f},{cc.x+d*s*.15f,cc.y+s*.5f},color); return; }
     dl->AddCircle(cc,s*.72f,color,24,t); line({cc.x-s*.45f,cc.y},{cc.x+s*.45f,cc.y}); line({cc.x,cc.y-s*.45f},{cc.x,cc.y+s*.45f});
 }
 
@@ -4357,8 +4362,10 @@ def patch_gui_manager(ror):
     text = must_replace(
         text,
         "        this->VehicleInfoTPanel.Draw(player_gfx_actor);\n",
-        "        this->VehicleInfoTPanel.Draw(player_gfx_actor);\n",
-        "GUIManager.cpp: keep VehicleInfoTPanel available for mobile toggle",
+        "#ifndef ROR_PLATFORM_IOS\n"
+        "        this->VehicleInfoTPanel.Draw(player_gfx_actor);\n"
+        "#endif\n",
+        "GUIManager.cpp: never draw desktop VehicleInfoTPanel on iOS",
     )
     text = must_replace(
         text,
