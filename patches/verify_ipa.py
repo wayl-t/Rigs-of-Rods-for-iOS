@@ -716,8 +716,15 @@ def main(argv):
             "that multiplies the whole body by (0,0,0), which is the black "
             "character seen on the phone (patch_character_material did not "
             "run)")
+    elif "lighting off" not in body:
+        bad.append(
+            "the shipped character.material has no explicit GLES2 self-lit "
+            "technique - the iOS lighting patch did not match the upstream "
+            "material declaration, so RTSS leaves lighting enabled and the "
+            "avatar renders black")
     else:
-        print("  ok      rorres character.material: ColorChange pass removed")
+        print("  ok      rorres character.material: ColorChange removed, "
+              "GLES2 self-lit technique present")
 
     # The shadow type is NONE on iOS, so the "pssm/off" variant of the shared
     # shadow technique is the one that gets mounted - and it has an empty

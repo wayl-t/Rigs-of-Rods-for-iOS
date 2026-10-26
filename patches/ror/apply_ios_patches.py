@@ -4374,12 +4374,15 @@ def patch_character_material(ror):
     if color_pass in text:
         text = text.replace(color_pass, "")
     
-    # Make character fully self-lit for iOS/GLES2
-    text = text.replace(
-        "\tmaterial tracks/character : RoR/Managed_Mats/Base\n"
-        "\t{\n",
-        "\tmaterial tracks/character : RoR/Managed_Mats/Base\n"
+    # Make character fully self-lit for iOS/GLES2.  Match the upstream source
+    # exactly: there is no space before the colon.  This used to be a plain
+    # str.replace(), so the mismatch silently left the default lit technique in
+    # place and RTSS generated lighting=1 for the avatar on the device.
+    material_anchor = (
+        "\tmaterial tracks/character: RoR/Managed_Mats/Base\n"
         "\t{\n"
+    )
+    material_replacement = material_anchor + (
         "\t\ttechnique\n"
         "\t\t{\n"
         "\t\t\tpass\n"
@@ -4392,6 +4395,9 @@ def patch_character_material(ror):
         "\t\t\t}\n"
         "\t\t}\n"
     )
+    if "\t\t\t\tlighting off\n" not in text:
+        text = must_replace(text, material_anchor, material_replacement,
+                            "character.material: insert GLES2 self-lit technique")
     write(path, text)
 
 
