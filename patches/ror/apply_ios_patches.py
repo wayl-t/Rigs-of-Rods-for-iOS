@@ -4802,6 +4802,43 @@ def patch_ios_free_camera(ror):
     text = read(path)
     text = must_replace(
         text,
+        '                if (actor->ar_cinecam_node[0] == NODENUM_INVALID)\n'
+        '                {\n'
+        '                    LOG("cinecam missing, cannot enter the actor!");\n'
+        '                    continue;\n'
+        '                }\n'
+        '                float len = 0.0f;\n'
+        '                if (this->GetPlayerCharacter())\n'
+        '                {\n'
+        '                    len = actor->ar_nodes[actor->ar_cinecam_node[0]].AbsPosition.distance(this->GetPlayerCharacter()->getPosition() + Ogre::Vector3(0.0, 2.0, 0.0));\n'
+        '                }\n',
+        '#ifdef ROR_PLATFORM_IOS\n'
+        '                // Mobile vehicles may not define a cinecam node. The\n'
+        '                // desktop enter test used that node as its distance\n'
+        '                // anchor and consequently rejected the vehicle after\n'
+        '                // the player exited it. Use the actor body position on\n'
+        '                // iOS; cinecam remains the desktop behaviour.\n'
+        '                float len = 0.0f;\n'
+        '                if (this->GetPlayerCharacter())\n'
+        '                {\n'
+        '                    len = actor->getPosition().distance(this->GetPlayerCharacter()->getPosition() + Ogre::Vector3(0.0, 2.0, 0.0));\n'
+        '                }\n'
+        '#else\n'
+        '                if (actor->ar_cinecam_node[0] == NODENUM_INVALID)\n'
+        '                {\n'
+        '                    LOG("cinecam missing, cannot enter the actor!");\n'
+        '                    continue;\n'
+        '                }\n'
+        '                float len = 0.0f;\n'
+        '                if (this->GetPlayerCharacter())\n'
+        '                {\n'
+        '                    len = actor->ar_nodes[actor->ar_cinecam_node[0]].AbsPosition.distance(this->GetPlayerCharacter()->getPosition() + Ogre::Vector3(0.0, 2.0, 0.0));\n'
+        '                }\n'
+        '#endif\n',
+        "GameContext.cpp: allow iOS re-entry without a cinecam node",
+    )
+    text = must_replace(
+        text,
         '    App::GetCameraManager()->GetCameraNode()->setPosition(this->GetPlayerCharacter()->getPosition());\n',
         '    App::GetCameraManager()->GetCameraNode()->setPosition(spawn_pos + Ogre::Vector3(0.f, 3.f, 9.f));\n'
         '    App::GetCameraManager()->GetCameraNode()->lookAt(spawn_pos + Ogre::Vector3(0.f, 1.f, 0.f), Ogre::Node::TS_WORLD);\n',
