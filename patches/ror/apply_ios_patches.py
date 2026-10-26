@@ -2668,6 +2668,7 @@ def patch_inputengine_header(ror):
 IOS_TOUCH_CONTROLS_HELPERS = r"""#ifdef ROR_PLATFORM_IOS
 #include <imgui.h> // drawn with ImGui's foreground draw list
 #include <cstdio>
+#include "GUIUtils.h"
 #include "Actor.h"
 #include "Engine.h"
 // App::GetGameContext()->GetPlayerActor() needs the complete GameContext type;
@@ -2677,7 +2678,7 @@ IOS_TOUCH_CONTROLS_HELPERS = r"""#ifdef ROR_PLATFORM_IOS
 namespace {
 
 // A touch that began on a control and keeps driving it until it lifts.
-struct IosTouchPt { float x, y; int id; };
+struct IosTouchPt { float x, y, ox, oy; int id; int kind; };
 std::vector<IosTouchPt> s_iosCtlTouches;
 
 // A one-shot ("tap") control: the event is held at 1 briefly so the game's
@@ -2800,7 +2801,7 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
     else
     {
         // Compact virtual stick under the left thumb.
-        out.push_back({RoR::EV_CHARACTER_FORWARD, IOS_JOY, 0.045f, 0.620f, 0.150f, 0.330f, "FLY"});
+        out.push_back({RoR::EV_CHARACTER_FORWARD, IOS_JOY, 0.025f, 0.400f, 0.300f, 0.570f, "FLY"});
         // Free-camera altitude controls under the right thumb.
         out.push_back({RoR::EV_CAMERA_UP,                IOS_HELD,   0.835f, 0.510f, 0.125f, 0.145f, "UP"});
         out.push_back({RoR::EV_CAMERA_DOWN,              IOS_HELD,   0.835f, 0.680f, 0.125f, 0.145f, "DOWN"});
@@ -2926,9 +2927,9 @@ bool IosControlsHandleTouch(int action, float x, float y, int id)
             }
             if (ctls[i].kind == IOS_SPAWN)
             {
-                // Use RoR's regular spawn action. Its message handler opens
-                // the full vehicle/terrain selector, including all stock modes.
-                IosPulseEvent(RoR::EV_COMMON_GET_NEW_VEHICLE);
+                RoR::Message msg(RoR::MSG_GUI_OPEN_SELECTOR_REQUESTED);
+                msg.payload = reinterpret_cast<void*>(new RoR::LoaderType(RoR::LT_AllBeam));
+                App::GetGameContext()->PushMessage(msg);
                 return true;
             }
             if (ctls[i].kind == IOS_TOGGLE)
@@ -2946,7 +2947,7 @@ bool IosControlsHandleTouch(int action, float x, float y, int id)
                 IosPulseEvent(RoR::EV_TRUCK_AUTOSHIFT_DOWN);
             }
             else
-                s_iosCtlTouches.push_back({x, y, id});
+                s_iosCtlTouches.push_back({x, y, x, y, id, (int)ctls[i].kind});
             return true;
         }
         // With the panel open, a tap that missed every one of its buttons
@@ -3039,7 +3040,9 @@ void IosApplyHeldEvents(float W, float H, const std::vector<IosCtl>& ctls)
         float tx = 0.f, ty = 0.f;
         for (size_t t = 0; t < s_iosCtlTouches.size(); ++t)
         {
-            if (IosPtIn(c, W, H, s_iosCtlTouches[t].x, s_iosCtlTouches[t].y))
+            const bool floating = (c.kind == IOS_JOY && s_iosCtlTouches[t].kind == (int)IOS_JOY);
+            if (floating || (c.kind != IOS_JOY &&
+                IosPtIn(c, W, H, s_iosCtlTouches[t].x, s_iosCtlTouches[t].y)))
             {
                 active = true;
                 tx = s_iosCtlTouches[t].x;
@@ -3064,10 +3067,12 @@ void IosApplyHeldEvents(float W, float H, const std::vector<IosCtl>& ctls)
         }
         else if (c.kind == IOS_JOY)
         {
-            const float cx = (c.x + 0.5f * c.w) * W;
-            const float cy = (c.y + 0.5f * c.h) * H;
-            const float rx = 0.5f * c.w * W;
-            const float ry = 0.5f * c.h * H;
+            float cx = (c.x + 0.5f * c.w) * W;
+            float cy = (c.y + 0.5f * c.h) * H;
+            for (size_t t = 0; t < s_iosCtlTouches.size(); ++t)
+                if (s_iosCtlTouches[t].kind == (int)IOS_JOY) { cx = s_iosCtlTouches[t].ox; cy = s_iosCtlTouches[t].oy; break; }
+            const float rx = 0.13f * H;
+            const float ry = 0.13f * H;
             float jx = active ? (tx - cx) / rx : 0.f;
             float jy = active ? (ty - cy) / ry : 0.f;
             const float dz = 0.22f;
@@ -3093,39 +3098,38 @@ void IosApplyHeldEvents(float W, float H, const std::vector<IosCtl>& ctls)
     }
 }
 
-// Draw compact vector pictograms. They stay crisp at every Retina scale and
-// avoid a separate texture atlas just for the mobile controls.
+// A generated PNG atlas supplies the mobile icons with baked lighting/depth.
+int IosIconCell(const IosCtl& c)
+{
+    if (c.kind == IOS_MENU) return 0;
+    if (c.kind == IOS_SPAWN || c.ev == RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK) return 1;
+    if (c.kind == IOS_REPO) return 2;
+    if (c.kind == IOS_PANEL || c.kind == IOS_TAB2) return 3;
+    if (c.kind == IOS_STEER) return 4;
+    if (c.kind == IOS_GUP || c.ev == RoR::EV_TRUCK_ACCELERATE || c.ev == RoR::EV_CAMERA_UP) return 5;
+    if (c.kind == IOS_GDN || c.ev == RoR::EV_TRUCK_BRAKE || c.ev == RoR::EV_CAMERA_DOWN) return 6;
+    if (c.ev == RoR::EV_TRUCK_HORN) return 7;
+    if (c.ev == RoR::EV_CAMERA_CHANGE) return 8;
+    if (c.ev == RoR::EV_TRUCK_STARTER || c.ev == RoR::EV_TRUCK_TOGGLE_CONTACT) return 9;
+    if (c.ev == RoR::EV_TRUCK_BLINK_LEFT) return 10;
+    if (c.ev == RoR::EV_TRUCK_BLINK_WARN) return 11;
+    if (c.ev == RoR::EV_TRUCK_BLINK_RIGHT) return 12;
+    if (c.kind == IOS_JOY) return 15;
+    return 3;
+}
+
 void IosDrawIcon(ImDrawList* dl, const IosCtl& c, const ImVec2& p0, const ImVec2& p1, ImU32 color)
 {
-    const ImVec2 q((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
-    const float r = 0.22f * std::min(p1.x - p0.x, p1.y - p0.y);
-    const float t = std::max(2.f, r * 0.18f);
-    const auto line = [&](float ax, float ay, float bx, float by) { dl->AddLine(ImVec2(q.x + ax * r, q.y + ay * r), ImVec2(q.x + bx * r, q.y + by * r), color, t); };
-    const auto arrow = [&](float dx, float dy) {
-        line(-dx, -dy, dx, dy);
-        line(dx, dy, dx - 0.55f * (dx + dy), dy - 0.55f * (dy - dx));
-        line(dx, dy, dx - 0.55f * (dx - dy), dy - 0.55f * (dy + dx));
-    };
-
-    if (c.kind == IOS_MENU) { line(-1.2f, -0.75f, 1.2f, -0.75f); line(-1.2f, 0.f, 1.2f, 0.f); line(-1.2f, 0.75f, 1.2f, 0.75f); }
-    else if (c.kind == IOS_SPAWN) { dl->AddRect(ImVec2(q.x - 1.15f*r, q.y - 0.35f*r), ImVec2(q.x + 1.15f*r, q.y + 0.80f*r), color, 0.f, ImDrawCornerFlags_All, t); dl->AddCircleFilled(ImVec2(q.x - 0.65f*r, q.y + 0.82f*r), 0.25f*r, color, 12); dl->AddCircleFilled(ImVec2(q.x + 0.65f*r, q.y + 0.82f*r), 0.25f*r, color, 12); line(0.f, -1.25f, 0.f, -0.45f); line(-0.4f, -0.85f, 0.4f, -0.85f); }
-    else if (c.kind == IOS_REPO) { dl->AddRect(ImVec2(q.x - 1.0f*r, q.y + 0.05f*r), ImVec2(q.x + 1.0f*r, q.y + 0.95f*r), color, 0.f, ImDrawCornerFlags_All, t); arrow(0.f, -1.f); }
-    else if (c.kind == IOS_PANEL) { for (int y = 0; y < 2; ++y) for (int x = 0; x < 2; ++x) dl->AddRectFilled(ImVec2(q.x + (-1.0f + 1.1f*x)*r, q.y + (-1.0f + 1.1f*y)*r), ImVec2(q.x + (-0.25f + 1.1f*x)*r, q.y + (-0.25f + 1.1f*y)*r), color, 2.f); }
-    else if (c.kind == IOS_TAB0) { dl->AddCircle(q, 0.55f*r, color, 14, t); line(0.f, -1.3f, 0.f, -0.85f); line(0.f, 0.85f, 0.f, 1.3f); line(-1.3f, 0.f, -0.85f, 0.f); line(0.85f, 0.f, 1.3f, 0.f); }
-    else if (c.kind == IOS_TAB1) { dl->AddCircle(q, 0.42f*r, color, 14, t); line(-1.15f, 0.f, -0.72f, 0.f); line(0.72f, 0.f, 1.15f, 0.f); line(0.f, -1.15f, 0.f, -0.72f); line(0.f, 0.72f, 0.f, 1.15f); }
-    else if (c.kind == IOS_TAB2) { line(-1.15f, -0.75f, 1.15f, -0.75f); line(-1.15f, 0.f, 1.15f, 0.f); line(-1.15f, 0.75f, 1.15f, 0.75f); dl->AddCircleFilled(ImVec2(q.x - 0.35f*r, q.y - 0.75f*r), 0.20f*r, color, 10); dl->AddCircleFilled(ImVec2(q.x + 0.45f*r, q.y), 0.20f*r, color, 10); dl->AddCircleFilled(ImVec2(q.x - 0.15f*r, q.y + 0.75f*r), 0.20f*r, color, 10); }
-    else if (c.kind == IOS_STEER) { dl->AddCircle(q, 1.10f*r, color, 20, t); dl->AddCircle(q, 0.36f*r, color, 16, t); line(-1.0f, -0.25f, -0.28f, 0.f); line(1.0f, -0.25f, 0.28f, 0.f); line(0.f, 1.05f, 0.f, 0.35f); }
-    else if (c.kind == IOS_JOY) { arrow(0.f, -1.f); arrow(1.f, 0.f); arrow(0.f, 1.f); arrow(-1.f, 0.f); }
-    else if (c.kind == IOS_GUP || c.ev == RoR::EV_TRUCK_ACCELERATE || c.ev == RoR::EV_CAMERA_UP) arrow(0.f, -1.f);
-    else if (c.kind == IOS_GDN || c.ev == RoR::EV_TRUCK_BRAKE || c.ev == RoR::EV_CAMERA_DOWN) arrow(0.f, 1.f);
-    else if (c.ev == RoR::EV_TRUCK_HORN) { dl->AddTriangleFilled(ImVec2(q.x - 1.0f*r, q.y - 0.55f*r), ImVec2(q.x - 1.0f*r, q.y + 0.55f*r), ImVec2(q.x + 0.35f*r, q.y + 0.85f*r), color); line(0.75f, -0.6f, 1.15f, -0.9f); line(0.75f, 0.6f, 1.15f, 0.9f); }
-    else if (c.ev == RoR::EV_CAMERA_CHANGE) { dl->AddCircle(q, 0.85f*r, color, 16, t); dl->AddCircleFilled(q, 0.30f*r, color, 12); }
-    else if (c.ev == RoR::EV_TRUCK_STARTER || c.ev == RoR::EV_TRUCK_TOGGLE_CONTACT) { dl->PathClear(); dl->PathArcTo(q, 0.95f*r, -2.4f, 2.4f, 18); dl->PathStroke(color, false, t); line(0.f, -1.25f, 0.f, -0.15f); }
-    else if (c.ev == RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK) { dl->AddRect(ImVec2(q.x - 0.95f*r, q.y - 1.0f*r), ImVec2(q.x + 0.15f*r, q.y + 1.0f*r), color, 0.f, ImDrawCornerFlags_All, t); arrow(1.f, 0.f); }
-    else if (c.ev == RoR::EV_TRUCK_BLINK_LEFT) arrow(-1.f, 0.f);
-    else if (c.ev == RoR::EV_TRUCK_BLINK_RIGHT) arrow(1.f, 0.f);
-    else if (c.ev == RoR::EV_TRUCK_BLINK_WARN) { arrow(0.f, -1.f); arrow(0.f, 1.f); }
-    else { dl->AddCircle(q, 0.90f*r, color, 16, t); dl->AddCircleFilled(q, 0.20f*r, color, 12); }
+    static Ogre::TexturePtr atlas;
+    if (atlas.isNull()) atlas = RoR::FetchIcon("mobile_controls_atlas.png");
+    const int cell = IosIconCell(c);
+    const float u0 = (float)(cell % 4) * 0.25f;
+    const float v0 = (float)(cell / 4) * 0.25f;
+    const float inset = 0.07f;
+    const ImVec2 margin(0.10f * (p1.x - p0.x), 0.10f * (p1.y - p0.y));
+    dl->AddImage(reinterpret_cast<ImTextureID>(atlas->getHandle()), p0 + margin, p1 - margin,
+        ImVec2(u0 + inset * 0.25f, v0 + inset * 0.25f),
+        ImVec2(u0 + (1.f - inset) * 0.25f, v0 + (1.f - inset) * 0.25f), color);
 }
 
 // The on-screen controls themselves, drawn on the foreground draw list so they
@@ -3200,7 +3204,10 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         const ImU32 border = pressed ? IM_COL32(130, 210, 255, 245) : IM_COL32(220, 236, 255, 135);
         if (c.kind == IOS_JOY || c.kind == IOS_STEER)
         {
-            const ImVec2 center((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
+            ImVec2 center((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
+            if (c.kind == IOS_JOY)
+                for (size_t t = 0; t < s_iosCtlTouches.size(); ++t)
+                    if (s_iosCtlTouches[t].kind == (int)IOS_JOY) { center = ImVec2(s_iosCtlTouches[t].ox, s_iosCtlTouches[t].oy); break; }
             const float pad_r = (c.kind == IOS_JOY) ? 0.48f * std::min(control_w, control_h) : 0.46f * control_h;
             dl->AddCircleFilled(center, pad_r, IM_COL32(7, 14, 24, 105), 36);
             dl->AddCircle(center, pad_r, IM_COL32(230, 242, 255, 135), 36, 2.f);
@@ -3234,8 +3241,11 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         }
         else if (c.kind == IOS_JOY)
         {
-            const float kx = (p0.x + p1.x) * 0.5f + s_iosJoyX * 0.5f * (p1.x - p0.x);
-            const float ky = (p0.y + p1.y) * 0.5f + s_iosJoyY * 0.5f * (p1.y - p0.y);
+            float cx = (p0.x + p1.x) * 0.5f, cy = (p0.y + p1.y) * 0.5f;
+            for (size_t t = 0; t < s_iosCtlTouches.size(); ++t)
+                if (s_iosCtlTouches[t].kind == (int)IOS_JOY) { cx = s_iosCtlTouches[t].ox; cy = s_iosCtlTouches[t].oy; break; }
+            const float kx = cx + s_iosJoyX * 0.13f * H;
+            const float ky = cy + s_iosJoyY * 0.13f * H;
             const float pad_r = 0.48f * std::min(p1.x - p0.x, p1.y - p0.y);
             dl->AddCircleFilled(ImVec2(kx, ky),
                                 pad_r * 0.34f, IM_COL32(88, 177, 255, 225), 24);
@@ -5560,6 +5570,14 @@ def patch_mygui_resources(ror):
         else:
             print("  WARNING: resources/icons/ror.png is missing, "
                   "FlagsRG will still fail to resolve ror.png")
+
+    atlas_src = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ios", "mobile_controls_atlas.png")
+    atlas_dst = os.path.join(ror, "resources", "icons", "mobile_controls_atlas.png")
+    if os.path.exists(atlas_src):
+        shutil.copyfile(atlas_src, atlas_dst)
+        print("  copied generated mobile control atlas -> resources/icons/mobile_controls_atlas.png")
+    else:
+        sys.exit("ERROR: generated mobile_controls_atlas.png is missing")
 
 
 # The RTSS function library is *data*, and it is version locked to the library
