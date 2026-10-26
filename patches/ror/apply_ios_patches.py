@@ -1658,6 +1658,7 @@ IOS_PLATFORM_MM = r'''// Rigs of Rods - Apple/iOS platform layer implementation.
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <cstring>
 #include <csignal>
@@ -2694,13 +2695,15 @@ float s_iosJoyY  = 0.f;   // -1 = up (forward) .. +1 = down (back)
 // The vehicle-systems panel opened by the "VEH" button - open or closed.
 bool s_iosPanel = false;
 int s_iosPanelPage = 0;
+bool s_iosHudVisible = false; // desktop vehicle panel is hidden until requested
+bool s_iosTopVisible = true;
 
 // IOS_PANEL: the VEH button itself - a pure UI toggle, drives no event.
 // IOS_GUP / IOS_GDN: gear buttons that pulse TWO events each - both the
 // sequential pair (EV_TRUCK_SHIFT_UP/DOWN) and the automatic pair
 // (EV_TRUCK_AUTOSHIFT_UP/DOWN) - because Engine.cpp reads only the pair
 // matching the current gearbox mode, and either mode may be active.
-enum IosCtlKind { IOS_STEER, IOS_JOY, IOS_HELD, IOS_TOGGLE, IOS_PANEL, IOS_GUP, IOS_GDN, IOS_REPO, IOS_MENU, IOS_SPAWN, IOS_TAB0, IOS_TAB1, IOS_TAB2 };
+enum IosCtlKind { IOS_STEER, IOS_JOY, IOS_HELD, IOS_TOGGLE, IOS_PANEL, IOS_GUP, IOS_GDN, IOS_REPO, IOS_MENU, IOS_SPAWN, IOS_TAB0, IOS_TAB1, IOS_TAB2, IOS_HUD, IOS_TOP };
 
 struct IosCtl {
     RoR::events ev;      // the event this control drives (STEER/JOY drive several)
@@ -2768,10 +2771,15 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
         // Persistent top action strip: menu, vehicle spawn, repository and
         // vehicle systems.  The selector itself is the original RoR selector,
         // opened through its standard input event, so it keeps all spawn modes.
-        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_MENU,  0.025f, 0.040f, 0.085f, 0.090f, "MENU"});
-        out.push_back({RoR::EV_COMMON_GET_NEW_VEHICLE, IOS_SPAWN, 0.120f, 0.040f, 0.085f, 0.090f, "SPAWN"});
-        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_REPO, 0.215f, 0.040f, 0.085f, 0.090f, "REPO"});
-        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_PANEL, 0.890f, 0.040f, 0.085f, 0.090f, "VEH"});
+        if (s_iosTopVisible)
+        {
+            out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_MENU,  0.025f, 0.040f, 0.085f, 0.090f, "MENU"});
+            out.push_back({RoR::EV_COMMON_GET_NEW_VEHICLE, IOS_SPAWN, 0.120f, 0.040f, 0.085f, 0.090f, "SPAWN"});
+            out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_REPO, 0.215f, 0.040f, 0.085f, 0.090f, "REPO"});
+            out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_HUD, 0.310f, 0.040f, 0.085f, 0.090f, "HUD"});
+            out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_PANEL, 0.890f, 0.040f, 0.085f, 0.090f, "VEH"});
+        }
+        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_TOP, 0.795f, 0.040f, 0.085f, 0.090f, "TOP"});
         // Three pages keep each vehicle control large enough for touch.
         if (s_iosPanel)
         {
@@ -2807,9 +2815,13 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
         out.push_back({RoR::EV_CAMERA_DOWN,              IOS_HELD,   0.835f, 0.680f, 0.125f, 0.145f, "DOWN"});
         out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_TOGGLE, 0.835f, 0.850f, 0.125f, 0.120f, "ENTER"});
         // The same top strip stays present in free camera, including spawn.
-        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_MENU, 0.025f, 0.040f, 0.085f, 0.090f, "MENU"});
-        out.push_back({RoR::EV_COMMON_GET_NEW_VEHICLE, IOS_SPAWN, 0.120f, 0.040f, 0.085f, 0.090f, "SPAWN"});
-        out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_REPO, 0.215f, 0.040f, 0.085f, 0.090f, "REPO"});
+        if (s_iosTopVisible)
+        {
+            out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_MENU, 0.025f, 0.040f, 0.085f, 0.090f, "MENU"});
+            out.push_back({RoR::EV_COMMON_GET_NEW_VEHICLE, IOS_SPAWN, 0.120f, 0.040f, 0.085f, 0.090f, "SPAWN"});
+            out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_REPO, 0.215f, 0.040f, 0.085f, 0.090f, "REPO"});
+        }
+        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_TOP, 0.795f, 0.040f, 0.085f, 0.090f, "TOP"});
     }
 }
 
@@ -2906,6 +2918,17 @@ bool IosControlsHandleTouch(int action, float x, float y, int id)
             if (ctls[i].kind == IOS_PANEL)
             {
                 s_iosPanel = !s_iosPanel;      // the VEH switch: pure UI state
+                return true;
+            }
+            if (ctls[i].kind == IOS_HUD)
+            {
+                s_iosHudVisible = !s_iosHudVisible;
+                return true;
+            }
+            if (ctls[i].kind == IOS_TOP)
+            {
+                s_iosTopVisible = !s_iosTopVisible;
+                s_iosPanel = false;
                 return true;
             }
             if (ctls[i].kind == IOS_TAB0 || ctls[i].kind == IOS_TAB1 || ctls[i].kind == IOS_TAB2)
@@ -3031,7 +3054,7 @@ void IosApplyHeldEvents(float W, float H, const std::vector<IosCtl>& ctls)
         const IosCtl& c = ctls[i];
         // One-shots are handled by pulses; the panel and gear buttons never
         // carry an analog position or a level value.
-        if (c.kind == IOS_TOGGLE || c.kind == IOS_PANEL || c.kind == IOS_MENU || c.kind == IOS_SPAWN ||
+        if (c.kind == IOS_TOGGLE || c.kind == IOS_PANEL || c.kind == IOS_HUD || c.kind == IOS_TOP || c.kind == IOS_MENU || c.kind == IOS_SPAWN ||
             c.kind == IOS_TAB0 || c.kind == IOS_TAB1 || c.kind == IOS_TAB2 ||
             c.kind == IOS_GUP    || c.kind == IOS_GDN) continue;
 
@@ -3103,7 +3126,18 @@ void IosApplyHeldEvents(float W, float H, const std::vector<IosCtl>& ctls)
 // or colour-space dependency in the touch layer.
 int IosIconCell(const IosCtl& c)
 {
+    if (c.label && std::strcmp(c.label, "TOP") == 0) return 13;
+    if (c.label && std::strcmp(c.label, "HUD") == 0) return 14;
+    if (c.label && (std::strcmp(c.label, "LIGHTS") == 0 || std::strcmp(c.label, "LIGHT 1") == 0 || std::strcmp(c.label, "LIGHT 2") == 0 || std::strcmp(c.label, "LIGHT 3") == 0)) return 8;
+    if (c.label && (std::strcmp(c.label, "P") == 0 || std::strcmp(c.label, "PARKING") == 0)) return 9;
+    if (c.label && (std::strcmp(c.label, "IGN") == 0 || std::strcmp(c.label, "IGNITION") == 0)) return 9;
+    if (c.label && (std::strcmp(c.label, "EXIT") == 0 || std::strcmp(c.label, "ENTER") == 0)) return 1;
+    if (c.label && (std::strcmp(c.label, "NEUTRAL") == 0 || std::strcmp(c.label, "REVERSE") == 0 || std::strcmp(c.label, "GEAR +") == 0 || std::strcmp(c.label, "GEAR -") == 0)) return 5;
+    if (c.label && (std::strcmp(c.label, "AUTO / MAN") == 0 || std::strcmp(c.label, "4WD") == 0 || std::strcmp(c.label, "AXLE DIFF") == 0 || std::strcmp(c.label, "WHEEL DIFF") == 0)) return 3;
+    if (c.label && (std::strcmp(c.label, "CLUTCH") == 0 || std::strcmp(c.label, "TRAILER") == 0)) return 2;
     if (c.kind == IOS_MENU) return 0;
+    if (c.kind == IOS_TOP) return 13;
+    if (c.kind == IOS_HUD) return 14;
     if (c.kind == IOS_SPAWN || c.ev == RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK) return 1;
     if (c.kind == IOS_REPO) return 2;
     if (c.kind == IOS_PANEL || c.kind == IOS_TAB2) return 3;
@@ -3138,6 +3172,8 @@ void IosDrawIcon(ImDrawList* dl, const IosCtl& c, const ImVec2& p0, const ImVec2
     if (k == 9) { dl->AddCircle(cc,s*.78f,color,28,t); dl->AddCircleFilled(cc,s*.22f,color,20); line({cc.x+s*.45f,cc.y-s*.6f},{cc.x+s,cc.y-s*.95f}); return; }
     if (k == 10 || k == 12) { const float d=(k==10)?-1.f:1.f; line({cc.x+d*s*.85f,cc.y},{cc.x-d*s*.1f,cc.y}); dl->AddTriangleFilled({cc.x+d*s*.85f,cc.y},{cc.x+d*s*.25f,cc.y-s*.45f},{cc.x+d*s*.25f,cc.y+s*.45f},color); return; }
     if (k == 11) { dl->AddTriangleFilled({cc.x,cc.y-s},{cc.x-s*.2f,cc.y+s*.65f},{cc.x+s*.2f,cc.y+s*.65f},color); dl->AddLine({cc.x-s*.65f,cc.y-s*.65f},{cc.x+s*.65f,cc.y+s*.65f},color,t); return; }
+    if (k == 13) { dl->AddRect({cc.x-s,cc.y-s*.65f},{cc.x+s,cc.y+s*.65f},color,3.f,t); line({cc.x-s*.65f,cc.y},{cc.x+s*.65f,cc.y}); line({cc.x,cc.y-s*.65f},{cc.x,cc.y+s*.65f}); return; }
+    if (k == 14) { dl->AddRect({cc.x-s,cc.y-s*.7f},{cc.x+s,cc.y+s*.7f},color,3.f,t); line({cc.x-s*.55f,cc.y-s*.25f},{cc.x+s*.55f,cc.y-s*.25f}); line({cc.x-s*.55f,cc.y+s*.2f},{cc.x+s*.55f,cc.y+s*.2f}); return; }
     dl->AddCircle(cc,s*.72f,color,24,t); line({cc.x-s*.45f,cc.y},{cc.x+s*.45f,cc.y}); line({cc.x,cc.y-s*.45f},{cc.x,cc.y+s*.45f});
 }
 
@@ -3191,6 +3227,14 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         {
             pressed = App::GetGuiManager()->GameMainMenu.IsVisible();
         }
+        else if (c.kind == IOS_HUD)
+        {
+            pressed = s_iosHudVisible;
+        }
+        else if (c.kind == IOS_TOP)
+        {
+            pressed = s_iosTopVisible;
+        }
         else if (c.kind == IOS_TOGGLE || c.kind == IOS_GUP || c.kind == IOS_GDN || c.kind == IOS_SPAWN)
         {
             for (size_t p = 0; p < s_iosPulses.size(); ++p)
@@ -3227,7 +3271,7 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
                 dl->AddLine(ImVec2(center.x, center.y - pad_r * 0.72f), ImVec2(center.x, center.y + pad_r * 0.72f), IM_COL32(230, 242, 255, 40), 1.f);
             }
         }
-        else if (c.kind == IOS_HELD || c.kind == IOS_TOGGLE || c.kind == IOS_GUP || c.kind == IOS_GDN || c.kind == IOS_PANEL || c.kind == IOS_MENU || c.kind == IOS_SPAWN || c.kind == IOS_REPO || c.kind == IOS_TAB0 || c.kind == IOS_TAB1 || c.kind == IOS_TAB2)
+        else if (c.kind == IOS_HELD || c.kind == IOS_TOGGLE || c.kind == IOS_GUP || c.kind == IOS_GDN || c.kind == IOS_PANEL || c.kind == IOS_MENU || c.kind == IOS_SPAWN || c.kind == IOS_REPO || c.kind == IOS_HUD || c.kind == IOS_TOP || c.kind == IOS_TAB0 || c.kind == IOS_TAB1 || c.kind == IOS_TAB2)
         {
             const float rounding = std::min(18.f, control_r * 0.55f);
             dl->AddRectFilled(p0, p1, fill, rounding, ImDrawCornerFlags_All);
@@ -3299,6 +3343,11 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
 IOS_TOUCH_CONTROLS_DRAW = r"""#ifdef ROR_PLATFORM_IOS
 void InputEngine::IosDrawTouchControls(float dt)
 {
+    if (IosInTruck())
+        App::GetGuiManager()->VehicleInfoTPanel.SetVisible(
+            s_iosHudVisible ? RoR::GUI::VehicleInfoTPanel::TPANELMODE_TRANSLUCENT
+                            : RoR::GUI::VehicleInfoTPanel::TPANELMODE_HIDDEN);
+
     // Let any one-shot ("tap") press expire first, whatever else is going on.
     for (size_t i = 0; i < s_iosPulses.size(); )
     {
@@ -4263,6 +4312,24 @@ def patch_gui_manager(ror):
     """
     path = os.path.join(ror, "source", "main", "gui", "GUIManager.cpp")
     text = read(path)
+
+    # The stock VehicleInfoTPanel is a desktop-sized overlay.  Keep the
+    # mobile HUD in charge and expose its visibility through the touch HUD
+    # toggle instead of drawing the panel underneath the joystick.
+    text = must_replace(
+        text,
+        "        this->VehicleInfoTPanel.Draw(player_gfx_actor);\n",
+        "        this->VehicleInfoTPanel.Draw(player_gfx_actor);\n",
+        "GUIManager.cpp: keep VehicleInfoTPanel available for mobile toggle",
+    )
+    text = must_replace(
+        text,
+        "        this->TopMenubar.Draw(dt);\n",
+        "#ifndef ROR_PLATFORM_IOS\n"
+        "        this->TopMenubar.Draw(dt);\n"
+        "#endif\n",
+        "GUIManager.cpp: hide desktop TopMenubar on iOS",
+    )
 
     text = must_replace(
         text,
