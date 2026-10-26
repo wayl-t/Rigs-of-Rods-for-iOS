@@ -4374,30 +4374,20 @@ def patch_character_material(ror):
     if color_pass in text:
         text = text.replace(color_pass, "")
     
-    # Make character fully self-lit for iOS/GLES2.  Match the upstream source
-    # exactly: there is no space before the colon.  This used to be a plain
-    # str.replace(), so the mismatch silently left the default lit technique in
-    # place and RTSS generated lighting=1 for the avatar on the device.
-    material_anchor = (
-        "material tracks/character: RoR/Managed_Mats/Base\n"
-        "{\n"
+    # Disable lighting in the existing textured BaseRender pass.  Adding a
+    # second, untextured technique before BaseTechnique makes RTSS select a
+    # white silhouette (lighting=0, texunits=0), so keep the original diffuse
+    # texture and only change how that pass is lit.
+    base_pass_anchor = "\t\tpass BaseRender\n\t\t{\n"
+    base_pass_replacement = base_pass_anchor + (
+        "\t\t\tlighting off\n"
+        "\t\t\tambient 1 1 1\n"
+        "\t\t\tdiffuse 1 1 1\n"
+        "\t\t\temissive 1 1 1\n"
     )
-    material_replacement = material_anchor + (
-        "\t\ttechnique\n"
-        "\t\t{\n"
-        "\t\t\tpass\n"
-        "\t\t\t{\n"
-        "\t\t\t\tlighting off\n"
-        "\t\t\t\tambient 1 1 1\n"
-        "\t\t\t\tdiffuse 1 1 1\n"
-        "\t\t\t\temissive 1 1 1\n"
-        "\t\t\t\tscene_blend alpha_blend\n"
-        "\t\t\t}\n"
-        "\t\t}\n"
-    )
-    if "\t\t\t\tlighting off\n" not in text:
-        text = must_replace(text, material_anchor, material_replacement,
-                            "character.material: insert GLES2 self-lit technique")
+    if "\t\t\tlighting off\n" not in text:
+        text = must_replace(text, base_pass_anchor, base_pass_replacement,
+                            "character.material: light textured BaseRender for GLES2")
     write(path, text)
 
 
