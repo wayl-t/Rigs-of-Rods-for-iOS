@@ -4350,7 +4350,7 @@ def patch_ffplib_lighting(ror):
 
 
 def patch_character_material(ror):
-    """resources/materials/character.material: fix character lighting on iOS."""
+    """Give the character a direct GLES2 shader, bypassing the RTSS FFP path."""
     path = os.path.join(ror, "resources", "materials", "character.material")
     if not os.path.exists(path):
         return
@@ -4373,21 +4373,76 @@ def patch_character_material(ror):
     )
     if color_pass in text:
         text = text.replace(color_pass, "")
-    
-    # Disable lighting in the existing textured BaseRender pass.  Adding a
-    # second, untextured technique before BaseTechnique makes RTSS select a
-    # white silhouette (lighting=0, texunits=0), so keep the original diffuse
-    # texture and only change how that pass is lit.
+
+    # The normal iOS material route asks RTSS to translate this fixed-function
+    # pass into GLSL ES. The device trace shows the expected flags and texture
+    # unit, yet the character still renders black. Give this one pass explicit
+    # shaders so neither lighting nor texture sampling depends on RTSS.
+    program_path = os.path.join(ror, "resources", "materials", "character_ios.program")
+    write(program_path, """vertex_program RoR/Character_iOS_VP glsles
+{
+    source character_ios_vp.glsles
+    default_params
+    {
+        param_named_auto worldViewProj worldviewproj_matrix
+    }
+}
+
+fragment_program RoR/Character_iOS_FP glsles
+{
+    source character_ios_fp.glsles
+    default_params
+    {
+        param_named diffuseMap int 0
+    }
+}
+""")
+    write(os.path.join(ror, "resources", "materials", "character_ios_vp.glsles"), """#version 100
+
+precision highp float;
+
+uniform mat4 worldViewProj;
+attribute vec4 vertex;
+attribute vec4 uv0;
+varying vec2 characterUV;
+
+void main()
+{
+    gl_Position = worldViewProj * vertex;
+    characterUV = uv0.xy;
+}
+""")
+    write(os.path.join(ror, "resources", "materials", "character_ios_fp.glsles"), """#version 100
+
+precision mediump float;
+
+uniform sampler2D diffuseMap;
+varying vec2 characterUV;
+
+void main()
+{
+    gl_FragColor = texture2D(diffuseMap, characterUV);
+}
+""")
+
+    # Keep the original texture unit in BaseRender; the explicit fragment
+    # shader samples texture unit 0 through the diffuseMap uniform.
     base_pass_anchor = "\t\tpass BaseRender\n\t\t{\n"
     base_pass_replacement = base_pass_anchor + (
+        "\t\t\tvertex_program_ref RoR/Character_iOS_VP\n"
+        "\t\t\t{\n"
+        "\t\t\t}\n"
+        "\t\t\tfragment_program_ref RoR/Character_iOS_FP\n"
+        "\t\t\t{\n"
+        "\t\t\t}\n"
         "\t\t\tlighting off\n"
         "\t\t\tambient 1 1 1\n"
         "\t\t\tdiffuse 1 1 1\n"
         "\t\t\temissive 1 1 1\n"
     )
-    if "\t\t\tlighting off\n" not in text:
+    if "vertex_program_ref RoR/Character_iOS_VP" not in text:
         text = must_replace(text, base_pass_anchor, base_pass_replacement,
-                            "character.material: light textured BaseRender for GLES2")
+                            "character.material: attach explicit GLES2 character shaders")
     write(path, text)
 
 

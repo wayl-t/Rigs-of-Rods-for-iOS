@@ -719,14 +719,32 @@ def main(argv):
     elif not (
             body.find("pass BaseRender") >= 0 and
             body.find("pass BaseRender") < body.find("lighting off", body.find("pass BaseRender")) <
-            body.find("texture character.dds", body.find("pass BaseRender"))):
+            body.find("texture character.dds", body.find("pass BaseRender")) and
+            "vertex_program_ref RoR/Character_iOS_VP" in body and
+            "fragment_program_ref RoR/Character_iOS_FP" in body):
         bad.append(
-            "the shipped character.material does not put lighting off before "
-            "character.dds in BaseRender - RTSS would either render the avatar "
-            "black or select an untextured white technique")
+            "the shipped character.material does not use the explicit GLES2 "
+            "vertex/fragment shaders on its textured BaseRender pass")
     else:
         print("  ok      rorres character.material: ColorChange removed, "
-              "textured BaseRender is self-lit")
+              "textured BaseRender uses explicit GLES2 shaders")
+
+    # The custom programs and their GLSL ES sources must travel with the
+    # material in rorres/materials.zip; otherwise the material parses but its
+    # technique is unsupported at runtime.
+    material_packs = [n for n in names if n.endswith("/rorres/materials.zip")]
+    if not material_packs:
+        bad.append("no rorres/materials.zip containing the GLES2 character shaders")
+    else:
+        inner = zipfile.ZipFile(io.BytesIO(ipa.read(material_packs[0])))
+        required = ("character_ios.program", "character_ios_vp.glsles",
+                    "character_ios_fp.glsles")
+        missing = [n for n in required if n not in inner.namelist()]
+        if missing:
+            bad.append("materials.zip is missing explicit character shader file(s): "
+                       + ", ".join(missing))
+        else:
+            print("  ok      materials.zip: explicit character GLES2 shader and sources present")
 
     # The shadow type is NONE on iOS, so the "pssm/off" variant of the shared
     # shadow technique is the one that gets mounted - and it has an empty
