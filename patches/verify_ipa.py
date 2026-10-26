@@ -442,29 +442,28 @@ def main(argv):
     # ------------------------------------------------------------------
     # With the menus responding to touch, the port could render the world
     # but still needed a keyboard to drive it.  IosDrawTouchControls() -
-    # one call at the tail of GUIManager::DrawSimulationGui() - draws an
-    # on-screen steering bar, pedals and utility buttons (and, on foot, a
-    # MOVE joystick), and folds the tracked fingers into
+    # one call at the tail of GUIManager::DrawSimulationGui() - draws the
+    # mobile steering pad, pedals and camera joystick, and folds fingers into
     # InputEngine::setEventSimulatedValue(): the same public injection API
     # the game itself uses, which getEventValue() short-circuits on, so
     # both the digital and analog reads used for steering pick it up.
     #
-    # "<  STEER  >" is the steering bar's label - a string literal only
-    # this code emits, carried exactly once by the binary - so its presence
+    # "STEER" is the steering pad's label, emitted by the touch layout, while
+    # "FLY" is the spectator joystick label; together they prove the updated
+    # mobile driving/camera controls made it into the binary.
+    # Their presence
     # proves the layout, the hit-test and the drawing all shipped together.
     # Without them the app installs and renders fine and the player can
     # only watch: nothing is drivable without a keyboard.
     if exe:
-        marker = b"<  STEER  >"
-        if marker not in binary:
+        missing = [marker for marker in (b"STEER", b"FLY", b"FREE CAMERA") if marker not in binary]
+        if missing:
             bad.append(
-                "the executable carries no %r - the on-screen touch driving "
-                "controls (IosDrawTouchControls, added by patch_inputengine's "
-                "IOS_TOUCH_CONTROLS_* blocks) are not in this build, so the "
-                "game can be looked at but not driven without a keyboard"
-                % marker.decode())
+                "the executable is missing mobile HUD/control markers %r - "
+                "the updated touch interface was not included in this build"
+                % [marker.decode() for marker in missing])
         else:
-            print("  ok      executable: on-screen touch driving controls present")
+            print("  ok      executable: mobile touch controls and free-camera HUD present")
 
     # ------------------------------------------------------------------ #
     # 7. There must be something to load: the base content.                #
@@ -598,19 +597,13 @@ def main(argv):
     # ------------------------------------------------------------------ #
     # 9. The vehicle-systems panel and the turn-signal row (controls 2/2). #
     # ------------------------------------------------------------------ #
-    # The first touch-controls build shipped a steering bar, pedals and a
-    # utility row; this adds the rest of the truck: the "VEH" panel - 20
-    # buttons covering lights, horn, beacons, camera, gearbox, differentials,
-    # transfer case, clutch, trailer brake, cruise control and the truck's
-    # own command keys - plus the BL</HAZ/BL> turn-signal row next to the
-    # steering bar.  Both labels are string literals only IosLayout emits
-    # and they occur zero times in the previous build's binary, so their
-    # presence proves the extended layout, its hit-test and its drawing all
-    # shipped together.  ("CR+" is the cruise-control "raise" button label;
-    # it doubles as the panel marker because it is unique to this layout.)
+    # The touch-sized VEH sheet is split into LIGHTS / DRIVE / EXTRAS pages,
+    # and the turn-signal row remains available beside the steering pad.
+    # "GEAR +" is a unique label from the DRIVE page and "BL<" marks the
+    # signal row; both prove the layout and event mapping reached the binary.
     if exe:
         for marker, what in (
-                (b"CR+",  "vehicle-systems panel grid (IosLayout VEH panel)"),
+                (b"GEAR +", "touch-sized vehicle-systems pages (IosLayout VEH panel)"),
                 (b"BL<",  "turn-signal row next to the steering bar")):
             if marker not in binary:
                 bad.append(
