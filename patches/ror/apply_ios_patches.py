@@ -4481,6 +4481,35 @@ def patch_character_diagnostic(ror):
     write(path, text)
 
 
+def patch_character_software_skinning(ror):
+    """Force CPU skinning for the animated player character on iOS/GLES2.
+
+    The device trace confirms that character.mesh and its 72-bone skeleton
+    load, but the avatar is rendered as large black spikes.  The character
+    material is generated/selected through the GLES2 RTSS path, where hardware
+    skinning can produce invalid vertex positions.  This character is small
+    enough that OGRE's software animation path is a safe fallback on a phone.
+    addSoftwareAnimationRequest() explicitly asks OGRE to compute both vertex
+    positions and normals on the CPU even if a material enables GPU skinning.
+    """
+    path = os.path.join(ror, "source", "main", "gameplay", "Character.cpp")
+    text = read(path)
+    anchor = (
+        '    Entity* entity = App::GetGfxScene()->GetSceneManager()->createEntity('
+        'm_instance_name + "_mesh", "character.mesh");\n'
+    )
+    replacement = anchor + (
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // GLES2 fallback: avoid malformed GPU skinning for the player avatar.\n"
+        "    entity->addSoftwareAnimationRequest(true);\n"
+        '    LOG("[RoR|iOS] character: software skinning forced for GLES2");\n'
+        "#endif\n"
+    )
+    text = must_replace(text, anchor, replacement,
+                        "Character.cpp: force software skeletal animation on iOS")
+    write(path, text)
+
+
 def patch_shadows_off_ambient(ror):
     """resources/managed_materials/shadows/pssm/off/shadows.material: light it.
 
@@ -5920,6 +5949,10 @@ def main():
     # skinning" for the black body without a device in hand.  See
     # patch_character_diagnostic().
     patch_character_diagnostic(args.ror_dir)
+    # The user's current device trace confirms a loaded 72-bone character but
+    # shows it as enormous spikes.  Force OGRE's software skinning on GLES2 so
+    # generated GPU skinning cannot corrupt the avatar's vertex positions.
+    patch_character_software_skinning(args.ror_dir)
     # The menu is drawn by ImGui, but it is *queued* for drawing by
     # OgreImGui::renderQueueStarted(), which silently skips the overlay when the
     # active viewport is not the app viewport.  That is the difference between

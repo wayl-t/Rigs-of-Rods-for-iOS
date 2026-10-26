@@ -65,6 +65,14 @@ This is an **unofficial native iOS port** of [**Rigs of Rods**](https://www.rigs
 
 ### Конвейер
 
+**Важно: в репозитории есть два разных IPA.** Игровую сборку создаёт
+`build-ror-ios.yml` — она компилирует исходники Rigs of Rods и публикует
+`RoR-ios.ipa`. Workflow `build-ipa.yml` и скрипт `build_ipa.sh` собирают только
+небольшое приложение-проверку из `app/`: оно подтверждает работу Xcode,
+упаковки и доставки IPA, но **не содержит игру**. Его релиз `pipeline-check`
+предназначен только для проверки конвейера; для установки игры используйте
+релиз `rtssNN` (или другой тег, переданный в `build-ror-ios.yml`).
+
 - `build-ror-ios.yml`: закреплённый коммит RoR (`d426a5c5`) + зависимости
   (отдельный переиспользуемый прогон `build-ios-deps.yml`) → сборка arm64
   → ad-hoc подпись → IPA → публикация в Releases.
