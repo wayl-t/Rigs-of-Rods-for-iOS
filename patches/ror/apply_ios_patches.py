@@ -506,6 +506,40 @@ def patch_appcontext(ror):
         "AppContext.cpp iOS screen size instead of video modes",
     )
 
+    # Keep the window in points, but ask EAGL2Window for a native backing
+    # store.  OGRE then multiplies the point dimensions internally: window
+    # metrics, the viewport and getActualWidth() are native pixels, while every
+    # RoR layout stays in points.
+    text = must_replace(
+        text,
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Apple/iOS port: use the real screen size in points.  UIScreen\n"
+        "    // reports it in the portrait frame, and RoR is landscape-only, so the\n"
+        "    // long side is the width (see RoR_IosGetScreenSize()).\n"
+        "    RoR_IosGetScreenSize((int*)&width, (int*)&height);\n"
+        '    LOG(fmt::format("[RoR|Startup|Rendering] iOS: using screen size {}x{}", width, height));\n'
+        "#endif\n"
+        "\n"
+        "    // Review render window settings\n",
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Apple/iOS port: use the real screen size in points.  UIScreen\n"
+        "    // reports it in the portrait frame, and RoR is landscape-only, so the\n"
+        "    // long side is the width (see RoR_IosGetScreenSize()).\n"
+        "    RoR_IosGetScreenSize((int*)&width, (int*)&height);\n"
+        "    // The UIWindow (and every layout coordinate) stays in points, while\n"
+        "    // this parameter makes EAGL2Window build a native-resolution backing\n"
+        "    // store: mWidth/mHeight, the viewport and ImGui scissors become pixels.\n"
+        "    const float ios_content_scale = RoR_IosGetContentScaleFactor();\n"
+        "    miscParams[\"contentScalingFactor\"] =\n"
+        "        Ogre::StringConverter::toString(ios_content_scale);\n"
+        '    LOG(fmt::format("[RoR|Startup|Rendering] iOS: using screen size {}x{} points, '
+        'content scale {}", width, height, ios_content_scale));\n'
+        "#endif\n"
+        "\n"
+        "    // Review render window settings\n",
+        "AppContext.cpp iOS native backing store",
+    )
+
     # ---------------------------------------------------------------------
     # The resource directory is called rorres, not resources
     # ---------------------------------------------------------------------
@@ -1573,6 +1607,12 @@ void RoR_IosPumpRunLoop(void);
 // its UIWindow from.  RoR is landscape-only, so width is the long side.
 void RoR_IosGetScreenSize(int* width, int* height);
 
+// Ratio between the native framebuffer and the UIKit points the rest of the
+// UI works in (3.0 on a 3x iPhone).  Passed to OGRE as "contentScalingFactor",
+// which makes EAGL2Window build a native-sized framebuffer while its UIWindow
+// keeps its point dimensions.
+float RoR_IosGetContentScaleFactor(void);
+
 // Appends a one-line-per-view dump of the key UIWindow's view hierarchy to
 // ror-trace.log: each view's class, frame, hidden flag and
 // userInteractionEnabled.  Purely diagnostic.  It answers the question that
@@ -2001,6 +2041,15 @@ void RoR_IosGetScreenSize(int* width, int* height)
     const int short_side = a > b ? b : a;
     if (width)  *width  = long_side;
     if (height) *height = short_side;
+}
+
+float RoR_IosGetContentScaleFactor(void)
+{
+    // nativeScale is the physical-pixel scale (3.0 on most modern iPhones),
+    // whereas scale is the display-zoom scale.  The framebuffer follows the
+    // former.  Keep it sane so a division by it can never produce an empty UI.
+    const CGFloat scale = [[UIScreen mainScreen] nativeScale];
+    return scale > 0.0 ? (float)scale : 1.0f;
 }
 
 void RoR_IosDumpViewHierarchy(void)
@@ -3766,14 +3815,36 @@ def patch_inputengine(ror):
         "    // Apple/iOS port: no OIS::Mouse owns the state, we keep our own copy.\n"
         "    // This runs from the constructor, so a null dereference here would mean\n"
         "    // the input engine could never be constructed at all.\n"
-        "    mouseState.width = width;\n"
-        "    mouseState.height = height;\n"
+        "    // getMetrics() reports native pixels because AppContext passes a\n"
+        "    // contentScalingFactor; convert back to points so the mouse state stays\n"
+        "    // in the same space as touches and ImGui.\n"
+        "    mouseState.width = (int)(width / RoR_IosGetContentScaleFactor() + 0.5f);\n"
+        "    mouseState.height = (int)(height / RoR_IosGetContentScaleFactor() + 0.5f);\n"
         "#else\n"
         "    const OIS::MouseState& ms = mMouse->getMouseState();\n"
         "    ms.width = width;\n"
         "    ms.height = height;\n"
         "#endif\n",
         "InputEngine.cpp windowResized()",
+    )
+
+    text = must_replace(
+        text,
+        "    mouseState.width = (int)App::GetAppContext()->GetRenderWindow()->getWidth();\n"
+        "    mouseState.height = (int)App::GetAppContext()->GetRenderWindow()->getHeight();\n",
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // The render window reports native pixels because AppContext passes a\n"
+        "    // contentScalingFactor, while OIS and IosHandleTouch report points.  Keep\n"
+        "    // the mouse state in points so getMouseNormalizedScreenPos() (the camera)\n"
+        "    // stays aligned with the touch and ImGui coordinate spaces.\n"
+        "    const float ios_scale = RoR_IosGetContentScaleFactor();\n"
+        "    mouseState.width = (int)(App::GetAppContext()->GetRenderWindow()->getWidth() / ios_scale + 0.5f);\n"
+        "    mouseState.height = (int)(App::GetAppContext()->GetRenderWindow()->getHeight() / ios_scale + 0.5f);\n"
+        "#else\n"
+        "    mouseState.width = (int)App::GetAppContext()->GetRenderWindow()->getWidth();\n"
+        "    mouseState.height = (int)App::GetAppContext()->GetRenderWindow()->getHeight();\n"
+        "#endif\n",
+        "InputEngine.cpp getMouseState points",
     )
 
     text = must_replace(
@@ -3895,18 +3966,16 @@ def patch_inputengine(ror):
         "        return;\n"
         "    }\n"
         "\n"
-        "    // Coordinates arrive in points, and so do the render window metrics,\n"
-        "    // so no conversion is needed:\n"
+        "    // Coordinates arrive in points, and everything else is converted to\n"
+        "    // points before it reaches this function:\n"
         "    //   * OIS multiplies locationInView() by the contentScaleFactor of its\n"
         "    //     own delegate UIView, and iPhoneInputManager sets that from its\n"
         "    //     mContentScalingFactor, which stays 1.0 because we pass \"WINDOW\"\n"
         "    //     but not \"VIEW\" (iPhoneInputManager.mm:126,153-158).\n"
-        "    //   * OGRE's EAGL2Window also starts at contentScalingFactor 1.0 and is\n"
-        "    //     only changed by a \"contentScalingFactor\" misc parameter\n"
-        "    //     (OgreEAGL2Window.mm:63,320), which RoR does not pass - so\n"
-        "    //     mWidth/mHeight are points as well (OgreEAGL2Window.mm:276).\n"
-        "    // If contentScalingFactor is ever passed to createRenderWindow(), this\n"
-        "    // stops holding and the \"VIEW\" parameter must be given to OIS too.\n"
+        "    //   * OGRE's EAGL2Window reports native pixels because AppContext passes\n"
+        "    //     \"contentScalingFactor\", so getMouseState()/windowResized() divide\n"
+        "    //     those back to points before storing mouseState.width/height.\n"
+        "    //   * ImGui keeps DisplaySize in points (OgreImGuiOverlay.cpp).\n"
         "    const int new_x = (int)x;\n"
         "    const int new_y = (int)y;\n"
         "    mouseState.X.rel = new_x - mouseState.X.abs;\n"
@@ -4483,6 +4552,27 @@ def patch_gui_manager(ror):
     """
     path = os.path.join(ror, "source", "main", "gui", "GUIManager.cpp")
     text = read(path)
+
+    text = must_replace(
+        text,
+        "    // empty init\n"
+        "    mygui->initialise(\"\");\n",
+        "    // empty init\n"
+        "    mygui->initialise(\"\");\n"
+        "\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // OgreRenderManager captured the render window's native viewport (pixels)\n"
+        "    // during initialise(); MyGUI lays out widgets in exactly that space, so put\n"
+        "    // the view size back in points.  OGRE still rasterizes the framebuffer at\n"
+        "    // native resolution, but the dashboard and menus keep their original layout.\n"
+        "    const float ios_scale = RoR_IosGetContentScaleFactor();\n"
+        "    Ogre::RenderWindow* rw = App::GetAppContext()->GetRenderWindow();\n"
+        "    MyGUI::RenderManager::getInstance().setViewSize(\n"
+        "        (int)(rw->getWidth() / ios_scale + 0.5f),\n"
+        "        (int)(rw->getHeight() / ios_scale + 0.5f));\n"
+        "#endif\n",
+        "GUIManager.cpp MyGUI view size stays in points",
+    )
 
     text = must_replace(
         text,
@@ -5621,6 +5711,57 @@ def patch_ogreimgui_overlay(ror):
         "OgreImGuiOverlay.cpp includes for the shader-parameter refresh",
     )
 
+    # ImGui works in points while the framebuffer is native.  DisplaySize is
+    # the coordinate space every RoR widget is laid out in, so it must stay
+    # logical; DisplayFramebufferScale documents the ratio for the backend and
+    # is what preRender() uses to translate scissor rectangles.
+    text = must_replace(
+        text,
+        "    // Setup display size (every frame to accommodate for window resizing)\n"
+        "    io.DisplaySize = ImVec2(oMgr.getViewportWidth(), oMgr.getViewportHeight());\n",
+        "    // Setup display size (every frame to accommodate for window resizing)\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // OverlayManager reports the native framebuffer here (it is fed by\n"
+        "    // Viewport::getActualWidth()), but every widget in RoR is laid out in\n"
+        "    // points.  Dividing keeps the existing metrics and touch coordinates\n"
+        "    // consistent; the renderable below maps the point-space vertices onto\n"
+        "    // the whole native framebuffer.\n"
+        "    const float ios_scale = RoR_IosGetContentScaleFactor();\n"
+        "    io.DisplaySize = ImVec2(oMgr.getViewportWidth() / ios_scale,\n"
+        "                            oMgr.getViewportHeight() / ios_scale);\n"
+        "    io.DisplayFramebufferScale = ImVec2(ios_scale, ios_scale);\n"
+        "#else\n"
+        "    io.DisplaySize = ImVec2(oMgr.getViewportWidth(), oMgr.getViewportHeight());\n"
+        "#endif\n",
+        "OgreImGuiOverlay.cpp NewFrame iOS logical display size",
+    )
+
+    # The projection has to cover the same logical extent as the vertices.
+    # Reading DisplaySize also makes the desktop path use the value ImGui was
+    # actually told about, instead of a second source that can drift from it.
+    text = must_replace(
+        text,
+        "    float L = texelOffsetX;\n"
+        "    float R = oMgr.getViewportWidth() + texelOffsetX;\n"
+        "    float T = texelOffsetY;\n"
+        "    float B = oMgr.getViewportHeight() + texelOffsetY;\n",
+        "    const ImVec2 display_size = ImGui::GetIO().DisplaySize;\n"
+        "    float L = texelOffsetX;\n"
+        "    float R = display_size.x + texelOffsetX;\n"
+        "    float T = texelOffsetY;\n"
+        "    float B = display_size.y + texelOffsetY;\n",
+        "OgreImGuiOverlay.cpp projection follows logical display size",
+    )
+
+    # R/B now come from DisplaySize, so the viewport handle in _update() is unused.
+    text = must_replace(
+        text,
+        "    RenderSystem* rSys = Root::getSingleton().getRenderSystem();\n"
+        "    OverlayManager& oMgr = OverlayManager::getSingleton();\n",
+        "    RenderSystem* rSys = Root::getSingleton().getRenderSystem();\n",
+        "OgreImGuiOverlay.cpp drop unused viewport handle in _update()",
+    )
+
     text = must_replace(
         text,
         "    TextureUnitState* tu = mMaterial->getBestTechnique()->getPass(0)->getTextureUnitState(0);\n"
@@ -5670,6 +5811,31 @@ def patch_ogreimgui_overlay(ror):
         "OgreImGuiOverlay.cpp refresh shader auto params before drawing",
     )
 
+    # Vertices stay in points: ImGui's projection maps them to clip space,
+    # which is resolution-independent.  The scissors, however, are framebuffer
+    # pixels, so they are the one thing that has to be scaled.  Scaling the
+    # vertex buffers instead (or calling ScaleClipRects alone) would either
+    # double-scale the geometry or leave the scissor cutting at a third of the
+    # intended rectangle.
+    text = must_replace(
+        text,
+        "            // Set scissoring\n"
+        "            Rect scissor(drawCmd->ClipRect.x, drawCmd->ClipRect.y, drawCmd->ClipRect.z,\n"
+        "                          drawCmd->ClipRect.w);\n",
+        "            // Set scissoring\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "            const float ios_scale = RoR_IosGetContentScaleFactor();\n"
+        "            Rect scissor(drawCmd->ClipRect.x * ios_scale,\n"
+        "                         drawCmd->ClipRect.y * ios_scale,\n"
+        "                         drawCmd->ClipRect.z * ios_scale,\n"
+        "                         drawCmd->ClipRect.w * ios_scale);\n"
+        "#else\n"
+        "            Rect scissor(drawCmd->ClipRect.x, drawCmd->ClipRect.y, drawCmd->ClipRect.z,\n"
+        "                          drawCmd->ClipRect.w);\n"
+        "#endif\n",
+        "OgreImGuiOverlay.cpp native scissor rects on iOS",
+    )
+
     # Font size for the phone: the atlas is rasterized at the final size, so
     # this is where "readable on a 844x390-point screen" has to happen - see
     # the comment inside the replacement.  GUIManager::SetupImGui scales the
@@ -5683,11 +5849,16 @@ def patch_ogreimgui_overlay(ror):
         "}\n",
         "    ImFontConfig cfg;\n"
         "    strncpy(cfg.Name, name.c_str(), 40);\n"
-        "    // Higher-resolution glyphs, with inverse UI scale to preserve layout.\n"
+        "    // Rasterize the atlas at device pixels, but keep every ImGui metric\n"
+        "    // in points: FontGlobalScale divides the layout back to the original\n"
+        "    // size, so the glyphs get three times the source pixels without any\n"
+        "    // panel growing.  This is the ImGui counterpart of the native\n"
+        "    // framebuffer created by AppContext.cpp.\n"
         "    float font_size = (float)font->getTrueTypeSize();\n"
         "#ifdef ROR_PLATFORM_IOS\n"
-        "    font_size *= 2.0f;\n"
-        "    io.FontGlobalScale = 0.5f;\n"
+        "    const float ios_scale = RoR_IosGetContentScaleFactor();\n"
+        "    font_size *= ios_scale;\n"
+        "    io.FontGlobalScale = 1.0f / ios_scale;\n"
         "    cfg.OversampleH = 3;\n"
         "    cfg.OversampleV = 2;\n"
         "#endif\n"
