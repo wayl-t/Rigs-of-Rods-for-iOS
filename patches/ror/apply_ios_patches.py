@@ -6414,6 +6414,46 @@ def patch_cvar_ios_overrides(ror):
     write(path, text)
 
 
+def patch_ios_flare_shader_safety(ror):
+    """Keep iOS vehicle blinkers on the safe billboard-only rendering path.
+
+    On GLES2, changing a flare material's emissive/texture state can make
+    OGRE RTSS compile a new shader variant.  With several vehicles the
+    blinker path exposed a generated shader referencing an undeclared
+    ``oTexcoord1_*`` varying and terminated the frame loop.  The simulation
+    still updates flare intensity and billboard visibility; only the optional
+    material mutation and hardware light source are disabled on iOS.
+    """
+    path = os.path.join(ror, "source", "main", "gfx", "GfxActor.cpp")
+    text = read(path)
+    text = must_replace(
+        text,
+        "void RoR::GfxActor::SetMaterialFlareOn(int flare_index, bool state_on)\n{\n",
+        "void RoR::GfxActor::SetMaterialFlareOn(int flare_index, bool state_on)\n{\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Avoid runtime RTSS shader variants for vehicle flares on GLES2.\n"
+        "    (void)flare_index;\n"
+        "    (void)state_on;\n"
+        "    return;\n"
+        "#endif\n\n",
+        "GfxActor flare material iOS guard",
+    )
+    text = must_replace(
+        text,
+        "bool ShouldEnableLightSource(FlareType type, bool is_player)\n{\n",
+        "bool ShouldEnableLightSource(FlareType type, bool is_player)\n{\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // Hardware flare lights add a dynamic RTSS pass; billboard flares\n"
+        "    // remain visible and blinking without this optional pass.\n"
+        "    (void)type;\n"
+        "    (void)is_player;\n"
+        "    return false;\n"
+        "#endif\n\n",
+        "GfxActor flare light iOS guard",
+    )
+    write(path, text)
+
+
 def patch_nicemetal_material_bug(ror):
     """Fix a malformed ``texture_alias`` in the transparent nicemetal material.
 
@@ -6614,6 +6654,10 @@ def main():
     # (or after any settings change) - main.cpp re-asserts them right after the
     # config file is loaded.  See patch_cvar_ios_overrides().
     patch_cvar_ios_overrides(args.ror_dir)
+    # Hazard lights used to trigger an invalid GLES2 RTSS variant after
+    # several vehicles were spawned. Keep their billboard blink path, but
+    # disable the optional dynamic flare material/light path on iOS.
+    patch_ios_flare_shader_safety(args.ror_dir)
     # A malformed `texture_alias` line in the transparent nicemetal material
     # aborts the rest of that script and raises the only hard ScriptCompiler
     # error in every trace.  See patch_nicemetal_material_bug().
