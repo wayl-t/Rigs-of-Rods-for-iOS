@@ -3425,54 +3425,65 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         }
     }
 
-    // Compact glanceable driving HUD.  It stays in the upper centre, leaving
-    // the lower corners free for steering and pedals.  Tapping UNIT switches
-    // the displayed speed between km/h and mph.
-    const float hud_x = 0.5f * W;
-    const float hud_y = 0.040f * H;
-    const float card_w = std::min(340.f, 0.40f * W);
-    const float card_h = 0.165f * H;
-    const ImVec2 card_min(hud_x - card_w * 0.5f, hud_y);
-    const ImVec2 card_max(hud_x + card_w * 0.5f, hud_y + card_h);
-    dl->AddRectFilled(card_min, card_max, IM_COL32(7, 14, 24, 178), 14.f, ImDrawCornerFlags_All);
-    dl->AddRect(card_min, card_max, IM_COL32(215, 234, 255, 100), 14.f, ImDrawCornerFlags_All, 1.f);
-    const char* mode = IosInTruck() ? "DRIVING" : "FREE CAMERA";
-    dl->AddText(font, lfs * .75f, ImVec2(card_min.x + 12.f, card_min.y + 6.f), IM_COL32(175, 205, 235, 235), mode);
-    if (IosInTruck())
+    // Premium compact driving HUD. It starts below the top action strip and
+    // disappears while the vehicle panel is open, so it never covers another
+    // control.  UNIT switches km/h and mph.
+    if (!s_iosPanel)
     {
-        RoR::ActorPtr actor = App::GetGameContext()->GetPlayerActor();
-        const bool imperial = App::gfx_speedo_imperial->getBool();
-        const float speed = actor->getSpeed() * (imperial ? 2.2369363f : 3.6f);
-        const char* unit = imperial ? "mph" : "km/h";
-        const int gear = actor->ar_engine ? actor->ar_engine->getGear() : 0;
-        char gear_text[8] = {};
-        if (gear < 0) std::snprintf(gear_text, sizeof(gear_text), "R");
-        else if (gear == 0) std::snprintf(gear_text, sizeof(gear_text), "N");
-        else std::snprintf(gear_text, sizeof(gear_text), "%d", gear);
-        const float rpm = actor->ar_engine ? actor->ar_engine->getRPM() : 0.f;
-        const float throttle = std::max(0.f, std::min(1.f, actor->ar_engine ? actor->ar_engine->getAcc() : 0.f));
-        const float brake = std::max(0.f, std::min(1.f, actor->ar_brake));
-        const float x0 = card_min.x + 12.f;
-        const float x1 = card_max.x - 12.f;
-        char speed_text[48] = {};
-        std::snprintf(speed_text, sizeof(speed_text), "%.0f %s", speed, unit);
-        dl->AddText(font, lfs * 1.18f, ImVec2(x0, card_min.y + 24.f), IM_COL32(255, 255, 255, 245), speed_text);
-        char right_text[32] = {};
-        std::snprintf(right_text, sizeof(right_text), "GEAR %s  %04.0f RPM", gear_text, rpm);
-        const ImVec2 rs = font->CalcTextSizeA(lfs * .68f, 1e6f, 0.f, right_text);
-        dl->AddText(font, lfs * .68f, ImVec2(x1 - rs.x, card_min.y + 29.f), IM_COL32(220, 230, 240, 235), right_text);
-        const float bar_w = (x1 - x0 - 10.f) * .5f;
-        const float bar_h = std::max(7.f, lfs * .42f);
-        auto bar = [&](float bx, float by, float value, ImU32 color, const char* label) {
-            dl->AddText(font, lfs * .52f, ImVec2(bx, by - lfs * .58f), IM_COL32(185, 205, 225, 230), label);
-            dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bar_w, by + bar_h), IM_COL32(40, 52, 68, 220), 3.f);
-            dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bar_w * value, by + bar_h), color, 3.f);
-        };
-        bar(x0, card_min.y + card_h - 30.f, throttle, IM_COL32(68, 205, 125, 240), "GAS");
-        bar(x0 + bar_w + 10.f, card_min.y + card_h - 30.f, brake, IM_COL32(238, 88, 88, 240), "BRAKE");
-        const char* park = actor->ar_parking_brake ? "PARK BRAKE ON" : "PARK BRAKE OFF";
-        const ImVec2 ps = font->CalcTextSizeA(lfs * .56f, 1e6f, 0.f, park);
-        dl->AddText(font, lfs * .56f, ImVec2(x1 - ps.x, card_min.y + card_h - 12.f), actor->ar_parking_brake ? IM_COL32(255, 196, 80, 245) : IM_COL32(160, 180, 200, 220), park);
+        const float hud_x = 0.5f * W;
+        const float hud_y = 0.145f * H;
+        const float card_w = std::min(380.f, 0.34f * W);
+        const float card_h = 0.105f * H;
+        const ImVec2 card_min(hud_x - card_w * 0.5f, hud_y);
+        const ImVec2 card_max(hud_x + card_w * 0.5f, hud_y + card_h);
+        dl->AddRectFilled(card_min, card_max, IM_COL32(5, 12, 22, 214), 12.f, ImDrawCornerFlags_All);
+        dl->AddRect(card_min, card_max, IM_COL32(150, 205, 245, 155), 12.f, ImDrawCornerFlags_All, 1.5f);
+        if (IosInTruck())
+        {
+            RoR::ActorPtr actor = App::GetGameContext()->GetPlayerActor();
+            const bool imperial = App::gfx_speedo_imperial->getBool();
+            const float speed = actor->getSpeed() * (imperial ? 2.2369363f : 3.6f);
+            const char* unit = imperial ? "MPH" : "KM/H";
+            const int gear = actor->ar_engine ? actor->ar_engine->getGear() : 0;
+            char gear_text[8] = {};
+            if (gear < 0) std::snprintf(gear_text, sizeof(gear_text), "R");
+            else if (gear == 0) std::snprintf(gear_text, sizeof(gear_text), "N");
+            else std::snprintf(gear_text, sizeof(gear_text), "%d", gear);
+            const float rpm = actor->ar_engine ? actor->ar_engine->getRPM() : 0.f;
+            const float rpm_max = actor->ar_engine ? std::max(1000.f, actor->ar_engine->getShiftUpRPM()) : 1000.f;
+            const float rpm_fraction = std::max(0.f, std::min(1.f, rpm / rpm_max));
+            const float x0 = card_min.x + 12.f;
+            const float x1 = card_max.x - 12.f;
+            char speed_text[32] = {};
+            std::snprintf(speed_text, sizeof(speed_text), "%.0f", speed);
+            dl->AddText(font, lfs * 1.35f, ImVec2(x0, card_min.y + 7.f), IM_COL32(255, 255, 255, 255), speed_text);
+            const ImVec2 unit_pos(x0 + lfs * 2.35f, card_min.y + 14.f);
+            dl->AddText(font, lfs * .58f, unit_pos, IM_COL32(145, 205, 245, 245), unit);
+            const float gear_x = x0 + card_w * .36f;
+            dl->AddText(font, lfs * .52f, ImVec2(gear_x, card_min.y + 7.f), IM_COL32(160, 185, 210, 230), "GEAR");
+            dl->AddText(font, lfs * 1.18f, ImVec2(gear_x, card_min.y + 17.f), IM_COL32(255, 207, 104, 255), gear_text);
+            char rpm_text[32] = {};
+            std::snprintf(rpm_text, sizeof(rpm_text), "%04.0f RPM", rpm);
+            const ImVec2 rpm_size = font->CalcTextSizeA(lfs * .62f, 1e6f, 0.f, rpm_text);
+            dl->AddText(font, lfs * .62f, ImVec2(x1 - rpm_size.x, card_min.y + 8.f), IM_COL32(205, 225, 242, 240), rpm_text);
+            const float bx = gear_x + card_w * .18f;
+            const float bw = std::max(42.f, x1 - bx);
+            const float by = card_min.y + card_h - 16.f;
+            const float bh = std::max(6.f, lfs * .32f);
+            dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bw, by + bh), IM_COL32(32, 45, 62, 240), 3.f);
+            dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bw * rpm_fraction, by + bh),
+                              rpm_fraction > .88f ? IM_COL32(238, 82, 76, 245) : IM_COL32(76, 190, 245, 245), 3.f);
+            dl->AddText(font, lfs * .50f, ImVec2(bx, by - lfs * .52f), IM_COL32(155, 180, 205, 230), "RPM");
+            const char* park = actor->ar_parking_brake ? "PARK" : "READY";
+            const ImVec2 park_size = font->CalcTextSizeA(lfs * .50f, 1e6f, 0.f, park);
+            dl->AddText(font, lfs * .50f, ImVec2(x1 - park_size.x, by - lfs * .52f),
+                        actor->ar_parking_brake ? IM_COL32(255, 196, 80, 245) : IM_COL32(145, 180, 200, 220), park);
+        }
+        else
+        {
+            const char* mode = "FREE CAMERA";
+            dl->AddText(font, lfs * .72f, ImVec2(card_min.x + 14.f, card_min.y + 12.f), IM_COL32(175, 205, 235, 235), mode);
+        }
     }
 }
 
