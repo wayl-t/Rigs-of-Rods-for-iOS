@@ -3211,6 +3211,26 @@ void IosDrawIcon(ImDrawList* dl, const IosCtl& c, const ImVec2& p0, const ImVec2
     dl->AddCircle(cc,s*.72f,color,24,t); line({cc.x-s*.45f,cc.y},{cc.x+s*.45f,cc.y}); line({cc.x,cc.y-s*.45f},{cc.x,cc.y+s*.45f});
 }
 
+void IosDrawButtonLabel(ImDrawList* dl, ImFont* font, const IosCtl& c,
+                        const ImVec2& p0, const ImVec2& p1, float fs)
+{
+    const char* label = c.label ? c.label : "";
+    if (std::strcmp(label, "STEER_L") == 0) label = "LEFT";
+    else if (std::strcmp(label, "STEER_R") == 0) label = "RIGHT";
+    else if (std::strcmp(label, "BL<") == 0) label = "TURN L";
+    else if (std::strcmp(label, "BL>") == 0) label = "TURN R";
+    else if (std::strcmp(label, "HAZ") == 0) label = "HAZARD";
+    else if (std::strcmp(label, "BRK") == 0) label = "BRAKE";
+    else if (std::strcmp(label, "GAS") == 0) label = "GAS";
+    else if (std::strcmp(label, "P") == 0) label = "PARK";
+    if (label[0] == '\0') return;
+    const float text_size = std::max(11.f, std::min(fs * .82f, (p1.y - p0.y) * .27f));
+    const ImVec2 ts = font->CalcTextSizeA(text_size, 1e6f, 0.f, label);
+    dl->AddText(font, text_size,
+        ImVec2((p0.x + p1.x - ts.x) * .5f, (p0.y + p1.y - ts.y) * .5f),
+        IM_COL32(245, 250, 255, 245), label);
+}
+
 // The on-screen controls themselves, drawn on the foreground draw list so they
 // stay readable over the 3D scene and the dashboard.
 void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
@@ -3316,9 +3336,7 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         // in the panel title and HUD, where it communicates state rather than
         // occupying a tap target.
         if (c.kind != IOS_JOY)
-        {
-            IosDrawIcon(dl, c, p0, p1, IM_COL32(245, 250, 255, 245));
-        }
+            IosDrawButtonLabel(dl, font, c, p0, p1, fs);
 
         // Live marker for the two analog controls.
         if (c.kind == IOS_STEER)
@@ -3339,13 +3357,11 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
             const float pad_r = 0.48f * std::min(p1.x - p0.x, p1.y - p0.y);
             dl->AddCircleFilled(ImVec2(kx, ky),
                                 pad_r * 0.34f, IM_COL32(88, 177, 255, 225), 24);
-            // The directional pictogram belongs to the movable knob, not to
-            // the static joystick well.  This keeps the icon visually locked
-            // to the control while the finger moves.
-            const ImVec2 icon_half(pad_r * .25f, pad_r * .25f);
-            IosDrawIcon(dl, c, ImVec2(kx - icon_half.x, ky - icon_half.y),
-                        ImVec2(kx + icon_half.x, ky + icon_half.y),
-                        IM_COL32(245, 250, 255, 245));
+            // The free-camera stick is labelled rather than textured too.
+            const char* move_label = "MOVE";
+            const ImVec2 ts = font->CalcTextSizeA(fs * .65f, 1e6f, 0.f, move_label);
+            dl->AddText(font, fs * .65f, ImVec2(cx - ts.x * .5f, cy - ts.y * .5f),
+                        IM_COL32(245, 250, 255, 220), move_label);
         }
     }
 
@@ -4860,6 +4876,24 @@ def patch_ios_free_camera(ror):
     )
     write(path, text)
 
+    # Three large vehicles can enqueue several flexbody/wheel jobs at once.
+    # iOS devices have fewer sustained CPU/GPU resources than the desktop
+    # auto-detection assumes; keep the general-purpose pool bounded on iOS.
+    path = os.path.join(ror, "source", "main", "threadpool", "ThreadPool.h")
+    text = read(path)
+    text = must_replace(
+        text,
+        "        int num_threads = App::app_num_workers->getInt();\n",
+        "        int num_threads = App::app_num_workers->getInt();\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "        // Avoid a memory/CPU spike when several actor visuals are\n"
+        "        // created together on an iPhone.\n"
+        "        num_threads = 2;\n"
+        "#endif\n",
+        "ThreadPool.h: cap iOS worker threads",
+    )
+    write(path, text)
+
     path = os.path.join(ror, "source", "main", "gfx", "camera", "CameraManager.cpp")
     text = read(path)
     text = must_replace(
@@ -6361,6 +6395,14 @@ def patch_cvar_ios_overrides(ror):
         "            App::gfx_sky_mode->setVal((int)0);           // GfxSkyMode::SANDSTORM (no Caelum/SkyX on iOS)\n"
         "            App::gfx_shadow_type->setVal((int)0);        // GfxShadowType::NONE (PSSM programs unsupported)\n"
         "            App::gfx_alt_actor_materials->setVal(true);  // RTSS-safe vehicle materials (Cg 'nicemetal' unsupported)\n"
+        "            // Keep three-vehicle scenes below the iPhone memory/thermal cliff.\n"
+        "            App::app_num_workers->setVal(2);\n"
+        "            App::gfx_texture_filter->setVal((int)1);      // bilinear\n"
+        "            App::gfx_anisotropy->setVal(1);\n"
+        "            App::gfx_envmap_enabled->setVal(false);\n"
+        "            App::gfx_particles_mode->setVal((int)0);\n"
+        "            App::gfx_vegetation_mode->setVal((int)0);\n"
+        "            App::gfx_sight_range->setVal(1800);\n"
         "            RoR_IosStartupTick(\"[RoR|iOS] cvars after RoR.cfg: sky %d->%d, shadow %d->%d, alt_actor_materials %d->%d\",\n"
         "                ios_cfg_sky, App::gfx_sky_mode->getInt(),\n"
         "                ios_cfg_shadow, App::gfx_shadow_type->getInt(),\n"
