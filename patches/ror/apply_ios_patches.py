@@ -3284,7 +3284,10 @@ void IosDrawButtonLabel(ImDrawList* dl, ImFont* font, const IosCtl& c,
     else if (std::strcmp(label, "GAS") == 0) label = "GAS";
     else if (std::strcmp(label, "P") == 0) label = "PARK";
     if (label[0] == '\0') return;
-    const float text_size = std::max(11.f, std::min(fs * .82f, (p1.y - p0.y) * .27f));
+    float text_size = std::min((p1.y - p0.y) * .32f, ImGui::GetIO().DisplaySize.y * .026f);
+    const float label_width = font->CalcTextSizeA(text_size, 1e6f, 0.f, label).x;
+    if (label_width > p1.x - p0.x - 12.f)
+        text_size *= (p1.x - p0.x - 12.f) / label_width;
     const ImVec2 ts = font->CalcTextSizeA(text_size, 1e6f, 0.f, label);
     const ImVec2 text_pos((p0.x + p1.x - ts.x) * .5f, (p0.y + p1.y - ts.y) * .5f);
     // A subtle dark keyline keeps labels crisp over bright terrain and
@@ -3371,7 +3374,6 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         const float control_h = p1.y - p0.y;
         const float control_r = 0.5f * std::min(control_w, control_h);
         const ImU32 fill   = pressed ? IM_COL32(32, 142, 255, 205) : IM_COL32(9, 18, 31, 155);
-        const ImU32 fill_hi = pressed ? IM_COL32(76, 179, 255, 225) : IM_COL32(30, 48, 70, 180);
         const ImU32 border = pressed ? IM_COL32(155, 225, 255, 255) : IM_COL32(220, 236, 255, 175);
         if (c.kind == IOS_JOY || c.kind == IOS_STEER)
         {
@@ -3394,7 +3396,8 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         {
             const float rounding = std::min(18.f, control_r * 0.55f);
             dl->AddRectFilled(p0 + ImVec2(0.f, 2.f), p1 + ImVec2(0.f, 2.f), IM_COL32(0, 0, 0, 100), rounding, ImDrawCornerFlags_All);
-            dl->AddRectFilledMultiColor(p0, p1, fill_hi, fill_hi, fill, fill);
+            // The fill must use the same rounded geometry as the border.
+            dl->AddRectFilled(p0, p1, fill, rounding, ImDrawCornerFlags_All);
             dl->AddRect(p0, p1, border, rounding, ImDrawCornerFlags_All, 1.6f);
             dl->AddLine(ImVec2(p0.x + rounding, p0.y + 1.f), ImVec2(p1.x - rounding, p0.y + 1.f), IM_COL32(255, 255, 255, pressed ? 95 : 45), 1.f);
         }
@@ -3438,15 +3441,15 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
     // Premium compact driving HUD. It starts below the top action strip and
     // disappears while the vehicle panel is open, so it never covers another
     // control.  UNIT switches km/h and mph.
-    if (!s_iosPanel)
+    if (!s_iosPanel && !App::GetGuiManager()->GameMainMenu.IsVisible())
     {
         const float hud_x = 0.5f * W;
-        const float hud_y = 0.145f * H;
-        const float card_w = std::min(380.f, 0.34f * W);
-        const float card_h = 0.105f * H;
+        const float hud_y = (s_iosTopVisible ? 0.145f : 0.040f) * H;
+        const float card_w = 0.34f * W;
+        const float card_h = 0.110f * H;
         const ImVec2 card_min(hud_x - card_w * 0.5f, hud_y);
         const ImVec2 card_max(hud_x + card_w * 0.5f, hud_y + card_h);
-        dl->AddRectFilled(card_min, card_max, IM_COL32(5, 12, 22, 214), 12.f, ImDrawCornerFlags_All);
+        dl->AddRectFilled(card_min, card_max, IM_COL32(5, 12, 22, 245), 12.f, ImDrawCornerFlags_All);
         dl->AddRect(card_min, card_max, IM_COL32(150, 205, 245, 155), 12.f, ImDrawCornerFlags_All, 1.5f);
         if (IosInTruck())
         {
@@ -3462,32 +3465,37 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
             const float rpm = actor->ar_engine ? actor->ar_engine->getRPM() : 0.f;
             const float rpm_max = actor->ar_engine ? std::max(1000.f, actor->ar_engine->getShiftUpRPM()) : 1000.f;
             const float rpm_fraction = std::max(0.f, std::min(1.f, rpm / rpm_max));
-            const float x0 = card_min.x + 12.f;
-            const float x1 = card_max.x - 12.f;
+            const float pad = card_h * .12f;
+            const float x0 = card_min.x + pad;
+            const float x1 = card_max.x - pad;
+            const float small = card_h * .20f;
+            const float large = card_h * .46f;
+            // Separate columns and rows: values cannot collide with labels.
+            auto centered = [&](float cx, float y, float size, const char* label, ImU32 color) {
+                const float width = font->CalcTextSizeA(size, 1e6f, 0.f, label).x;
+                dl->AddText(font, size, ImVec2(cx - width * .5f, y), color, label);
+            };
+            const float speed_x = card_min.x + card_w * .20f;
+            const float gear_x = card_min.x + card_w * .48f;
+            const float rpm_x = card_min.x + card_w * .77f;
             char speed_text[32] = {};
             std::snprintf(speed_text, sizeof(speed_text), "%.0f", speed);
-            dl->AddText(font, lfs * 1.35f, ImVec2(x0, card_min.y + 7.f), IM_COL32(255, 255, 255, 255), speed_text);
-            const ImVec2 unit_pos(x0 + lfs * 2.35f, card_min.y + 14.f);
-            dl->AddText(font, lfs * .58f, unit_pos, IM_COL32(145, 205, 245, 245), unit);
-            const float gear_x = x0 + card_w * .36f;
-            dl->AddText(font, lfs * .52f, ImVec2(gear_x, card_min.y + 7.f), IM_COL32(160, 185, 210, 230), "GEAR");
-            dl->AddText(font, lfs * 1.18f, ImVec2(gear_x, card_min.y + 17.f), IM_COL32(255, 207, 104, 255), gear_text);
+            centered(speed_x, card_min.y + pad, large, speed_text, IM_COL32(255,255,255,255));
+            centered(speed_x, card_min.y + card_h * .66f, small, unit, IM_COL32(180,215,240,255));
+            centered(gear_x, card_min.y + pad, large, gear_text, IM_COL32(255,215,125,255));
+            centered(gear_x, card_min.y + card_h * .66f, small,
+                actor->ar_parking_brake ? "PARK" : "GEAR", IM_COL32(230,215,180,255));
             char rpm_text[32] = {};
-            std::snprintf(rpm_text, sizeof(rpm_text), "%04.0f RPM", rpm);
-            const ImVec2 rpm_size = font->CalcTextSizeA(lfs * .62f, 1e6f, 0.f, rpm_text);
-            dl->AddText(font, lfs * .62f, ImVec2(x1 - rpm_size.x, card_min.y + 8.f), IM_COL32(205, 225, 242, 240), rpm_text);
-            const float bx = gear_x + card_w * .18f;
-            const float bw = std::max(42.f, x1 - bx);
-            const float by = card_min.y + card_h - 16.f;
-            const float bh = std::max(6.f, lfs * .32f);
+            std::snprintf(rpm_text, sizeof(rpm_text), "%.0f", rpm);
+            centered(rpm_x, card_min.y + pad, large * .82f, rpm_text, IM_COL32(240,247,255,255));
+            centered(rpm_x, card_min.y + card_h * .55f, small, "RPM", IM_COL32(180,215,240,255));
+            const float bx = card_min.x + card_w * .62f;
+            const float bw = x1 - bx;
+            const float by = card_min.y + card_h * .84f;
+            const float bh = card_h * .055f;
             dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bw, by + bh), IM_COL32(32, 45, 62, 240), 3.f);
             dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bw * rpm_fraction, by + bh),
                               rpm_fraction > .88f ? IM_COL32(238, 82, 76, 245) : IM_COL32(76, 190, 245, 245), 3.f);
-            dl->AddText(font, lfs * .50f, ImVec2(bx, by - lfs * .52f), IM_COL32(155, 180, 205, 230), "RPM");
-            const char* park = actor->ar_parking_brake ? "PARK" : "READY";
-            const ImVec2 park_size = font->CalcTextSizeA(lfs * .50f, 1e6f, 0.f, park);
-            dl->AddText(font, lfs * .50f, ImVec2(x1 - park_size.x, by - lfs * .52f),
-                        actor->ar_parking_brake ? IM_COL32(255, 196, 80, 245) : IM_COL32(145, 180, 200, 220), park);
         }
         else
         {
@@ -5675,20 +5683,29 @@ def patch_ogreimgui_overlay(ror):
         "}\n",
         "    ImFontConfig cfg;\n"
         "    strncpy(cfg.Name, name.c_str(), 40);\n"
-        "    // Apple/iOS port: rasterize the font at the desktop size - 1.0x.  The\n"
-        "    // earlier 1.5x/2x scale made the text too big on the device; ImGui\n"
-        "    // cannot scale an already-rasterized glyph, so the atlas has to be built\n"
-        "    // at the final size.  GUIManager::SetupImGui scales the widget metrics\n"
-        "    // with the same factor (style.ScaleAllSizes), so every panel keeps the\n"
-        "    // proportions its upstream design used.\n"
+        "    // Higher-resolution glyphs, with inverse UI scale to preserve layout.\n"
         "    float font_size = (float)font->getTrueTypeSize();\n"
         "#ifdef ROR_PLATFORM_IOS\n"
-        "    font_size *= 1.0f;\n"
+        "    font_size *= 2.0f;\n"
+        "    io.FontGlobalScale = 0.5f;\n"
+        "    cfg.OversampleH = 3;\n"
+        "    cfg.OversampleV = 2;\n"
         "#endif\n"
         "    return io.Fonts->AddFontFromMemoryTTF(ttfchunk.getPtr(), (int)ttfchunk.size(), font_size, &cfg,\n"
         "                                          cprangePtr);\n"
         "}\n",
         "OgreImGuiOverlay.cpp addFont iOS size",
+    )
+
+    text = must_replace(
+        text,
+        "    mTexUnit->setTextureFiltering(TFO_NONE);\n",
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    mTexUnit->setTextureFiltering(TFO_BILINEAR);\n"
+        "#else\n"
+        "    mTexUnit->setTextureFiltering(TFO_NONE);\n"
+        "#endif\n",
+        "OgreImGuiOverlay.cpp: smooth scaled iOS glyphs",
     )
 
     write(path, text)
