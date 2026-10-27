@@ -2671,7 +2671,9 @@ IOS_TOUCH_CONTROLS_HELPERS = r"""#ifdef ROR_PLATFORM_IOS
 #include <cstdio>
 #include "GUIUtils.h"
 #include "Actor.h"
+#include "gameplay/Character.h"
 #include "Engine.h"
+#include "CameraManager.h"
 // App::GetGameContext()->GetPlayerActor() needs the complete GameContext type;
 // nothing else in this translation unit pulls this header in.
 #include "GameContext.h"
@@ -2703,7 +2705,7 @@ bool s_iosTopVisible = true;
 // sequential pair (EV_TRUCK_SHIFT_UP/DOWN) and the automatic pair
 // (EV_TRUCK_AUTOSHIFT_UP/DOWN) - because Engine.cpp reads only the pair
 // matching the current gearbox mode, and either mode may be active.
-enum IosCtlKind { IOS_STEER, IOS_JOY, IOS_HELD, IOS_TOGGLE, IOS_PANEL, IOS_GUP, IOS_GDN, IOS_REPO, IOS_MENU, IOS_SPAWN, IOS_TAB0, IOS_TAB1, IOS_TAB2, IOS_HUD, IOS_TOP };
+enum IosCtlKind { IOS_STEER, IOS_JOY, IOS_HELD, IOS_TOGGLE, IOS_ENTER, IOS_UNIT, IOS_PANEL, IOS_GUP, IOS_GDN, IOS_REPO, IOS_MENU, IOS_SPAWN, IOS_TAB0, IOS_TAB1, IOS_TAB2, IOS_HUD, IOS_TOP };
 
 struct IosCtl {
     RoR::events ev;      // the event this control drives (STEER/JOY drive several)
@@ -2770,7 +2772,7 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
         out.push_back({RoR::EV_TRUCK_PARKING_BRAKE,        IOS_TOGGLE, ux + 0.f * uw, uy, uw, uh, "P"});
         out.push_back({RoR::EV_TRUCK_TOGGLE_CONTACT,       IOS_TOGGLE, ux + 1.f * uw, uy, uw, uh, "IGN"});
         out.push_back({RoR::EV_COMMON_RESET_TRUCK,         IOS_TOGGLE, ux + 2.f * uw, uy, uw, uh, "R"});
-        out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_TOGGLE, ux + 3.f * uw, uy, uw, uh, "EXIT"});
+        out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_ENTER, ux + 3.f * uw, uy, uw, uh, "EXIT"});
         out.push_back({RoR::EV_TRUCK_STARTER,              IOS_HELD,   ux + 4.f * uw, uy, uw, uh, "STRT"});
         // Turn signals and hazard flasher - the left-thumb zone above the bar.
         const float bx = 0.030f, bw = 0.115f, by = 0.405f, bh = 0.120f;
@@ -2786,6 +2788,7 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
             out.push_back({RoR::EV_COMMON_GET_NEW_VEHICLE, IOS_SPAWN, 0.120f, 0.040f, 0.085f, 0.090f, "SPAWN"});
             out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_REPO, 0.215f, 0.040f, 0.085f, 0.090f, "REPO"});
             out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_HUD, 0.310f, 0.040f, 0.085f, 0.090f, "HUD"});
+            out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_UNIT, 0.405f, 0.040f, 0.085f, 0.090f, "UNIT"});
             out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_PANEL, 0.890f, 0.040f, 0.085f, 0.090f, "VEH"});
         }
         out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_TOP, 0.795f, 0.040f, 0.085f, 0.090f, "TOP"});
@@ -2822,7 +2825,7 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
         // Free-camera altitude controls under the right thumb.
         out.push_back({RoR::EV_CAMERA_UP,                IOS_HELD,   0.835f, 0.510f, 0.125f, 0.145f, "UP"});
         out.push_back({RoR::EV_CAMERA_DOWN,              IOS_HELD,   0.835f, 0.680f, 0.125f, 0.145f, "DOWN"});
-        out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_TOGGLE, 0.835f, 0.850f, 0.125f, 0.120f, "ENTER"});
+        out.push_back({RoR::EV_COMMON_ENTER_OR_EXIT_TRUCK, IOS_ENTER, 0.835f, 0.850f, 0.125f, 0.120f, "ENTER"});
         // The same top strip stays present in free camera, including spawn.
         if (s_iosTopVisible)
         {
@@ -2898,6 +2901,53 @@ void IosPulseEvent(RoR::events ev)
     s_iosPulses.push_back({ev, 0.18f});
 }
 
+// Seat directly from the touch action instead of relying on the desktop
+// key-bounce path.  That path intentionally debounces for 0.5 s and, after
+// leaving a vehicle while the free camera is active, could miss the next tap.
+// Resolving the nearest driveable actor here also works for vehicles without a
+// cinecam and remains stable when switching between several spawned actors.
+void IosSeatNearestVehicle()
+{
+    RoR::GameContext* game = App::GetGameContext();
+    if (game->GetPlayerActor() != nullptr)
+    {
+        RoR::ActorPtr current = game->GetPlayerActor();
+        if (current->ar_num_nodes > 0 && current->ar_nodes[0].Velocity.squaredLength() >= 1.0f &&
+            current->ar_state != RoR::ActorState::NETWORKED_OK &&
+            current->ar_state != RoR::ActorState::NETWORKED_HIDDEN &&
+            current->ar_driveable != RoR::AI)
+            return;
+        game->PushMessage(RoR::Message(RoR::MSG_SIM_SEAT_PLAYER_REQUESTED,
+            static_cast<void*>(new RoR::ActorPtr())));
+        return;
+    }
+
+    RoR::Character* character = game->GetPlayerCharacter();
+    if (!character)
+        return;
+    Ogre::Vector3 player_pos = character->getPosition();
+    if (App::GetCameraManager() && App::GetCameraManager()->GetCameraNode())
+        player_pos = App::GetCameraManager()->GetCameraNode()->getPosition();
+    float nearest = 35.f;
+    RoR::ActorPtr selected;
+    for (RoR::ActorPtr const& actor : game->GetActorManager()->GetActors())
+    {
+        if (!actor || !actor->ar_driveable || actor->ar_num_nodes <= 0)
+            continue;
+        const float distance = actor->ar_nodes[0].AbsPosition.distance(player_pos);
+        if (distance < nearest)
+        {
+            nearest = distance;
+            selected = actor;
+        }
+    }
+    if (selected)
+    {
+        game->PushMessage(RoR::Message(RoR::MSG_SIM_SEAT_PLAYER_REQUESTED,
+            static_cast<void*>(new RoR::ActorPtr(selected))));
+    }
+}
+
 // Track one touch event against the control regions.  Returns true when the
 // touch belongs to a control and must NOT go on to the mouse/ImGui/camera path.
 bool IosControlsHandleTouch(int action, float x, float y, int id)
@@ -2931,6 +2981,11 @@ bool IosControlsHandleTouch(int action, float x, float y, int id)
                 s_iosHudVisible = !s_iosHudVisible;
                 return true;
             }
+            if (ctls[i].kind == IOS_UNIT)
+            {
+                App::gfx_speedo_imperial->setVal(!App::gfx_speedo_imperial->getBool());
+                return true;
+            }
             if (ctls[i].kind == IOS_TOP)
             {
                 s_iosTopVisible = !s_iosTopVisible;
@@ -2962,6 +3017,11 @@ bool IosControlsHandleTouch(int action, float x, float y, int id)
                 RoR::Message msg(RoR::MSG_GUI_OPEN_SELECTOR_REQUESTED);
                 msg.payload = reinterpret_cast<void*>(new RoR::LoaderType(RoR::LT_AllBeam));
                 App::GetGameContext()->PushMessage(msg);
+                return true;
+            }
+            if (ctls[i].kind == IOS_ENTER)
+            {
+                IosSeatNearestVehicle();
                 return true;
             }
             if (ctls[i].kind == IOS_TOGGLE)
@@ -3058,7 +3118,7 @@ void IosApplyHeldEvents(float W, float H, const std::vector<IosCtl>& ctls)
         const IosCtl& c = ctls[i];
         // One-shots are handled by pulses; the panel and gear buttons never
         // carry an analog position or a level value.
-        if (c.kind == IOS_TOGGLE || c.kind == IOS_PANEL || c.kind == IOS_HUD || c.kind == IOS_TOP || c.kind == IOS_MENU || c.kind == IOS_SPAWN ||
+        if (c.kind == IOS_TOGGLE || c.kind == IOS_ENTER || c.kind == IOS_UNIT || c.kind == IOS_PANEL || c.kind == IOS_HUD || c.kind == IOS_TOP || c.kind == IOS_MENU || c.kind == IOS_SPAWN ||
             c.kind == IOS_TAB0 || c.kind == IOS_TAB1 || c.kind == IOS_TAB2 ||
             c.kind == IOS_GUP    || c.kind == IOS_GDN) continue;
 
@@ -3289,7 +3349,7 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         {
             pressed = s_iosTopVisible;
         }
-        else if (c.kind == IOS_TOGGLE || c.kind == IOS_GUP || c.kind == IOS_GDN || c.kind == IOS_SPAWN)
+        else if (c.kind == IOS_TOGGLE || c.kind == IOS_ENTER || c.kind == IOS_UNIT || c.kind == IOS_GUP || c.kind == IOS_GDN || c.kind == IOS_SPAWN)
         {
             for (size_t p = 0; p < s_iosPulses.size(); ++p)
                 if (s_iosPulses[p].ev == c.ev) { pressed = true; break; }
@@ -3325,7 +3385,7 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
                 dl->AddLine(ImVec2(center.x, center.y - pad_r * 0.72f), ImVec2(center.x, center.y + pad_r * 0.72f), IM_COL32(230, 242, 255, 40), 1.f);
             }
         }
-        else if (c.kind == IOS_HELD || c.kind == IOS_TOGGLE || c.kind == IOS_GUP || c.kind == IOS_GDN || c.kind == IOS_PANEL || c.kind == IOS_MENU || c.kind == IOS_SPAWN || c.kind == IOS_REPO || c.kind == IOS_HUD || c.kind == IOS_TOP || c.kind == IOS_TAB0 || c.kind == IOS_TAB1 || c.kind == IOS_TAB2)
+        else if (c.kind == IOS_HELD || c.kind == IOS_TOGGLE || c.kind == IOS_ENTER || c.kind == IOS_UNIT || c.kind == IOS_GUP || c.kind == IOS_GDN || c.kind == IOS_PANEL || c.kind == IOS_MENU || c.kind == IOS_SPAWN || c.kind == IOS_REPO || c.kind == IOS_HUD || c.kind == IOS_TOP || c.kind == IOS_TAB0 || c.kind == IOS_TAB1 || c.kind == IOS_TAB2)
         {
             const float rounding = std::min(18.f, control_r * 0.55f);
             dl->AddRectFilled(p0, p1, fill, rounding, ImDrawCornerFlags_All);
@@ -3365,32 +3425,55 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         }
     }
 
-    // A compact mobile HUD replaces desktop clutter with one clear mode/speed card.
+    // Compact glanceable driving HUD.  It stays in the upper centre, leaving
+    // the lower corners free for steering and pedals.  Tapping UNIT switches
+    // the displayed speed between km/h and mph.
     const float hud_x = 0.5f * W;
-    const float hud_y = 0.045f * H;
+    const float hud_y = 0.040f * H;
+    const float card_w = std::min(340.f, 0.40f * W);
+    const float card_h = 0.165f * H;
+    const ImVec2 card_min(hud_x - card_w * 0.5f, hud_y);
+    const ImVec2 card_max(hud_x + card_w * 0.5f, hud_y + card_h);
+    dl->AddRectFilled(card_min, card_max, IM_COL32(7, 14, 24, 178), 14.f, ImDrawCornerFlags_All);
+    dl->AddRect(card_min, card_max, IM_COL32(215, 234, 255, 100), 14.f, ImDrawCornerFlags_All, 1.f);
     const char* mode = IosInTruck() ? "DRIVING" : "FREE CAMERA";
-    char value[48] = {};
+    dl->AddText(font, lfs * .75f, ImVec2(card_min.x + 12.f, card_min.y + 6.f), IM_COL32(175, 205, 235, 235), mode);
     if (IosInTruck())
     {
         RoR::ActorPtr actor = App::GetGameContext()->GetPlayerActor();
-        const float speed = actor->getSpeed() * 3.6f;
+        const bool imperial = App::gfx_speedo_imperial->getBool();
+        const float speed = actor->getSpeed() * (imperial ? 2.2369363f : 3.6f);
+        const char* unit = imperial ? "mph" : "km/h";
         const int gear = actor->ar_engine ? actor->ar_engine->getGear() : 0;
         char gear_text[8] = {};
         if (gear < 0) std::snprintf(gear_text, sizeof(gear_text), "R");
         else if (gear == 0) std::snprintf(gear_text, sizeof(gear_text), "N");
         else std::snprintf(gear_text, sizeof(gear_text), "%d", gear);
-        std::snprintf(value, sizeof(value), "%.0f km/h  ·  %s", speed, gear_text);
+        const float rpm = actor->ar_engine ? actor->ar_engine->getRPM() : 0.f;
+        const float throttle = std::max(0.f, std::min(1.f, actor->ar_engine ? actor->ar_engine->getAcc() : 0.f));
+        const float brake = std::max(0.f, std::min(1.f, actor->ar_brake));
+        const float x0 = card_min.x + 12.f;
+        const float x1 = card_max.x - 12.f;
+        char speed_text[48] = {};
+        std::snprintf(speed_text, sizeof(speed_text), "%.0f %s", speed, unit);
+        dl->AddText(font, lfs * 1.18f, ImVec2(x0, card_min.y + 24.f), IM_COL32(255, 255, 255, 245), speed_text);
+        char right_text[32] = {};
+        std::snprintf(right_text, sizeof(right_text), "GEAR %s  %04.0f RPM", gear_text, rpm);
+        const ImVec2 rs = font->CalcTextSizeA(lfs * .68f, 1e6f, 0.f, right_text);
+        dl->AddText(font, lfs * .68f, ImVec2(x1 - rs.x, card_min.y + 29.f), IM_COL32(220, 230, 240, 235), right_text);
+        const float bar_w = (x1 - x0 - 10.f) * .5f;
+        const float bar_h = std::max(7.f, lfs * .42f);
+        auto bar = [&](float bx, float by, float value, ImU32 color, const char* label) {
+            dl->AddText(font, lfs * .52f, ImVec2(bx, by - lfs * .58f), IM_COL32(185, 205, 225, 230), label);
+            dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bar_w, by + bar_h), IM_COL32(40, 52, 68, 220), 3.f);
+            dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bar_w * value, by + bar_h), color, 3.f);
+        };
+        bar(x0, card_min.y + card_h - 30.f, throttle, IM_COL32(68, 205, 125, 240), "GAS");
+        bar(x0 + bar_w + 10.f, card_min.y + card_h - 30.f, brake, IM_COL32(238, 88, 88, 240), "BRAKE");
+        const char* park = actor->ar_parking_brake ? "PARK BRAKE ON" : "PARK BRAKE OFF";
+        const ImVec2 ps = font->CalcTextSizeA(lfs * .56f, 1e6f, 0.f, park);
+        dl->AddText(font, lfs * .56f, ImVec2(x1 - ps.x, card_min.y + card_h - 12.f), actor->ar_parking_brake ? IM_COL32(255, 196, 80, 245) : IM_COL32(160, 180, 200, 220), park);
     }
-    const ImVec2 mode_size = font->CalcTextSizeA(lfs, 1e6f, 0.f, mode);
-    const ImVec2 value_size = font->CalcTextSizeA(lfs, 1e6f, 0.f, value);
-    const float card_w = std::max(mode_size.x, value_size.x) + 28.f;
-    const ImVec2 card_min(hud_x - card_w * 0.5f, hud_y);
-    const ImVec2 card_max(hud_x + card_w * 0.5f, hud_y + 2.f * lfs + 20.f);
-    dl->AddRectFilled(card_min, card_max, IM_COL32(7, 14, 24, 145), 14.f, ImDrawCornerFlags_All);
-    dl->AddRect(card_min, card_max, IM_COL32(215, 234, 255, 85), 14.f, ImDrawCornerFlags_All, 1.f);
-    dl->AddText(font, lfs * 0.86f, ImVec2(hud_x - mode_size.x * 0.5f, card_min.y + 6.f), IM_COL32(175, 205, 235, 235), mode);
-    if (IosInTruck())
-        dl->AddText(font, lfs, ImVec2(hud_x - value_size.x * 0.5f, card_min.y + 7.f + lfs), IM_COL32(255, 255, 255, 245), value);
 }
 
 } // namespace
@@ -4372,6 +4455,22 @@ def patch_gui_manager(ror):
     path = os.path.join(ror, "source", "main", "gui", "GUIManager.cpp")
     text = read(path)
 
+    text = must_replace(
+        text,
+        "void GUIManager::SetMouseCursorVisibility(MouseCursorVisibility visi)\n{\n",
+        "void GUIManager::SetMouseCursorVisibility(MouseCursorVisibility visi)\n{\n"
+        "#ifdef ROR_PLATFORM_IOS\n"
+        "    // A touchscreen has no in-game pointer.  Keep both MyGUI and the\n"
+        "    // Dear ImGui software cursor hidden even when input wakes the GUI.\n"
+        "    (void)visi;\n"
+        "    ImGui::GetIO().MouseDrawCursor = false;\n"
+        "    MyGUI::PointerManager::getInstance().setVisible(false);\n"
+        "    this->SupressCursor(true);\n"
+        "    return;\n"
+        "#endif\n\n",
+        "GUIManager.cpp: permanently hide iOS game cursor",
+    )
+
     # The stock VehicleInfoTPanel is a desktop-sized overlay.  Keep the
     # mobile HUD in charge and expose its visibility through the touch HUD
     # toggle instead of drawing the panel underneath the joystick.
@@ -4834,11 +4933,14 @@ def patch_ios_free_camera(ror):
         '                // anchor and consequently rejected the vehicle after\n'
         '                // the player exited it. Use the actor body position on\n'
         '                // iOS; cinecam remains the desktop behaviour.\n'
-        '                float len = 0.0f;\n'
-        '                if (this->GetPlayerCharacter())\n'
-        '                {\n'
-        '                    len = actor->getPosition().distance(this->GetPlayerCharacter()->getPosition() + Ogre::Vector3(0.0, 2.0, 0.0));\n'
-        '                }\n'
+        '                Ogre::Vector3 enter_pos = this->GetPlayerCharacter()\n'
+        '                    ? this->GetPlayerCharacter()->getPosition()\n'
+        '                    : Ogre::Vector3::ZERO;\n'
+        '                if (App::GetCameraManager() && App::GetCameraManager()->GetCameraNode())\n'
+        '                    enter_pos = App::GetCameraManager()->GetCameraNode()->getPosition();\n'
+        '                float len = actor->getPosition().distance(enter_pos);\n'
+        '                if (actor->ar_num_nodes > 0)\n'
+        '                    len = std::min(len, actor->ar_nodes[0].AbsPosition.distance(enter_pos));\n'
         '#else\n'
         '                if (actor->ar_cinecam_node[0] == NODENUM_INVALID)\n'
         '                {\n'
