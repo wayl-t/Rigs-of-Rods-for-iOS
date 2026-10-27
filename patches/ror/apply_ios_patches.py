@@ -3286,9 +3286,11 @@ void IosDrawButtonLabel(ImDrawList* dl, ImFont* font, const IosCtl& c,
     if (label[0] == '\0') return;
     const float text_size = std::max(11.f, std::min(fs * .82f, (p1.y - p0.y) * .27f));
     const ImVec2 ts = font->CalcTextSizeA(text_size, 1e6f, 0.f, label);
-    dl->AddText(font, text_size,
-        ImVec2((p0.x + p1.x - ts.x) * .5f, (p0.y + p1.y - ts.y) * .5f),
-        IM_COL32(245, 250, 255, 245), label);
+    const ImVec2 text_pos((p0.x + p1.x - ts.x) * .5f, (p0.y + p1.y - ts.y) * .5f);
+    // A subtle dark keyline keeps labels crisp over bright terrain and
+    // remains legible on both Retina and non-Retina render targets.
+    dl->AddText(font, text_size, text_pos + ImVec2(1.0f, 1.0f), IM_COL32(0, 0, 0, 190), label);
+    dl->AddText(font, text_size, text_pos, IM_COL32(248, 252, 255, 250), label);
 }
 
 // The on-screen controls themselves, drawn on the foreground draw list so they
@@ -3311,8 +3313,9 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         IosPanelRect(bx0, by0, bx1, by1);
         const ImVec2 q0(bx0 * W, by0 * H);
         const ImVec2 q1(bx1 * W, by1 * H);
-        dl->AddRectFilled(q0, q1, IM_COL32(8, 10, 14, 190), 14.f, ImDrawCornerFlags_All);
-        dl->AddRect(q0, q1, IM_COL32(255, 255, 255, 70), 14.f, ImDrawCornerFlags_All, 2.f);
+        dl->AddRectFilled(q0 + ImVec2(0.f, 3.f), q1 + ImVec2(0.f, 3.f), IM_COL32(0, 0, 0, 105), 16.f, ImDrawCornerFlags_All);
+        dl->AddRectFilled(q0, q1, IM_COL32(8, 14, 24, 238), 16.f, ImDrawCornerFlags_All);
+        dl->AddRect(q0, q1, IM_COL32(160, 214, 255, 150), 16.f, ImDrawCornerFlags_All, 2.f);
         const char* page_titles[] = {"LIGHTS", "DRIVE", "EXTRAS"};
         const char*  title = page_titles[s_iosPanelPage];
         const float  tfs   = fs * 0.5f;
@@ -3367,8 +3370,9 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         const float control_w = p1.x - p0.x;
         const float control_h = p1.y - p0.y;
         const float control_r = 0.5f * std::min(control_w, control_h);
-        const ImU32 fill   = pressed ? IM_COL32(32, 142, 255, 170) : IM_COL32(9, 18, 31, 115);
-        const ImU32 border = pressed ? IM_COL32(130, 210, 255, 245) : IM_COL32(220, 236, 255, 135);
+        const ImU32 fill   = pressed ? IM_COL32(32, 142, 255, 205) : IM_COL32(9, 18, 31, 155);
+        const ImU32 fill_hi = pressed ? IM_COL32(76, 179, 255, 225) : IM_COL32(30, 48, 70, 180);
+        const ImU32 border = pressed ? IM_COL32(155, 225, 255, 255) : IM_COL32(220, 236, 255, 175);
         if (c.kind == IOS_JOY || c.kind == IOS_STEER)
         {
             ImVec2 center((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
@@ -3376,20 +3380,23 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
                 for (size_t t = 0; t < s_iosCtlTouches.size(); ++t)
                     if (s_iosCtlTouches[t].kind == (int)IOS_JOY) { center = ImVec2(s_iosCtlTouches[t].ox, s_iosCtlTouches[t].oy); break; }
             const float pad_r = (c.kind == IOS_JOY) ? 0.48f * std::min(control_w, control_h) : 0.46f * control_h;
-            dl->AddCircleFilled(center, pad_r, IM_COL32(7, 14, 24, 105), 36);
-            dl->AddCircle(center, pad_r, IM_COL32(230, 242, 255, 135), 36, 2.f);
+            dl->AddCircleFilled(center + ImVec2(0.f, 3.f), pad_r, IM_COL32(0, 0, 0, 95), 48);
+            dl->AddCircleFilled(center, pad_r, IM_COL32(7, 14, 24, 145), 48);
+            dl->AddCircle(center, pad_r, IM_COL32(230, 242, 255, 185), 48, 2.2f);
             if (c.kind == IOS_JOY)
             {
-                dl->AddCircle(center, pad_r * 0.55f, IM_COL32(230, 242, 255, 45), 32, 1.f);
-                dl->AddLine(ImVec2(center.x - pad_r * 0.72f, center.y), ImVec2(center.x + pad_r * 0.72f, center.y), IM_COL32(230, 242, 255, 40), 1.f);
-                dl->AddLine(ImVec2(center.x, center.y - pad_r * 0.72f), ImVec2(center.x, center.y + pad_r * 0.72f), IM_COL32(230, 242, 255, 40), 1.f);
+                dl->AddCircle(center, pad_r * 0.55f, IM_COL32(230, 242, 255, 65), 40, 1.2f);
+                dl->AddLine(ImVec2(center.x - pad_r * 0.72f, center.y), ImVec2(center.x + pad_r * 0.72f, center.y), IM_COL32(230, 242, 255, 55), 1.2f);
+                dl->AddLine(ImVec2(center.x, center.y - pad_r * 0.72f), ImVec2(center.x, center.y + pad_r * 0.72f), IM_COL32(230, 242, 255, 55), 1.2f);
             }
         }
         else if (c.kind == IOS_HELD || c.kind == IOS_TOGGLE || c.kind == IOS_ENTER || c.kind == IOS_UNIT || c.kind == IOS_GUP || c.kind == IOS_GDN || c.kind == IOS_PANEL || c.kind == IOS_MENU || c.kind == IOS_SPAWN || c.kind == IOS_REPO || c.kind == IOS_HUD || c.kind == IOS_TOP || c.kind == IOS_TAB0 || c.kind == IOS_TAB1 || c.kind == IOS_TAB2)
         {
             const float rounding = std::min(18.f, control_r * 0.55f);
-            dl->AddRectFilled(p0, p1, fill, rounding, ImDrawCornerFlags_All);
-            dl->AddRect(p0, p1, border, rounding, ImDrawCornerFlags_All, 1.5f);
+            dl->AddRectFilled(p0 + ImVec2(0.f, 2.f), p1 + ImVec2(0.f, 2.f), IM_COL32(0, 0, 0, 100), rounding, ImDrawCornerFlags_All);
+            dl->AddRectFilledMultiColor(p0, p1, fill_hi, fill_hi, fill, fill);
+            dl->AddRect(p0, p1, border, rounding, ImDrawCornerFlags_All, 1.6f);
+            dl->AddLine(ImVec2(p0.x + rounding, p0.y + 1.f), ImVec2(p1.x - rounding, p0.y + 1.f), IM_COL32(255, 255, 255, pressed ? 95 : 45), 1.f);
         }
 
         // Every direct manipulation button is pictographic. Text remains only
@@ -3415,13 +3422,16 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
             const float kx = cx + s_iosJoyX * 0.13f * H;
             const float ky = cy + s_iosJoyY * 0.13f * H;
             const float pad_r = 0.48f * std::min(p1.x - p0.x, p1.y - p0.y);
-            dl->AddCircleFilled(ImVec2(kx, ky),
-                                pad_r * 0.34f, IM_COL32(88, 177, 255, 225), 24);
+            dl->AddCircleFilled(ImVec2(kx, ky) + ImVec2(0.f, 2.f), pad_r * 0.34f, IM_COL32(0, 0, 0, 100), 32);
+            dl->AddCircleFilled(ImVec2(kx, ky), pad_r * 0.34f, IM_COL32(88, 177, 255, 245), 32);
+            dl->AddCircle(ImVec2(kx, ky), pad_r * 0.34f, IM_COL32(210, 240, 255, 230), 32, 1.5f);
             // The free-camera stick is labelled rather than textured too.
             const char* move_label = "MOVE";
             const ImVec2 ts = font->CalcTextSizeA(fs * .65f, 1e6f, 0.f, move_label);
+            dl->AddText(font, fs * .65f, ImVec2(cx - ts.x * .5f + 1.f, cy - ts.y * .5f + 1.f),
+                        IM_COL32(0, 0, 0, 180), move_label);
             dl->AddText(font, fs * .65f, ImVec2(cx - ts.x * .5f, cy - ts.y * .5f),
-                        IM_COL32(245, 250, 255, 220), move_label);
+                        IM_COL32(245, 250, 255, 235), move_label);
         }
     }
 
