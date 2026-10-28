@@ -894,9 +894,11 @@ jobs:
           as a plain file, nothing to unpack.  An .ipa is a zip whose root
           contains Payload/."
 
+          LATEST_FLAG=
+          if [ "$TAG" = "latest-ipa" ]; then LATEST_FLAG="--latest"; fi
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --title "$TITLE" --notes "$NOTES"
+              --title "$TITLE" --notes "$NOTES" $LATEST_FLAG
           fi
 
           # Drop every asset we are not about to upload.
@@ -947,7 +949,7 @@ jobs:
           NOTES="${NOTES}
           ${CHECK}"
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --title "$TITLE" --notes "$NOTES"
+            --title "$TITLE" --notes "$NOTES" $LATEST_FLAG
 
           echo "----- release contents -----"
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
