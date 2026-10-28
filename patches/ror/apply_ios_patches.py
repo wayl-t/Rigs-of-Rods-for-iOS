@@ -2716,6 +2716,7 @@ def patch_inputengine_header(ror):
 # It is appended before the touch->mouse translation because IosHandleTouch()
 # calls straight into it and C++ needs every helper declared before first use.
 IOS_TOUCH_CONTROLS_HELPERS = r"""#ifdef ROR_PLATFORM_IOS
+
 #include <imgui.h> // drawn with ImGui's foreground draw list
 #include <cstdio>
 #include "GUIUtils.h"
@@ -2748,13 +2749,17 @@ bool s_iosPanel = false;
 int s_iosPanelPage = 0;
 bool s_iosHudVisible = false; // desktop vehicle panel is hidden until requested
 bool s_iosTopVisible = true;
+// The SYS button opens the real desktop top menubar (Simulation, Tuning,
+// Vehicle AI, Vehicles, Saves, Settings, Tools) instead of the old UNIT
+// toggle, which only flipped km/h and mph and looked like a second PARK.
+bool s_iosMenubar = false;
 
 // IOS_PANEL: the VEH button itself - a pure UI toggle, drives no event.
 // IOS_GUP / IOS_GDN: gear buttons that pulse TWO events each - both the
 // sequential pair (EV_TRUCK_SHIFT_UP/DOWN) and the automatic pair
 // (EV_TRUCK_AUTOSHIFT_UP/DOWN) - because Engine.cpp reads only the pair
 // matching the current gearbox mode, and either mode may be active.
-enum IosCtlKind { IOS_STEER, IOS_JOY, IOS_HELD, IOS_TOGGLE, IOS_ENTER, IOS_UNIT, IOS_PANEL, IOS_GUP, IOS_GDN, IOS_REPO, IOS_MENU, IOS_SPAWN, IOS_TAB0, IOS_TAB1, IOS_TAB2, IOS_HUD, IOS_TOP };
+enum IosCtlKind { IOS_STEER, IOS_JOY, IOS_HELD, IOS_TOGGLE, IOS_ENTER, IOS_UNIT, IOS_PANEL, IOS_GUP, IOS_GDN, IOS_REPO, IOS_MENU, IOS_SPAWN, IOS_TAB0, IOS_TAB1, IOS_TAB2, IOS_HUD, IOS_TOP, IOS_UNIT_TOGGLE, IOS_MENUBAR_CLOSE };
 
 struct IosCtl {
     RoR::events ev;      // the event this control drives (STEER/JOY drive several)
@@ -2806,6 +2811,13 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
         out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_MENU, 0.025f, 0.040f, 0.085f, 0.090f, "MENU"});
         return;
     }
+    // The real desktop top menubar is up: its own ImGui windows take the
+    // touches, so the driving layer shrinks to the one button that closes it.
+    if (s_iosMenubar)
+    {
+        out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_MENUBAR_CLOSE, 0.360f, 0.895f, 0.280f, 0.075f, "CLOSE"});
+        return;
+    }
     if (IosInTruck())
     {
         // Steering uses two independent arrow buttons.  They are easier to
@@ -2837,10 +2849,22 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
             out.push_back({RoR::EV_COMMON_GET_NEW_VEHICLE, IOS_SPAWN, 0.120f, 0.040f, 0.085f, 0.090f, "SPAWN"});
             out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_REPO, 0.215f, 0.040f, 0.085f, 0.090f, "REPO"});
             out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_HUD, 0.310f, 0.040f, 0.085f, 0.090f, "HUD"});
-            out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_UNIT, 0.405f, 0.040f, 0.085f, 0.090f, "UNIT"});
+            out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_UNIT, 0.405f, 0.040f, 0.085f, 0.090f, "SYS"});
             out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_PANEL, 0.890f, 0.040f, 0.085f, 0.090f, "VEH"});
         }
         out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_TOP, 0.795f, 0.040f, 0.085f, 0.090f, "TOP"});
+        // KM/H <-> MPH now sits on the speedometer card it changes; the old
+        // UNIT slot opens the desktop top menubar instead.  It hangs off the
+        // card's bottom edge, centred on it and sized for a fingertip.
+        if (!s_iosPanel)
+        {
+            // Card bottom is +0.118; start just below it and stay clear of
+            // the blinker bank, which begins at 0.405.
+            const float unit_w = 0.140f, unit_h = 0.078f;
+            const float unit_y = (s_iosTopVisible ? 0.145f : 0.040f) + 0.126f;
+            out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_UNIT_TOGGLE,
+                           0.5f - unit_w * 0.5f, unit_y, unit_w, unit_h, "UNITS"});
+        }
         // Three pages keep each vehicle control large enough for touch.
         if (s_iosPanel)
         {
@@ -3032,7 +3056,28 @@ bool IosControlsHandleTouch(int action, float x, float y, int id)
             }
             if (ctls[i].kind == IOS_UNIT)
             {
+                // The old UNIT toggle opened nothing but km/h <-> mph. This
+                // slot now opens the real desktop top menubar (Simulation,
+                // Tuning, Vehicle AI, Vehicles, Saves, Settings, Tools), so
+                // every one of those panels is reachable with a finger.
+                s_iosMenubar = !s_iosMenubar;
+                s_iosPanel = false;
+                App::GetGuiManager()->TopMenubar.IosSetVisible(s_iosMenubar);
+                // The finger sits where the menubar will appear; drop the
+                // ImGui pointer so it cannot hover-open a title it just
+                // brushed against.
+                ImGui::GetIO().MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
+                return true;
+            }
+            if (ctls[i].kind == IOS_UNIT_TOGGLE)
+            {
                 App::gfx_speedo_imperial->setVal(!App::gfx_speedo_imperial->getBool());
+                return true;
+            }
+            if (ctls[i].kind == IOS_MENUBAR_CLOSE)
+            {
+                s_iosMenubar = false;
+                App::GetGuiManager()->TopMenubar.IosSetVisible(false);
                 return true;
             }
             if (ctls[i].kind == IOS_TOP)
@@ -3167,7 +3212,7 @@ void IosApplyHeldEvents(float W, float H, const std::vector<IosCtl>& ctls)
         const IosCtl& c = ctls[i];
         // One-shots are handled by pulses; the panel and gear buttons never
         // carry an analog position or a level value.
-        if (c.kind == IOS_TOGGLE || c.kind == IOS_ENTER || c.kind == IOS_UNIT || c.kind == IOS_PANEL || c.kind == IOS_HUD || c.kind == IOS_TOP || c.kind == IOS_MENU || c.kind == IOS_SPAWN ||
+        if (c.kind == IOS_TOGGLE || c.kind == IOS_ENTER || c.kind == IOS_UNIT || c.kind == IOS_UNIT_TOGGLE || c.kind == IOS_MENUBAR_CLOSE || c.kind == IOS_PANEL || c.kind == IOS_HUD || c.kind == IOS_TOP || c.kind == IOS_MENU || c.kind == IOS_SPAWN ||
             c.kind == IOS_TAB0 || c.kind == IOS_TAB1 || c.kind == IOS_TAB2 ||
             c.kind == IOS_GUP    || c.kind == IOS_GDN) continue;
 
@@ -3345,6 +3390,14 @@ void IosDrawButtonLabel(ImDrawList* dl, ImFont* font, const IosCtl& c,
     dl->AddText(font, text_size, text_pos, IM_COL32(248, 252, 255, 250), label);
 }
 
+// Round-button kinds.  Written as an exclusion so a new kind added for a
+// tap target renders with the same frame as its neighbours instead of
+// silently falling through to bare text.
+bool IosIsButton(const IosCtl& c)
+{
+    return c.kind != IOS_JOY && c.kind != IOS_STEER;
+}
+
 // The on-screen controls themselves, drawn on the foreground draw list so they
 // stay readable over the 3D scene and the dashboard.
 void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
@@ -3365,15 +3418,15 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         IosPanelRect(bx0, by0, bx1, by1);
         const ImVec2 q0(bx0 * W, by0 * H);
         const ImVec2 q1(bx1 * W, by1 * H);
-        dl->AddRectFilled(q0 + ImVec2(0.f, 3.f), q1 + ImVec2(0.f, 3.f), IM_COL32(0, 0, 0, 105), 16.f, ImDrawCornerFlags_All);
-        dl->AddRectFilled(q0, q1, IM_COL32(8, 14, 24, 238), 16.f, ImDrawCornerFlags_All);
-        dl->AddRect(q0, q1, IM_COL32(160, 214, 255, 150), 16.f, ImDrawCornerFlags_All, 2.f);
+        dl->AddRectFilled(q0 + ImVec2(0.f, 3.f), q1 + ImVec2(0.f, 3.f), IM_COL32(0, 0, 0, 80), 16.f, ImDrawCornerFlags_All);
+        dl->AddRectFilled(q0, q1, IM_COL32(8, 14, 24, 168), 16.f, ImDrawCornerFlags_All);
+        dl->AddRect(q0, q1, IM_COL32(160, 214, 255, 118), 16.f, ImDrawCornerFlags_All, 2.f);
         const char* page_titles[] = {"LIGHTS", "DRIVE", "EXTRAS"};
         const char*  title = page_titles[s_iosPanelPage];
         const float  tfs   = fs * 0.5f;
         const ImVec2 ts    = font->CalcTextSizeA(tfs, 1e6f, 0.f, title);
         dl->AddText(font, tfs, ImVec2((q0.x + q1.x - ts.x) * 0.5f, q0.y + 2.f),
-                    IM_COL32(200, 215, 235, 235), title);
+                    IM_COL32(200, 215, 235, 210), title);
     }
 
     for (size_t i = 0; i < ctls.size(); ++i)
@@ -3422,8 +3475,10 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         const float control_w = p1.x - p0.x;
         const float control_h = p1.y - p0.y;
         const float control_r = 0.5f * std::min(control_w, control_h);
-        const ImU32 fill   = pressed ? IM_COL32(32, 142, 255, 205) : IM_COL32(9, 18, 31, 155);
-        const ImU32 border = pressed ? IM_COL32(155, 225, 255, 255) : IM_COL32(220, 236, 255, 175);
+        // Translucent glass: the scene stays readable underneath, while the
+        // pressed state still rings the whole control clearly.
+        const ImU32 fill   = pressed ? IM_COL32(32, 142, 255, 172) : IM_COL32(9, 18, 31, 96);
+        const ImU32 border = pressed ? IM_COL32(155, 225, 255, 235) : IM_COL32(220, 236, 255, 120);
         if (c.kind == IOS_JOY || c.kind == IOS_STEER)
         {
             ImVec2 center((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
@@ -3431,24 +3486,24 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
                 for (size_t t = 0; t < s_iosCtlTouches.size(); ++t)
                     if (s_iosCtlTouches[t].kind == (int)IOS_JOY) { center = ImVec2(s_iosCtlTouches[t].ox, s_iosCtlTouches[t].oy); break; }
             const float pad_r = (c.kind == IOS_JOY) ? 0.48f * std::min(control_w, control_h) : 0.46f * control_h;
-            dl->AddCircleFilled(center + ImVec2(0.f, 3.f), pad_r, IM_COL32(0, 0, 0, 95), 48);
-            dl->AddCircleFilled(center, pad_r, IM_COL32(7, 14, 24, 145), 48);
-            dl->AddCircle(center, pad_r, IM_COL32(230, 242, 255, 185), 48, 2.2f);
+            dl->AddCircleFilled(center + ImVec2(0.f, 3.f), pad_r, IM_COL32(0, 0, 0, 70), 48);
+            dl->AddCircleFilled(center, pad_r, IM_COL32(7, 14, 24, 92), 48);
+            dl->AddCircle(center, pad_r, IM_COL32(230, 242, 255, 138), 48, 2.2f);
             if (c.kind == IOS_JOY)
             {
-                dl->AddCircle(center, pad_r * 0.55f, IM_COL32(230, 242, 255, 65), 40, 1.2f);
-                dl->AddLine(ImVec2(center.x - pad_r * 0.72f, center.y), ImVec2(center.x + pad_r * 0.72f, center.y), IM_COL32(230, 242, 255, 55), 1.2f);
-                dl->AddLine(ImVec2(center.x, center.y - pad_r * 0.72f), ImVec2(center.x, center.y + pad_r * 0.72f), IM_COL32(230, 242, 255, 55), 1.2f);
+                dl->AddCircle(center, pad_r * 0.55f, IM_COL32(230, 242, 255, 48), 40, 1.2f);
+                dl->AddLine(ImVec2(center.x - pad_r * 0.72f, center.y), ImVec2(center.x + pad_r * 0.72f, center.y), IM_COL32(230, 242, 255, 42), 1.2f);
+                dl->AddLine(ImVec2(center.x, center.y - pad_r * 0.72f), ImVec2(center.x, center.y + pad_r * 0.72f), IM_COL32(230, 242, 255, 42), 1.2f);
             }
         }
-        else if (c.kind == IOS_HELD || c.kind == IOS_TOGGLE || c.kind == IOS_ENTER || c.kind == IOS_UNIT || c.kind == IOS_GUP || c.kind == IOS_GDN || c.kind == IOS_PANEL || c.kind == IOS_MENU || c.kind == IOS_SPAWN || c.kind == IOS_REPO || c.kind == IOS_HUD || c.kind == IOS_TOP || c.kind == IOS_TAB0 || c.kind == IOS_TAB1 || c.kind == IOS_TAB2)
+        else if (IosIsButton(c)) // every kind that is not one of the two sticks
         {
             const float rounding = std::min(18.f, control_r * 0.55f);
-            dl->AddRectFilled(p0 + ImVec2(0.f, 2.f), p1 + ImVec2(0.f, 2.f), IM_COL32(0, 0, 0, 100), rounding, ImDrawCornerFlags_All);
+            dl->AddRectFilled(p0 + ImVec2(0.f, 2.f), p1 + ImVec2(0.f, 2.f), IM_COL32(0, 0, 0, 62), rounding, ImDrawCornerFlags_All);
             // The fill must use the same rounded geometry as the border.
             dl->AddRectFilled(p0, p1, fill, rounding, ImDrawCornerFlags_All);
             dl->AddRect(p0, p1, border, rounding, ImDrawCornerFlags_All, 1.6f);
-            dl->AddLine(ImVec2(p0.x + rounding, p0.y + 1.f), ImVec2(p1.x - rounding, p0.y + 1.f), IM_COL32(255, 255, 255, pressed ? 95 : 45), 1.f);
+            dl->AddLine(ImVec2(p0.x + rounding, p0.y + 1.f), ImVec2(p1.x - rounding, p0.y + 1.f), IM_COL32(255, 255, 255, pressed ? 78 : 30), 1.f);
         }
 
         // Every direct manipulation button is pictographic. Text remains only
@@ -3488,18 +3543,18 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
     }
 
     // Premium compact driving HUD. It starts below the top action strip and
-    // disappears while the vehicle panel is open, so it never covers another
-    // control.  UNIT switches km/h and mph.
-    if (!s_iosPanel && !App::GetGuiManager()->GameMainMenu.IsVisible())
+    // disappears while the vehicle panel or the SYS menubar is open, so it
+    // never covers another control.  The UNITS chip switches km/h and mph.
+    if (!s_iosPanel && !s_iosMenubar && !App::GetGuiManager()->GameMainMenu.IsVisible())
     {
         const float hud_x = 0.5f * W;
         const float hud_y = (s_iosTopVisible ? 0.145f : 0.040f) * H;
-        const float card_w = 0.34f * W;
-        const float card_h = 0.110f * H;
+        const float card_w = 0.44f * W;
+        const float card_h = 0.118f * H;
         const ImVec2 card_min(hud_x - card_w * 0.5f, hud_y);
         const ImVec2 card_max(hud_x + card_w * 0.5f, hud_y + card_h);
-        dl->AddRectFilled(card_min, card_max, IM_COL32(5, 12, 22, 245), 12.f, ImDrawCornerFlags_All);
-        dl->AddRect(card_min, card_max, IM_COL32(150, 205, 245, 155), 12.f, ImDrawCornerFlags_All, 1.5f);
+        dl->AddRectFilled(card_min, card_max, IM_COL32(5, 12, 22, 196), 12.f, ImDrawCornerFlags_All);
+        dl->AddRect(card_min, card_max, IM_COL32(150, 205, 245, 128), 12.f, ImDrawCornerFlags_All, 1.5f);
         if (IosInTruck())
         {
             RoR::ActorPtr actor = App::GetGameContext()->GetPlayerActor();
@@ -3514,37 +3569,102 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
             const float rpm = actor->ar_engine ? actor->ar_engine->getRPM() : 0.f;
             const float rpm_max = actor->ar_engine ? std::max(1000.f, actor->ar_engine->getShiftUpRPM()) : 1000.f;
             const float rpm_fraction = std::max(0.f, std::min(1.f, rpm / rpm_max));
-            const float pad = card_h * .12f;
-            const float x0 = card_min.x + pad;
-            const float x1 = card_max.x - pad;
-            const float small = card_h * .20f;
-            const float large = card_h * .46f;
-            // Separate columns and rows: values cannot collide with labels.
-            auto centered = [&](float cx, float y, float size, const char* label, ImU32 color) {
-                const float width = font->CalcTextSizeA(size, 1e6f, 0.f, label).x;
-                dl->AddText(font, size, ImVec2(cx - width * .5f, y), color, label);
-            };
-            const float speed_x = card_min.x + card_w * .20f;
-            const float gear_x = card_min.x + card_w * .48f;
-            const float rpm_x = card_min.x + card_w * .77f;
             char speed_text[32] = {};
             std::snprintf(speed_text, sizeof(speed_text), "%.0f", speed);
-            centered(speed_x, card_min.y + pad, large, speed_text, IM_COL32(255,255,255,255));
-            centered(speed_x, card_min.y + card_h * .66f, small, unit, IM_COL32(180,215,240,255));
-            centered(gear_x, card_min.y + pad, large, gear_text, IM_COL32(255,215,125,255));
-            centered(gear_x, card_min.y + card_h * .66f, small,
-                actor->ar_parking_brake ? "PARK" : "GEAR", IM_COL32(230,215,180,255));
             char rpm_text[32] = {};
             std::snprintf(rpm_text, sizeof(rpm_text), "%.0f", rpm);
-            centered(rpm_x, card_min.y + pad, large * .82f, rpm_text, IM_COL32(240,247,255,255));
-            centered(rpm_x, card_min.y + card_h * .55f, small, "RPM", IM_COL32(180,215,240,255));
-            const float bx = card_min.x + card_w * .62f;
-            const float bw = x1 - bx;
-            const float by = card_min.y + card_h * .84f;
-            const float bh = card_h * .055f;
-            dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bw, by + bh), IM_COL32(32, 45, 62, 240), 3.f);
+
+            // Three equal columns. Every string is measured and shrunk to fit
+            // its own cell, so a four digit speed, a long gearbox label or a
+            // wider localized unit can never spill out of the card.
+            const float pad = card_h * .10f;
+            const float cell_w = (card_w - 2.f * pad) / 3.f;
+            auto fitted = [&](float size, const char* text, float max_w) {
+                const float w = font->CalcTextSizeA(size, 1e6f, 0.f, text).x;
+                return (w > max_w && w > 1.f) ? size * (max_w / w) : size;
+            };
+            auto cell_center = [&](int idx) {
+                return card_min.x + pad + cell_w * (idx + 0.5f);
+            };
+            auto column = [&](int idx, const char* value, const char* label, ImU32 value_col) {
+                const float cx = cell_center(idx);
+                const float avail = cell_w - 6.f;
+                const float vs = fitted(card_h * .40f, value, avail);
+                const float vw = font->CalcTextSizeA(vs, 1e6f, 0.f, value).x;
+                dl->AddText(font, vs, ImVec2(cx - vw * .5f, card_min.y + pad), value_col, value);
+                const float ls = fitted(card_h * .145f, label, avail);
+                const float lw = font->CalcTextSizeA(ls, 1e6f, 0.f, label).x;
+                dl->AddText(font, ls, ImVec2(cx - lw * .5f, card_min.y + card_h * .53f),
+                            IM_COL32(185, 215, 240, 225), label);
+            };
+            column(0, speed_text, unit, IM_COL32(255, 255, 255, 255));
+            column(1, gear_text, actor->ar_parking_brake ? "PARK" : "GEAR", IM_COL32(255, 215, 125, 255));
+            column(2, rpm_text, "RPM", IM_COL32(240, 247, 255, 255));
+
+            // Engine load, kept inside the RPM column so it reads as that
+            // value's scale rather than a separate gauge.
+            const float bw = cell_w - 12.f;
+            const float bx = cell_center(2) - bw * .5f;
+            const float by = card_min.y + card_h * .735f;
+            const float bh = card_h * .042f;
+            dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bw, by + bh), IM_COL32(32, 45, 62, 190), 3.f);
             dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bw * rpm_fraction, by + bh),
-                              rpm_fraction > .88f ? IM_COL32(238, 82, 76, 245) : IM_COL32(76, 190, 245, 245), 3.f);
+                              rpm_fraction > .88f ? IM_COL32(238, 82, 76, 235) : IM_COL32(76, 190, 245, 235), 3.f);
+
+            // Lamp indicators, driven by the same dashboard state the real
+            // light rig uses. Actor::updateDashBoards refreshes the blinker
+            // flags every frame, so these flash with the lamps on the truck.
+            const RoR::DashBoardManagerPtr dash = actor->ar_dashboard;
+            const bool lamp_head = dash != nullptr && dash->_getBool(RoR::DD_HEADLIGHTS);
+            const bool lamp_high = dash != nullptr && dash->_getBool(RoR::DD_HIGHBEAMS);
+            const bool lamp_side = dash != nullptr && dash->_getBool(RoR::DD_SIDELIGHTS);
+            const bool lamp_left = dash != nullptr && dash->_getBool(RoR::DD_SIGNAL_TURNLEFT);
+            const bool lamp_right = dash != nullptr && dash->_getBool(RoR::DD_SIGNAL_TURNRIGHT);
+            const bool lamp_warn = dash != nullptr && dash->_getBool(RoR::DD_SIGNAL_WARNING);
+            auto lamp = [&](float cx, float cy, float r, bool on, ImU32 lit, int glyph) {
+                const ImU32 col = on ? lit : IM_COL32(120, 145, 170, 70);
+                const float t = std::max(1.2f, r * .22f);
+                if (glyph == 0) // headlamp: lens and three beam rays
+                {
+                    dl->AddCircle(ImVec2(cx - r * .35f, cy), r * .58f, col, 18, t);
+                    dl->AddLine(ImVec2(cx + r * .2f, cy - r * .55f), ImVec2(cx + r, cy - r * .95f), col, t);
+                    dl->AddLine(ImVec2(cx + r * .2f, cy), ImVec2(cx + r * 1.05f, cy), col, t);
+                    dl->AddLine(ImVec2(cx + r * .2f, cy + r * .55f), ImVec2(cx + r, cy + r * .95f), col, t);
+                    if (on) dl->AddCircleFilled(ImVec2(cx - r * .35f, cy), r * .22f, col, 10);
+                }
+                else if (glyph == 1 || glyph == 2) // turn arrows
+                {
+                    const float d = (glyph == 1) ? -1.f : 1.f;
+                    dl->AddTriangleFilled(ImVec2(cx + d * r, cy),
+                                          ImVec2(cx + d * r * .1f, cy - r * .7f),
+                                          ImVec2(cx + d * r * .1f, cy + r * .7f), col);
+                    dl->AddRectFilled(ImVec2(cx - d * r * .95f, cy - r * .18f),
+                                      ImVec2(cx + d * r * .2f, cy + r * .18f), col);
+                }
+                else // hazard warning triangle
+                {
+                    dl->AddTriangle(ImVec2(cx, cy - r * .85f),
+                                    ImVec2(cx - r * .9f, cy + r * .7f),
+                                    ImVec2(cx + r * .9f, cy + r * .7f), col, t);
+                    if (on) dl->AddTriangleFilled(ImVec2(cx, cy - r * .5f),
+                                                  ImVec2(cx - r * .45f, cy + r * .38f),
+                                                  ImVec2(cx + r * .45f, cy + r * .38f), col);
+                }
+            };
+            // A hairline separates the lamp strip from the readouts above.
+            dl->AddLine(ImVec2(card_min.x + pad, card_min.y + card_h * .82f),
+                        ImVec2(card_max.x - pad, card_min.y + card_h * .82f),
+                        IM_COL32(150, 190, 225, 34), 1.f);
+            const float lamp_y = card_min.y + card_h * .91f;
+            const float lamp_r = card_h * .072f;
+            const float lamp_slot = (card_w - 2.f * pad) / 4.f;
+            auto lamp_at = [&](int slot) { return card_min.x + pad + lamp_slot * (slot + .5f); };
+            lamp(lamp_at(0), lamp_y, lamp_r, lamp_head || lamp_side || lamp_high,
+                 lamp_high ? IM_COL32(110, 180, 255, 240) : IM_COL32(110, 230, 150, 235), 0);
+            lamp(lamp_at(1), lamp_y, lamp_r, lamp_left, IM_COL32(255, 190, 70, 245), 1);
+            lamp(lamp_at(2), lamp_y, lamp_r, lamp_right, IM_COL32(255, 190, 70, 245), 2);
+            lamp(lamp_at(3), lamp_y, lamp_r, lamp_warn, IM_COL32(255, 120, 70, 245), 3);
+
         }
         else
         {
@@ -4004,7 +4124,9 @@ def patch_inputengine(ror):
         "    //   therefore reported as a right-button drag as well.  The camera is\n"
         "    //   the only consumer of MB_Right here, and ImGui still only ever\n"
         "    //   sees the left button (the listener calls below say MB_Left).\n"
-        "    const BitMask_t rbtnmask = 1 << OIS::MB_Right;\n"
+        "    // While the SYS menubar is open the finger drives ImGui only; the\n"
+        "    // right button would otherwise rotate the camera behind the panel.\n"
+        "    const BitMask_t rbtnmask = s_iosMenubar ? 0 : (1 << OIS::MB_Right);\n"
         "    const OIS::MouseEvent evt(nullptr, mouseState);\n"
         "\n"
         "    // Publish the position before the button, always.\n"
@@ -4601,14 +4723,8 @@ def patch_gui_manager(ror):
         "#endif\n",
         "GUIManager.cpp: never draw desktop VehicleInfoTPanel on iOS",
     )
-    text = must_replace(
-        text,
-        "        this->TopMenubar.Draw(dt);\n",
-        "#ifndef ROR_PLATFORM_IOS\n"
-        "        this->TopMenubar.Draw(dt);\n"
-        "#endif\n",
-        "GUIManager.cpp: hide desktop TopMenubar on iOS",
-    )
+    # The top menubar stays in the draw loop on iOS: TopMenubar::ShouldDisplay()
+    # is patched to obey the touch layer's SYS switch instead of the pointer.
 
     text = must_replace(
         text,
@@ -5160,6 +5276,245 @@ def patch_ios_free_camera(ror):
         '    m_local_character->SetupGfx();\n'
         '    LOG("[RoR|iOS] player avatar hidden; free camera mode active");\n',
         "CharacterFactory.cpp: do not register the broken local avatar for rendering",
+    )
+    write(path, text)
+
+
+def patch_ios_top_menubar(ror):
+    """Make the stock top menubar usable from the phone's SYS button.
+
+    The desktop build opens the bar by pointer hover and closes it again as
+    soon as the pointer leaves, which a touchscreen can never do: the finger
+    that opened a menu is already elsewhere.  Two small hooks make the same
+    panels work under a finger - an explicit "force visible" flag set by the
+    SYS button, and a guard that keeps the synthesized right button (which is
+    how touch drags the camera) from hiding the bar mid-tap.
+
+    Everything else is the stock UI: the same Simulation/Tuning/Vehicle AI/
+    Vehicles/Saves/Settings/Tools panels with their real actions, only laid
+    out with taller rows and bounded to the screen.
+    """
+    path = os.path.join(ror, "source", "main", "gui", "panels", "GUI_TopMenubar.h")
+    text = read(path)
+    text = must_replace(
+        text,
+        '    void Draw(float dt);\n'
+        '    bool ShouldDisplay(ImVec2 window_pos);\n',
+        '    void Draw(float dt);\n'
+        '    bool ShouldDisplay(ImVec2 window_pos);\n'
+        '\n'
+        '#ifdef ROR_PLATFORM_IOS\n'
+        '    // The phone\'s SYS button owns the bar: there is no pointer to\n'
+        '    // keep it on screen, so it stays until the button says otherwise.\n'
+        '    bool ios_force_visible = false;\n'
+        '    void IosSetVisible(bool visible)\n'
+        '    {\n'
+        '        ios_force_visible = visible;\n'
+        '        if (!visible) { CloseIosMenubar(); }\n'
+        '    }\n'
+        '    void CloseIosMenubar()\n'
+        '    {\n'
+        '        m_open_menu = TopMenu::TOPMENU_NONE;\n'
+        '        m_confirm_remove_all = false;\n'
+        '    }\n'
+        '#endif\n',
+        "GUI_TopMenubar.h: iOS forced visibility",
+    )
+    text = must_replace(
+        text,
+        '    ImVec2  m_open_menu_hoverbox_min;\n',
+        '#ifdef ROR_PLATFORM_IOS\n'
+        '    float   m_ios_menu_top = 0.f; //!< Top edge of the open panel, below the tab row.\n'
+        '#endif\n'
+        '    ImVec2  m_open_menu_hoverbox_min;\n',
+        "GUI_TopMenubar.h: iOS panel offset",
+    )
+    write(path, text)
+
+    path = os.path.join(ror, "source", "main", "gui", "panels", "GUI_TopMenubar.cpp")
+    text = read(path)
+
+    # Finger-sized rows, pushed before anything is measured: the tab row's
+    # width is derived from FramePadding/ItemSpacing, so those values have to
+    # be in force while the text is measured and the width sum is computed.
+    # Applied for the whole Draw() so both the tab row and the open panel get
+    # them; popped again at the end and on the early "hidden" return.
+    text = must_replace(
+        text,
+        'void TopMenubar::Draw(float dt)\n{\n',
+        'void TopMenubar::Draw(float dt)\n'
+        '{\n'
+        '#ifdef ROR_PLATFORM_IOS\n'
+        '    // Desktop rows are about 20 px tall - too small for a fingertip.\n'
+        '    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(7.f, 11.f));\n'
+        '    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,  ImVec2(4.f, 7.f));\n'
+        '    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.f, 8.f));\n'
+        '#endif\n',
+        "GUI_TopMenubar.cpp: iOS finger-sized rows",
+    )
+    text = must_replace(
+        text,
+        '    if (!this->ShouldDisplay(window_target_pos))\n'
+        '    {\n'
+        '        m_open_menu = TopMenu::TOPMENU_NONE;\n'
+        '        m_confirm_remove_all = false;\n'
+        '        this->DrawSpecialStateBox(10.f);\n'
+        '        return;\n'
+        '    }\n',
+        '    if (!this->ShouldDisplay(window_target_pos))\n'
+        '    {\n'
+        '        m_open_menu = TopMenu::TOPMENU_NONE;\n'
+        '        m_confirm_remove_all = false;\n'
+        '        this->DrawSpecialStateBox(10.f);\n'
+        '#ifdef ROR_PLATFORM_IOS\n'
+        '        ImGui::PopStyleVar(3); // FramePadding, ItemSpacing, WindowPadding\n'
+        '#endif\n'
+        '        return;\n'
+        '    }\n',
+        "GUI_TopMenubar.cpp: iOS pop style on hidden return",
+    )
+
+    # Seven desktop titles are about 100 points wider than a portrait phone.
+    # Short titles keep the same seven panels and the full desktop font.
+    text = must_replace(
+        text,
+        '    std::string tuning_title =      _LC("TopMenubar", "Tuning");\n',
+        '    std::string tuning_title =      _LC("TopMenubar", "Tuning");\n'
+        '#ifdef ROR_PLATFORM_IOS\n'
+        '    sim_title = "Sim";\n'
+        '    actors_title = fmt::format("Cars ({})", num_playable_actors);\n'
+        '    savegames_title = "Save";\n'
+        '    settings_title = "Setup";\n'
+        '    tools_title = "Tools";\n'
+        '    ai_title = "AI";\n'
+        '    tuning_title = "Tune";\n'
+        '#endif\n',
+        "GUI_TopMenubar.cpp: compact iOS titles",
+    )
+
+    # The tab-row width is measured with the iOS style vars already in force
+    # (they are pushed at the top of Draw()), so the sum matches what gets
+    # drawn; the compact titles above are what make seven tabs fit a phone.
+    # A font scale here would be applied after Begin() and would desync that
+    # measurement from the rendering, so it is deliberately not used.
+
+    # Keep the tab row on screen even at 3x: the centered width of seven tabs
+    # is wider than a phone in some localizations.
+    text = must_replace(
+        text,
+        '    ImVec2 window_target_pos = ImVec2((ImGui::GetIO().DisplaySize.x/2.f) - (menubar_content_width / 2.f), theme.screen_edge_padding.y);\n',
+        '    ImVec2 window_target_pos = ImVec2((ImGui::GetIO().DisplaySize.x/2.f) - (menubar_content_width / 2.f), theme.screen_edge_padding.y);\n'
+        '#ifdef ROR_PLATFORM_IOS\n'
+        '    if (window_target_pos.x < 4.f) { window_target_pos.x = 4.f; }\n'
+        '#endif\n',
+        "GUI_TopMenubar.cpp: keep iOS tabs on screen",
+    )
+
+    # Remember where the tab row ends, so the panel hangs below the real bar
+    # instead of the fixed desktop offset.
+    text = must_replace(
+        text,
+        '    this->DrawSpecialStateBox(window_target_pos.y + topmenu_final_size.y + 10.f);\n',
+        '#ifdef ROR_PLATFORM_IOS\n'
+        '    m_ios_menu_top = window_pos.y + topmenu_final_size.y + 6.f;\n'
+        '#endif\n'
+        '    this->DrawSpecialStateBox(window_target_pos.y + topmenu_final_size.y + 10.f);\n',
+        "GUI_TopMenubar.cpp: iOS panel offset",
+    )
+
+    cursors = ["sim", "actors", "savegames", "settings", "tools", "ai", "tuning"]
+    for name in cursors:
+        enum_name = name.upper()
+        if enum_name == "SAVEGAMES":
+            enum_name = "SAVEGAMES"
+        # Tuning and AI sit one level deeper: they are nested inside an
+        # IsMenuEnabled() test.
+        ind = "        " if name in ("ai", "tuning") else "    "
+        hover = (ind + 'if ((m_open_menu != TopMenu::TOPMENU_%s) && ImGui::IsItemHovered())\n'
+                 + ind + '{\n'
+                 + ind + '    m_open_menu = TopMenu::TOPMENU_%s;\n') % (enum_name, enum_name)
+        click = ('#ifdef ROR_PLATFORM_IOS\n'
+                 + ind + '// A finger has no hover: a tap opens the panel.\n'
+                 + ind + 'if ((m_open_menu != TopMenu::TOPMENU_%s) && ImGui::IsItemClicked())\n'
+                 '#else\n'
+                 + ind + 'if ((m_open_menu != TopMenu::TOPMENU_%s) && ImGui::IsItemHovered())\n'
+                 '#endif\n'
+                 + ind + '{\n'
+                 + ind + '    m_open_menu = TopMenu::TOPMENU_%s;\n') % (enum_name, enum_name, enum_name)
+        text = must_replace(text, hover, click,
+                            "GUI_TopMenubar.cpp: iOS tap opens %s" % name)
+
+        old = '        menu_pos.y = window_pos.y + %s_cursor.y + MENU_Y_OFFSET;\n' % name
+        new = ('#ifdef ROR_PLATFORM_IOS\n'
+               '        menu_pos.y = m_ios_menu_top;\n'
+               '#else\n'
+               '        menu_pos.y = window_pos.y + %s_cursor.y + MENU_Y_OFFSET;\n'
+               '#endif\n') % name
+        text = must_replace(text, old, new, "GUI_TopMenubar.cpp: iOS menu offset (%s)" % name)
+
+        # The desktop anchors each panel under its own tab. On a phone the
+        # right-hand tabs would leave a panel only a thumb wide, so every
+        # panel gets the same left margin and the full screen width.
+        old_x = ('        menu_pos.x = %s_cursor.x + window_pos.x - '
+                 'ImGui::GetStyle().WindowPadding.x;\n') % name
+        new_x = ('#ifdef ROR_PLATFORM_IOS\n'
+                 '        menu_pos.x = 8.f;\n'
+                 '#else\n'
+                 '        menu_pos.x = %s_cursor.x + window_pos.x - '
+                 'ImGui::GetStyle().WindowPadding.x;\n'
+                 '#endif\n') % name
+        text = must_replace(text, old_x, new_x, "GUI_TopMenubar.cpp: iOS menu width (%s)" % name)
+
+    # A long panel (Vehicle AI) must scroll instead of running off the phone,
+    # and a wide one is bounded to the margin-to-margin width.
+    old_pos = '        ImGui::SetNextWindowPos(menu_pos);\n'
+    # The panel stops above the touch layer's CLOSE button (the bottom 10.5%
+    # of the screen, see IosLayout), so the way out is never covered by a
+    # panel - on a phone, where the bar eats ~45 pt, that matters most.
+    # Everything stays inline: all seven cases share one `switch` scope, so a
+    # named local here would be declared twice in the same scope.
+    new_pos = ('        ImGui::SetNextWindowPos(menu_pos);\n'
+               '#ifdef ROR_PLATFORM_IOS\n'
+               '        ImGui::SetNextWindowSizeConstraints(ImVec2(0.f, 0.f),\n'
+               '            ImVec2(ImGui::GetIO().DisplaySize.x - 16.f,\n'
+               '                   std::max(160.f, ImGui::GetIO().DisplaySize.y * 0.895f - menu_pos.y - 8.f)));\n'
+               '#endif\n')
+    if text.count(old_pos) != len(cursors):
+        sys.exit("ERROR: expected %d panel positions in GUI_TopMenubar.cpp, found %d"
+                 % (len(cursors), text.count(old_pos)))
+    text = text.replace(old_pos, new_pos)
+
+    text = must_replace(
+        text,
+        '    ImGui::PopStyleColor(2); // WindowBg, Button\n}',
+        '    ImGui::PopStyleColor(2); // WindowBg, Button\n'
+        '#ifdef ROR_PLATFORM_IOS\n'
+        '    ImGui::PopStyleVar(3);   // FramePadding, ItemSpacing, WindowPadding\n'
+        '#endif\n}',
+        "GUI_TopMenubar.cpp: restore iOS style",
+    )
+
+    # Touch cannot hover the bar and the synthesized right button (how a
+    # finger pans the camera) must not dismiss a panel mid-tap, so on iOS the
+    # SYS switch replaces the whole hover test.
+    text = must_replace(
+        text,
+        'bool TopMenubar::ShouldDisplay(ImVec2 window_pos)\n{\n',
+        'bool TopMenubar::ShouldDisplay(ImVec2 window_pos)\n'
+        '{\n'
+        '#ifdef ROR_PLATFORM_IOS\n'
+        '    (void)window_pos;\n'
+        '    if (!this->ios_force_visible)\n'
+        '    {\n'
+        '        return false;\n'
+        '    }\n'
+        '    // Modal screens still win over the bar.\n'
+        '    GUIManager* gm = App::GetGuiManager();\n'
+        '    return !gm->MainSelector.IsVisible()\n'
+        '        && !gm->LoadingWindow.IsVisible()\n'
+        '        && !gm->MessageBoxDialog.IsVisible();\n'
+        '#endif\n',
+        "GUI_TopMenubar.cpp: iOS visibility override",
     )
     write(path, text)
 
@@ -6876,6 +7231,7 @@ def main():
     # object for game logic, hide its graphics, and use OGRE's native free
     # camera with touch-look and mobile joystick translation instead.
     patch_ios_free_camera(args.ror_dir)
+    patch_ios_top_menubar(args.ror_dir)
     # The stock RoR menus and dialogs assume desktop pointer precision and
     # desktop sizing; give the menu and terrain/vehicle selector mobile panels.
     patch_ios_game_menu(args.ror_dir)
