@@ -829,7 +829,15 @@ jobs:
           # the game.
           TAG="${RELEASE_TAG:-latest-ipa}"
           TITLE="Rigs of Rods for iOS - unsigned IPA (rolling)"
-          NOTES="Unsigned, ad-hoc-signed RoR IPA for arm64 iPhone/iPad, built from ${GITHUB_SHA:0:9}.
+          NOTES="## Скачать и установить
+
+          Полная игра: RoR-ios.ipa (~112 МБ). Облегчённая версия: RoR-ios-lite.ipa (~40 МБ).
+          Установка через SideStore, Sideloadly или ESIGN; бесплатный Apple ID переподписывается раз в 7 дней.
+          Управление, моды и описание порта: https://github.com/wayl-t/Rigs-of-Rods-for-iOS
+
+          ---
+
+          Unsigned, ad-hoc-signed RoR IPA for arm64 iPhone/iPad, built from ${GITHUB_SHA:0:9}.
 
           Files (release-dependent):
 
