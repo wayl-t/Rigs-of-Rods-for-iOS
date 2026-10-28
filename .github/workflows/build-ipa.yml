@@ -46,7 +46,12 @@ jobs:
           # (build-ror-ios.yml owns `latest-ipa`); otherwise whichever run
           # finished last would decide what the download link contains.
           gh release delete pipeline-check --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
+          # --prerelease matters: GitHub picks the most recent non-prerelease as
+          # "Latest", and releases/latest is the link people are told to use.
+          # Without this flag a smoke-test run pushed after the game build would
+          # take that link over and hand visitors the Hello-World app.
           gh release create pipeline-check RoRNative.ipa \
             --repo "${{ github.repository }}" \
+            --prerelease \
             --title "Pipeline smoke test - NOT the game (built $(date -u +%Y-%m-%d))" \
             --notes "This is a Hello-World iOS app.  It exists only to prove the build-and-package pipeline works end to end on a free macOS runner.  **The game itself is in the latest-ipa release.**"
