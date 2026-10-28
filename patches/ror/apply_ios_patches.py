@@ -2759,7 +2759,7 @@ bool s_iosMenubar = false;
 // sequential pair (EV_TRUCK_SHIFT_UP/DOWN) and the automatic pair
 // (EV_TRUCK_AUTOSHIFT_UP/DOWN) - because Engine.cpp reads only the pair
 // matching the current gearbox mode, and either mode may be active.
-enum IosCtlKind { IOS_STEER, IOS_JOY, IOS_HELD, IOS_TOGGLE, IOS_ENTER, IOS_UNIT, IOS_PANEL, IOS_GUP, IOS_GDN, IOS_REPO, IOS_MENU, IOS_SPAWN, IOS_TAB0, IOS_TAB1, IOS_TAB2, IOS_HUD, IOS_TOP, IOS_UNIT_TOGGLE, IOS_MENUBAR_CLOSE };
+enum IosCtlKind { IOS_STEER, IOS_JOY, IOS_HELD, IOS_TOGGLE, IOS_ENTER, IOS_UNIT, IOS_PANEL, IOS_GUP, IOS_GDN, IOS_REPO, IOS_MENU, IOS_SPAWN, IOS_TAB0, IOS_TAB1, IOS_TAB2, IOS_HUD, IOS_TOP, IOS_MENUBAR_CLOSE };
 
 struct IosCtl {
     RoR::events ev;      // the event this control drives (STEER/JOY drive several)
@@ -2853,18 +2853,9 @@ void IosLayout(float W, float H, std::vector<IosCtl>& out)
             out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_PANEL, 0.890f, 0.040f, 0.085f, 0.090f, "VEH"});
         }
         out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_TOP, 0.795f, 0.040f, 0.085f, 0.090f, "TOP"});
-        // KM/H <-> MPH now sits on the speedometer card it changes; the old
-        // UNIT slot opens the desktop top menubar instead.  It hangs off the
-        // card's bottom edge, centred on it and sized for a fingertip.
-        if (!s_iosPanel)
-        {
-            // Card bottom is +0.118; start just below it and stay clear of
-            // the blinker bank, which begins at 0.405.
-            const float unit_w = 0.140f, unit_h = 0.078f;
-            const float unit_y = (s_iosTopVisible ? 0.145f : 0.040f) + 0.126f;
-            out.push_back({RoR::EV_TRUCK_PARKING_BRAKE, IOS_UNIT_TOGGLE,
-                           0.5f - unit_w * 0.5f, unit_y, unit_w, unit_h, "UNITS"});
-        }
+        // The SYS button in the strip above opens the desktop top menubar.
+        // There is deliberately no km/h switch here: the HUD is the one and
+        // only speed readout and it always shows km/h.
         // Three pages keep each vehicle control large enough for touch.
         if (s_iosPanel)
         {
@@ -3069,11 +3060,6 @@ bool IosControlsHandleTouch(int action, float x, float y, int id)
                 ImGui::GetIO().MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
                 return true;
             }
-            if (ctls[i].kind == IOS_UNIT_TOGGLE)
-            {
-                App::gfx_speedo_imperial->setVal(!App::gfx_speedo_imperial->getBool());
-                return true;
-            }
             if (ctls[i].kind == IOS_MENUBAR_CLOSE)
             {
                 s_iosMenubar = false;
@@ -3212,7 +3198,7 @@ void IosApplyHeldEvents(float W, float H, const std::vector<IosCtl>& ctls)
         const IosCtl& c = ctls[i];
         // One-shots are handled by pulses; the panel and gear buttons never
         // carry an analog position or a level value.
-        if (c.kind == IOS_TOGGLE || c.kind == IOS_ENTER || c.kind == IOS_UNIT || c.kind == IOS_UNIT_TOGGLE || c.kind == IOS_MENUBAR_CLOSE || c.kind == IOS_PANEL || c.kind == IOS_HUD || c.kind == IOS_TOP || c.kind == IOS_MENU || c.kind == IOS_SPAWN ||
+        if (c.kind == IOS_TOGGLE || c.kind == IOS_ENTER || c.kind == IOS_UNIT || c.kind == IOS_MENUBAR_CLOSE || c.kind == IOS_PANEL || c.kind == IOS_HUD || c.kind == IOS_TOP || c.kind == IOS_MENU || c.kind == IOS_SPAWN ||
             c.kind == IOS_TAB0 || c.kind == IOS_TAB1 || c.kind == IOS_TAB2 ||
             c.kind == IOS_GUP    || c.kind == IOS_GDN) continue;
 
@@ -3384,10 +3370,14 @@ void IosDrawButtonLabel(ImDrawList* dl, ImFont* font, const IosCtl& c,
         text_size *= (p1.x - p0.x - 12.f) / label_width;
     const ImVec2 ts = font->CalcTextSizeA(text_size, 1e6f, 0.f, label);
     const ImVec2 text_pos((p0.x + p1.x - ts.x) * .5f, (p0.y + p1.y - ts.y) * .5f);
-    // A subtle dark keyline keeps labels crisp over bright terrain and
-    // remains legible on both Retina and non-Retina render targets.
-    dl->AddText(font, text_size, text_pos + ImVec2(1.0f, 1.0f), IM_COL32(0, 0, 0, 190), label);
-    dl->AddText(font, text_size, text_pos, IM_COL32(248, 252, 255, 250), label);
+    // The pane behind the text is light, so the label is dark ink with a
+    // pale halo: crisp on bright terrain, still readable in dark shadows.
+    const ImU32 halo = IM_COL32(255, 255, 255, 150);
+    dl->AddText(font, text_size, text_pos + ImVec2(-1.2f, 0.f), halo, label);
+    dl->AddText(font, text_size, text_pos + ImVec2( 1.2f, 0.f), halo, label);
+    dl->AddText(font, text_size, text_pos + ImVec2(0.f, -1.2f), halo, label);
+    dl->AddText(font, text_size, text_pos + ImVec2(0.f,  1.2f), halo, label);
+    dl->AddText(font, text_size, text_pos, IM_COL32(14, 28, 46, 245), label);
 }
 
 // Round-button kinds.  Written as an exclusion so a new kind added for a
@@ -3419,14 +3409,14 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         const ImVec2 q0(bx0 * W, by0 * H);
         const ImVec2 q1(bx1 * W, by1 * H);
         dl->AddRectFilled(q0 + ImVec2(0.f, 3.f), q1 + ImVec2(0.f, 3.f), IM_COL32(0, 0, 0, 80), 16.f, ImDrawCornerFlags_All);
-        dl->AddRectFilled(q0, q1, IM_COL32(8, 14, 24, 168), 16.f, ImDrawCornerFlags_All);
-        dl->AddRect(q0, q1, IM_COL32(160, 214, 255, 118), 16.f, ImDrawCornerFlags_All, 2.f);
+        dl->AddRectFilled(q0, q1, IM_COL32(18, 30, 46, 148), 16.f, ImDrawCornerFlags_All);
+        dl->AddRect(q0, q1, IM_COL32(255, 255, 255, 130), 16.f, ImDrawCornerFlags_All, 2.f);
         const char* page_titles[] = {"LIGHTS", "DRIVE", "EXTRAS"};
         const char*  title = page_titles[s_iosPanelPage];
         const float  tfs   = fs * 0.5f;
         const ImVec2 ts    = font->CalcTextSizeA(tfs, 1e6f, 0.f, title);
         dl->AddText(font, tfs, ImVec2((q0.x + q1.x - ts.x) * 0.5f, q0.y + 2.f),
-                    IM_COL32(200, 215, 235, 210), title);
+                    IM_COL32(228, 240, 252, 228), title);
     }
 
     for (size_t i = 0; i < ctls.size(); ++i)
@@ -3475,10 +3465,11 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         const float control_w = p1.x - p0.x;
         const float control_h = p1.y - p0.y;
         const float control_r = 0.5f * std::min(control_w, control_h);
-        // Translucent glass: the scene stays readable underneath, while the
-        // pressed state still rings the whole control clearly.
-        const ImU32 fill   = pressed ? IM_COL32(32, 142, 255, 172) : IM_COL32(9, 18, 31, 96);
-        const ImU32 border = pressed ? IM_COL32(155, 225, 255, 235) : IM_COL32(220, 236, 255, 120);
+        // Light frosted glass: a bright, barely-there pane that lets the
+        // scene through, while the pressed state still rings the whole
+        // control clearly.  Dark labels keep it readable on bright terrain.
+        const ImU32 fill   = pressed ? IM_COL32(150, 208, 255, 168) : IM_COL32(238, 246, 255, 112);
+        const ImU32 border = pressed ? IM_COL32(255, 255, 255, 250) : IM_COL32(255, 255, 255, 198);
         if (c.kind == IOS_JOY || c.kind == IOS_STEER)
         {
             ImVec2 center((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
@@ -3486,24 +3477,24 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
                 for (size_t t = 0; t < s_iosCtlTouches.size(); ++t)
                     if (s_iosCtlTouches[t].kind == (int)IOS_JOY) { center = ImVec2(s_iosCtlTouches[t].ox, s_iosCtlTouches[t].oy); break; }
             const float pad_r = (c.kind == IOS_JOY) ? 0.48f * std::min(control_w, control_h) : 0.46f * control_h;
-            dl->AddCircleFilled(center + ImVec2(0.f, 3.f), pad_r, IM_COL32(0, 0, 0, 70), 48);
-            dl->AddCircleFilled(center, pad_r, IM_COL32(7, 14, 24, 92), 48);
-            dl->AddCircle(center, pad_r, IM_COL32(230, 242, 255, 138), 48, 2.2f);
+            dl->AddCircleFilled(center + ImVec2(0.f, 3.f), pad_r, IM_COL32(0, 0, 0, 42), 48);
+            dl->AddCircleFilled(center, pad_r, IM_COL32(236, 245, 255, 56), 48);
+            dl->AddCircle(center, pad_r, IM_COL32(255, 255, 255, 190), 48, 2.2f);
             if (c.kind == IOS_JOY)
             {
-                dl->AddCircle(center, pad_r * 0.55f, IM_COL32(230, 242, 255, 48), 40, 1.2f);
-                dl->AddLine(ImVec2(center.x - pad_r * 0.72f, center.y), ImVec2(center.x + pad_r * 0.72f, center.y), IM_COL32(230, 242, 255, 42), 1.2f);
-                dl->AddLine(ImVec2(center.x, center.y - pad_r * 0.72f), ImVec2(center.x, center.y + pad_r * 0.72f), IM_COL32(230, 242, 255, 42), 1.2f);
+                dl->AddCircle(center, pad_r * 0.55f, IM_COL32(255, 255, 255, 74), 40, 1.2f);
+                dl->AddLine(ImVec2(center.x - pad_r * 0.72f, center.y), ImVec2(center.x + pad_r * 0.72f, center.y), IM_COL32(255, 255, 255, 66), 1.2f);
+                dl->AddLine(ImVec2(center.x, center.y - pad_r * 0.72f), ImVec2(center.x, center.y + pad_r * 0.72f), IM_COL32(255, 255, 255, 66), 1.2f);
             }
         }
         else if (IosIsButton(c)) // every kind that is not one of the two sticks
         {
             const float rounding = std::min(18.f, control_r * 0.55f);
-            dl->AddRectFilled(p0 + ImVec2(0.f, 2.f), p1 + ImVec2(0.f, 2.f), IM_COL32(0, 0, 0, 62), rounding, ImDrawCornerFlags_All);
+            dl->AddRectFilled(p0 + ImVec2(0.f, 2.f), p1 + ImVec2(0.f, 2.f), IM_COL32(0, 0, 0, 34), rounding, ImDrawCornerFlags_All);
             // The fill must use the same rounded geometry as the border.
             dl->AddRectFilled(p0, p1, fill, rounding, ImDrawCornerFlags_All);
             dl->AddRect(p0, p1, border, rounding, ImDrawCornerFlags_All, 1.6f);
-            dl->AddLine(ImVec2(p0.x + rounding, p0.y + 1.f), ImVec2(p1.x - rounding, p0.y + 1.f), IM_COL32(255, 255, 255, pressed ? 78 : 30), 1.f);
+            dl->AddLine(ImVec2(p0.x + rounding, p0.y + 1.f), ImVec2(p1.x - rounding, p0.y + 1.f), IM_COL32(255, 255, 255, pressed ? 150 : 120), 1.f);
         }
 
         // Every direct manipulation button is pictographic. Text remains only
@@ -3536,15 +3527,15 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
             const char* move_label = "MOVE";
             const ImVec2 ts = font->CalcTextSizeA(fs * .65f, 1e6f, 0.f, move_label);
             dl->AddText(font, fs * .65f, ImVec2(cx - ts.x * .5f + 1.f, cy - ts.y * .5f + 1.f),
-                        IM_COL32(0, 0, 0, 180), move_label);
+                        IM_COL32(255, 255, 255, 150), move_label);
             dl->AddText(font, fs * .65f, ImVec2(cx - ts.x * .5f, cy - ts.y * .5f),
-                        IM_COL32(245, 250, 255, 235), move_label);
+                        IM_COL32(16, 30, 48, 235), move_label);
         }
     }
 
     // Premium compact driving HUD. It starts below the top action strip and
     // disappears while the vehicle panel or the SYS menubar is open, so it
-    // never covers another control.  The UNITS chip switches km/h and mph.
+    // never covers another control.  Speed is always metric here.
     if (!s_iosPanel && !s_iosMenubar && !App::GetGuiManager()->GameMainMenu.IsVisible())
     {
         const float hud_x = 0.5f * W;
@@ -3558,9 +3549,8 @@ void IosDrawControls(float W, float H, const std::vector<IosCtl>& ctls)
         if (IosInTruck())
         {
             RoR::ActorPtr actor = App::GetGameContext()->GetPlayerActor();
-            const bool imperial = App::gfx_speedo_imperial->getBool();
-            const float speed = actor->getSpeed() * (imperial ? 2.2369363f : 3.6f);
-            const char* unit = imperial ? "MPH" : "KM/H";
+            const float speed = actor->getSpeed() * 3.6f;
+            const char* unit = "KM/H";
             const int gear = actor->ar_engine ? actor->ar_engine->getGear() : 0;
             char gear_text[8] = {};
             if (gear < 0) std::snprintf(gear_text, sizeof(gear_text), "R");
