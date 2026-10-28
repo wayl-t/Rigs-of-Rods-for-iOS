@@ -9,7 +9,12 @@
 | **RoR-ios.ipa** | Полная игра, около 115 МБ |
 | **RoR-ios-lite.ipa** | Облегчённая версия, около 43 МБ, запускается так же |
 
-Ссылки на файлы указаны ниже в разделе Assets. Этот релиз перезаписывается каждой успешной сборкой CI; конкретные версии помечены тегами rtssNN.
+Прямые ссылки:
+
+- https://github.com/wayl-t/Rigs-of-Rods-for-iOS/releases/download/latest-ipa/RoR-ios.ipa
+- https://github.com/wayl-t/Rigs-of-Rods-for-iOS/releases/download/latest-ipa/RoR-ios-lite.ipa
+
+Этот релиз перезаписывается каждой успешной сборкой CI; конкретные версии помечены тегами rtssNN. Все релизы: https://github.com/wayl-t/Rigs-of-Rods-for-iOS/releases
 
 ## Установка
 

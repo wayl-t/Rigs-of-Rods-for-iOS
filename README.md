@@ -108,6 +108,7 @@
       ror/apply_ios_patches.py  все правки исходников RoR под iOS
       ios/make_app_icon.py      генератор иконки
       verify_ipa.py             проверки готового IPA
+    docs/RELEASE_NOTES.md       текст страницы релиза latest-ipa
     PORT_FINDINGS.md            подробный разбор найденных проблем
 
 ## Дорожная карта
